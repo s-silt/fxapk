@@ -28,6 +28,12 @@ _PLAN = {
 }
 
 
+class _DecodeMetadata:
+    """Legacy decode doubles expose the new optional metadata too."""
+    fields: list[dict] = []
+    transforms: list[dict] = []
+
+
 class _Recorder:
     """替身：记录被请求了哪些 URL，并按预设返回。**不发真包**。"""
 
@@ -92,7 +98,7 @@ def test_fetched_but_empty_is_not_the_same_as_never_fetched(no_network, monkeypa
     ok_url, bad_url = (c["url"] for c in _PLAN["candidates"])
     rec = no_network({ok_url: FetchResult(ok_url, True, b"{}", 200, None)})
 
-    class _Empty:
+    class _Empty(_DecodeMetadata):
         decoded = True
         text = "{}"
         decode_chain = ("json",)
@@ -125,14 +131,14 @@ def test_undecoded_is_not_the_same_as_decoded_and_empty(no_network, monkeypatch)
         plain_url: FetchResult(plain_url, True, b'{"ver":1}', 200, None),
     })
 
-    class _Opaque:      # 解码链没走通：内容未知
+    class _Opaque(_DecodeMetadata):      # 解码链没走通：内容未知
         decoded = False
         text = None
         decode_chain: tuple[str, ...] = ()
         domains: tuple[str, ...] = ()
         ips: tuple[str, ...] = ()
 
-    class _PlainEmpty:  # 解开了，里面确实没有
+    class _PlainEmpty(_DecodeMetadata):  # 解开了，里面确实没有
         decoded = True
         text = '{"ver":1}'
         decode_chain = ("json",)
@@ -164,7 +170,7 @@ def test_decoded_flag_is_always_emitted_for_fetched_outcomes(no_network, monkeyp
     url = _PLAN["candidates"][0]["url"]
     no_network({url: FetchResult(url, True, b"xx", 200, None)})
 
-    class _Opaque:
+    class _Opaque(_DecodeMetadata):
         decoded = False
         text = None
         decode_chain: tuple[str, ...] = ()
@@ -183,7 +189,7 @@ def test_hit_yields_endpoints_marked_as_config_not_runtime(no_network, monkeypat
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
 
-    class _Found:
+    class _Found(_DecodeMetadata):
         decoded = True
         text = ""
         decode_chain = ("base64", "json")
@@ -289,7 +295,7 @@ def test_archive_failure_does_not_lose_the_leads(tmp_path: Path, no_network, mon
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
 
-    class _Found:
+    class _Found(_DecodeMetadata):
         decoded = True
         text = ""
         decode_chain = ()
@@ -311,7 +317,7 @@ def test_archive_writes_the_raw_bytes(tmp_path: Path, no_network, monkeypatch) -
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"raw-blob", 200, None)})
 
-    class _Found:
+    class _Found(_DecodeMetadata):
         decoded = True
         text = ""
         decode_chain = ()
@@ -338,7 +344,7 @@ def test_stored_path_locates_the_archived_bytes(tmp_path: Path, no_network, monk
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"raw-blob", 200, None)})
 
-    class _Found:
+    class _Found(_DecodeMetadata):
         decoded = True
         text = ""
         decode_chain = ()
@@ -396,7 +402,7 @@ def test_cli_merges_endpoints_without_claiming_runtime(
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
 
-    class _Found:
+    class _Found(_DecodeMetadata):
         decoded = True
         text = ""
         decode_chain = ()
@@ -443,7 +449,7 @@ def test_cli_merge_produces_leads_reachable_by_the_real_exports(
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
 
-    class _Found:
+    class _Found(_DecodeMetadata):
         decoded = True
         text = ""
         decode_chain = ("json",)
@@ -493,7 +499,7 @@ def test_cli_merge_quarantines_repack_sample_domains(
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
 
-    class _Found:
+    class _Found(_DecodeMetadata):
         decoded = True
         text = ""
         decode_chain = ("json",)
@@ -555,7 +561,7 @@ def test_cli_merge_feeds_the_control_chain_artifacts_key(
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
 
-    class _Found:
+    class _Found(_DecodeMetadata):
         decoded = True
         text = ""
         decode_chain = ("base64", "json")
@@ -605,7 +611,7 @@ def test_cli_merge_marks_the_run_as_active(tmp_path: Path, no_network, monkeypat
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"x", 200, None)})
 
-    class _Found:
+    class _Found(_DecodeMetadata):
         decoded = True
         text = ""
         decode_chain = ()

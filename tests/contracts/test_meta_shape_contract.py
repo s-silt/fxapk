@@ -102,6 +102,14 @@ def test_producer_registry_matches_reality_both_ways(key: str) -> None:
 # --- 扫描器原语：每种解析形态与每个「该红的方向」都要有自己的测试 -----------
 
 
+def test_addressing_chain_artifact_shape_is_visible_to_scanner():
+    report = _collected("remote_config_artifacts")
+    expected = frozenset({"source_url", "sha256", "size", "decoded", "decode_chain",
+                          "domains", "ips", "stored_path", "fields", "transforms", "material", "gaps"})
+    assert {s.keys for s in report.shapes} == {expected, frozenset({"source_url", "decoded", "error"})}
+    assert {(s.site_file, s.site_function) for s in report.shapes if s.keys == expected} == _PROTECTED["remote_config_artifacts"][0]
+
+
 def _write_repo(tmp_path: Path, prod: dict[str, str]) -> Path:
     (tmp_path / "apkscan").mkdir(parents=True, exist_ok=True)
     for name, src in prod.items():

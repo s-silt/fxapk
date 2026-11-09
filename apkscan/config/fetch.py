@@ -4,14 +4,9 @@
 大小硬帽 + Content-Length 预检。任何失败（无 requests / 连接错 / 非 200 / 超大 / 被 SSRF 防护拒）→
 ``ok=False`` + error，绝不抛。下到的是**未信任的第三方字节**：只存不执行，交给 ``config.decode`` 离线解码。
 
-★SSRF 双层防护（URL 来自对手可控的 APK 字符串）：
-1. **预解析校验** ``_target_is_safe``：连接前把 host 解析成 IP，非公网（``is_global`` 为假，含
-   100.64.0.0/10 共享地址段）及 IPv6 内嵌的非公网 IPv4 即拒；并 ``allow_redirects=False`` 禁 302→内网。
-2. **连接层实连 IP 校验** ``_assert_peer_public``：requests 会**再解析一次**——恶意 DNS 可第一次返公网
-   IP 骗过预检、第二次返内网 IP(DNS-rebinding/TOCTOU)。故在 urllib3 建立 TCP socket 后、TLS 握手与 HTTP
-   请求发出**之前**，校验**实际连接的 peer IP**；命中受限段即掐断，彻底堵死 rebinding。urllib3 内部 API
-   变动时优雅降级为仅预解析校验（不崩、不regress到无防护）。
-   连接始终直连（忽略环境代理），确保本层校验的是目标服务的实连 peer。
+★连接前防护：URL 预检之后，连接守卫再次验证完整解析集合，再把选定的数字地址交给
+共享 pinned_transport；TCP 不再按域名二次解析。保留原 Host/SNI 与 TLS 验证，并核真实 peer。
+守卫缺失或挂载失败即停止下载。禁重定向、环境代理及重试；预算和失败返回形状不变。
 """
 
 from __future__ import annotations
@@ -136,8 +131,8 @@ def _assert_peer_public(sock: Any) -> None:  # noqa: ANN401 — urllib3 socket�
 
 
 # --------------------------------------------------------------------------- #
-# IP 钉定传输：在 urllib3 建立 TCP socket 后、TLS/HTTP 之前校验实连 peer IP。
-# urllib3 内部 API 变动时整体降级（_GUARDED_ADAPTER_CLS=None → 仅预解析校验）。
+# IP 钉定传输：urllib3 建立 TCP 前验证并固定地址，TLS/HTTP 前核对实际 peer。
+# urllib3 内部 API 不可用即关闭下载（不回落普通会话）。
 # --------------------------------------------------------------------------- #
 try:
     from requests.adapters import HTTPAdapter as _RequestsHTTPAdapter
@@ -148,9 +143,19 @@ try:
     from urllib3.poolmanager import PoolManager as _U3PoolManager
 
     class _PeerGuardMixin:
+        host: str
+        port: int
+        timeout: Any
+        source_address: Any
+        socket_options: Any
+
         def _new_conn(self):  # type: ignore[no-untyped-def]
-            sock = super()._new_conn()  # type: ignore[misc]  # 已连接的原始 TCP socket（TLS 尚未包装）
-            _assert_peer_public(sock)
+            from apkscan.core.pinned_transport import connect_pinned, resolve_public
+
+            addresses = resolve_public(self.host, self.port)
+            sock = connect_pinned(addresses[0], self.port, timeout=self.timeout,
+                                  source_address=self.source_address, socket_options=self.socket_options)
+            self.peer_ip = str(sock.getpeername()[0])
             return sock
 
     class _GuardedHTTPConnection(_PeerGuardMixin, _U3HTTPConn):
@@ -180,15 +185,17 @@ try:
             )
 
     _GUARDED_ADAPTER_CLS: type | None = _GuardedAdapter
-except Exception:  # noqa: BLE001 — urllib3 内部结构变动 → 降级到预解析校验（不崩、不 regress 到无防护）
+except Exception:  # noqa: BLE001 — 守卫不可用时关闭下载，不回落普通连接。
     _GUARDED_ADAPTER_CLS = None
 
 
 def _build_guarded_session() -> Any:  # noqa: ANN401 — requests.Session | None（懒加载）
-    """构建挂了 IP 钉定 adapter 的会话（http+https，禁重试）。requests 缺失 → None；挂载失败 → 普通会话。"""
+    """构建 IP 钉定会话；依赖或守卫不可用、挂载失败均返回 None。"""
     try:
         import requests
     except ImportError:
+        return None
+    if _GUARDED_ADAPTER_CLS is None:
         return None
     session = requests.Session()
     session.trust_env = False  # 不读环境代理/.netrc/CA 变量，确保实连 peer 是目标而非代理
@@ -197,8 +204,10 @@ def _build_guarded_session() -> Any:  # noqa: ANN401 — requests.Session | None
             adapter = _GUARDED_ADAPTER_CLS(max_retries=0)
             session.mount("http://", adapter)
             session.mount("https://", adapter)
-        except Exception:  # noqa: BLE001 — 挂载失败仍返回普通会话（预解析校验仍生效）
-            logger.warning("[remote_config] 挂载 IP 钉定 adapter 失败，回落普通会话", exc_info=True)
+        except Exception:  # noqa: BLE001 — fail closed
+            session.close()
+            logger.warning("[remote_config] 挂载 IP 钉定 adapter 失败，停止下载", exc_info=True)
+            return None
     return session
 
 
@@ -211,6 +220,9 @@ class FetchResult:
     raw: bytes | None
     status: int | None
     error: str | None
+    declared_length: int | None = None
+    content_encoding: str | None = None
+    peer_ip: str | None = None
 
 
 def fetch_config_object(
@@ -229,7 +241,7 @@ def fetch_config_object(
         return FetchResult(url, False, None, None, f"目标被 SSRF 防护拒绝：{why}")
     session = _build_guarded_session()  # 第二层：连接层实连 IP 校验（防 DNS-rebinding）
     if session is None:
-        return FetchResult(url, False, None, None, "requests 未安装，无法下载")
+        return FetchResult(url, False, None, None, "requests 或 IP 钉定守卫不可用，停止下载")
 
     # ★墙钟总预算：scalar timeout 只管单次 recv 间隔，慢速滴流可事实挂死；额外设总时限硬顶。
     deadline = time.monotonic() + max(timeout * 3, 30.0)
@@ -238,6 +250,7 @@ def fetch_config_object(
         # ★allow_redirects=False：对手服务器可 302 重定向到内网/元数据（SSRF），禁跟随（只下直连 URL）。
         resp = session.get(url, timeout=timeout, stream=True, allow_redirects=False)
         status = resp.status_code
+        peer_ip = getattr(getattr(getattr(resp, "raw", None), "_connection", None), "peer_ip", None)
         if status != 200:
             return FetchResult(url, False, None, status, f"HTTP {status}")
         declared = resp.headers.get("Content-Length")
@@ -282,7 +295,12 @@ def fetch_config_object(
                 if total > max_bytes:
                     return FetchResult(url, False, None, status, f"响应体超上限 {max_bytes}B，已中止下载")
                 chunks.append(chunk)
-            return FetchResult(url, True, b"".join(chunks), status, None)
+            return FetchResult(
+                url, True, b"".join(chunks), status, None,
+                int(declared) if declared is not None and declared.isdigit() else None,
+                resp.headers.get("Content-Encoding"),
+                peer_ip if isinstance(peer_ip, str) else None,
+            )
         finally:
             done.set()
     except Exception as exc:  # noqa: BLE001 — requests 各类异常（含 rebinding 掐断）一律降级，绝不抛

@@ -29,6 +29,7 @@ import inspect
 import hashlib
 import ipaddress
 import json
+import uuid
 import logging
 import math
 import os
@@ -528,6 +529,8 @@ def run(
         or any(not isinstance(name, str) or name not in _SELECTABLE_HOOKS for name in selected_hooks)
     ):
         return empty_result(STATUS_ERROR, "invalid requested hook profile")
+    if selected_hooks and "config_consumer" in selected_hooks and "config_body" not in selected_hooks:
+        return empty_result(STATUS_ERROR, "config_consumer_requires_config_body")
 
     # 消费 decide_capture：把静态报告的规避信号落成引擎可读决策（绝不抛，坏 report→默认决策）。
     decision = decide_capture(report)
@@ -890,6 +893,8 @@ def _capture(
     # 第二波（最后）：无障碍远控（被劫持目标银行/支付包名清单 + 远控手势/全局动作 + 屏幕录制）。
     # ★ launch-only 抓不到，多数需引导式人工动态——多数情况下此 sink 为空，属预期。
     remote_control_events: list[dict[str, Any]] = []
+    config_body_artifacts: list[dict[str, Any]] = []
+    addressing_events: list[dict[str, Any]] = []
     proxy_set = False
     proxy_attempted = False  # 是否尝试过写设备代理（读回未确认也要在 finally 清理，避免遗留死代理）
     reverse_set = False
@@ -1037,6 +1042,8 @@ def _capture(
                 probe_state=probe_state,
                 enable_tls_unpinning=mitm,
                 **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
+                **({"config_body_sink": config_body_artifacts, "config_body_directory": out_path, "addressing_event_sink": addressing_events}
+                   if selected_hooks and "config_body" in selected_hooks else {}),
             )
             if frida_session is not None:
                 raw_pid = getattr(frida_session, "pid", None)
@@ -1548,6 +1555,8 @@ def _capture(
         sqlcipher_events=_clean(sqlcipher_events),
         clipboard_events=_clean(clipboard_events),
         remote_control_events=_clean(remote_control_events),
+        **({"config_body_artifacts": config_body_artifacts, "addressing_events": addressing_events}
+           if selected_hooks and "config_body" in selected_hooks else {}),
         budget_exceeded=budget_exceeded,
         capture_signals=capture_signals,
         capture_capabilities=capabilities_plan,
@@ -1809,7 +1818,7 @@ def _make_bridge_loader(script: Any, state: dict[str, Any]) -> Any:
 
 
 _SELECTABLE_HOOKS = frozenset({
-    "crypto", "jsbridge", "sensitive_api", "okhttp", "sqlcipher", "clipboard", "accessibility",
+    "crypto", "jsbridge", "sensitive_api", "okhttp", "sqlcipher", "clipboard", "accessibility", "config_body", "config_consumer",
 })
 
 
@@ -1829,13 +1838,17 @@ def _build_injection_source(
         "sqlcipher": cryptohook.FRIDA_SQLCIPHER_HOOK_JS,
         "clipboard": cryptohook.FRIDA_CLIPBOARD_HOOK_JS,
         "accessibility": cryptohook.FRIDA_ACCESSIBILITY_HOOK_JS,
+        "config_body": cryptohook._load_frida_js("config_body_hook.js"),
+        "config_consumer": cryptohook._load_frida_js("config_consumer_hook.js"),
     }
     if selected_hooks is not None and (
         not isinstance(selected_hooks, tuple) or not selected_hooks
         or any(not isinstance(name, str) or name not in hooks for name in selected_hooks)
     ):
         raise ValueError("invalid requested hook profile")
-    selected = set(hooks) if selected_hooks is None else set(selected_hooks)
+    selected = set(hooks) - {"config_body", "config_consumer"} if selected_hooks is None else set(selected_hooks)
+    if "config_consumer" in selected and "config_body" not in selected:
+        raise ValueError("config_consumer_requires_config_body")
     parts = [_FRIDA_JAVA_BRIDGE_LOADER_JS, probe_coverage.load_bootstrap()]
     if enable_tls_unpinning:
         parts.append(FRIDA_UNPINNING_JS)
@@ -1844,10 +1857,26 @@ def _build_injection_source(
             parts.append(hooks[name])
     if allow_behavior_modification is True and antidetect == "java":
         parts.append(cryptohook.FRIDA_ANTIDETECT_JS)
-    for name in ("okhttp", "sqlcipher", "clipboard", "accessibility"):
+    for name in ("okhttp", "sqlcipher", "clipboard", "accessibility", "config_consumer", "config_body"):
         if name in selected:
             parts.append(hooks[name])
     return "\n".join(parts)
+
+
+def _addressing_context(context: dict[str, Any], serial: str | None, *, modified: bool) -> dict[str, Any]:
+    scope = {**context, "capture_ref": "observer:" + uuid.uuid4().hex,
+             "runtime_variant": "modified-runtime" if modified else "original-runtime",
+             "process_start": None, "target_attributed": False}
+    if serial and type(context.get("pid")) is int and context["pid"] > 0:
+        try:
+            from apkscan.dynamic.recovery import _identity
+
+            identity = _identity(serial, context["pid"], context["package"])
+            if str(identity["start_ticks"]).isdigit():
+                scope.update(process_start=str(identity["start_ticks"]), target_attributed=True)
+        except (OSError, ValueError, KeyError, IndexError):
+            logger.debug("addressing process identity unavailable", exc_info=True)
+    return scope
 
 
 def _start_frida_session(
@@ -1868,6 +1897,9 @@ def _start_frida_session(
     probe_state: dict[str, Any] | None = None,
     selected_hooks: tuple[str, ...] | None = None,
     enable_tls_unpinning: bool = True,
+    config_body_sink: list[dict[str, Any]] | None = None,
+    config_body_directory: Path | None = None,
+    addressing_event_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -1949,6 +1981,28 @@ def _start_frida_session(
         except Exception:
             logger.debug("[capture] 无法在会话上寄存 device 句柄（忽略，liveness 退化为仅看 detached）", exc_info=True)
         script = session.create_script(source)
+        if config_body_sink is not None and config_body_directory is not None:
+            from apkscan.dynamic.config_artifacts import ConfigBodyCollector
+
+            scope = _addressing_context(capture_context, serial,
+                                       modified=allow_behavior_modification and antidetect == "java")
+            collector = ConfigBodyCollector(config_body_directory, scope)
+
+            def _config_body_handler(message: Any, data: Any) -> None:
+                collector.on_message(message, data)
+                config_body_sink[:] = collector.records()
+
+            script.on("message", _config_body_handler)
+            if addressing_event_sink is not None:
+                from apkscan.dynamic.addressing_events import AddressingEventCollector
+
+                event_collector = AddressingEventCollector(config_body_directory, scope)
+
+                def _addressing_event_handler(message: Any, data: Any) -> None:
+                    event_collector.on_message(message, data)
+                    addressing_event_sink[:] = event_collector.records()
+
+                script.on("message", _addressing_event_handler)
         # ★Frida 17+：Java bridge 不再内置，运行时会在 load 期间索取。应答器必须**先于
         #   script.load() 注册**——请求就是 load 过程中发出来的，晚一步就赶不上。
         bridge_state: dict[str, Any] = {}
@@ -4200,6 +4254,8 @@ def _write_runtime_report(
     ui_observations: list[dict[str, Any]] | None = None,
     process_observations: list[dict[str, Any]] | None = None,
     capture_context: dict[str, Any] | None = None,
+    config_body_artifacts: list[dict[str, Any]] | None = None,
+    addressing_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -4327,6 +4383,12 @@ def _write_runtime_report(
     }
     if process_observations is not None:
         payload["process_observations"] = list(process_observations)
+    if config_body_artifacts is not None:
+        payload["config_body_artifacts"] = sorted(config_body_artifacts, key=lambda row: str(row.get("event_id", "")))
+    if addressing_events is not None:
+        payload["addressing_events"] = sorted(addressing_events, key=lambda row: json.dumps(row, sort_keys=True))
+    if config_body_artifacts is not None or addressing_events is not None:
+        payload["capture_context"] = context
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"
     try:

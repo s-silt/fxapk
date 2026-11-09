@@ -28,7 +28,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from apkscan.core.atomic import atomic_write_bytes
@@ -76,6 +76,10 @@ class ProbeOutcome:
     #: 落盘位置，按调用方给的 archive_dir 原样表达（CLI：``--archive`` 怎么写就怎么记，
     #: 从运行目录可解析）。未落盘 / 落盘失败 → None。
     stored_path: str | None = None
+    fields: list[dict[str, str]] = field(default_factory=list)
+    transforms: list[dict[str, Any]] = field(default_factory=list)
+    material: dict[str, Any] = field(default_factory=lambda: {"complete": "unknown"})
+    gaps: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"url": self.url, "status": self.status}
@@ -91,6 +95,10 @@ class ProbeOutcome:
         #   按"假值省略"的惯例漏掉它，读 JSON 的人就分不出这两种情形。
         if self.status in ("hit", "undecoded", "no_content"):
             d["decoded"] = self.decoded
+            d["fields"] = sorted(self.fields, key=lambda f: (f["value"], f["path"]))
+            d["transforms"] = list(self.transforms)
+            d["material"] = dict(self.material)
+            d["gaps"] = sorted(self.gaps)
         for key in ("decode_chain", "domains", "ips"):
             val = getattr(self, key)
             if val:
@@ -152,7 +160,10 @@ def archive_blob(archive_dir: "Path | None", sha: str, blob: bytes) -> str | Non
     return target.as_posix()
 
 
-def config_endpoint(value: str, kind: str, ref: str) -> Endpoint:
+def config_endpoint(
+    value: str, kind: str, ref: str, *,
+    provenance: dict[str, Any] | None = None, locator: dict[str, Any] | None = None,
+) -> Endpoint:
     """从远程配置解码回灌的端点。★source 恒为 ``remote-config``（非 runtime*）：不进
     observed-contact、也不 startswith('runtime')，故不误升"确认 C2"/"运行时出现"徽标
     ——它是"配置里出现的域名"线索，不是运行时实测接触。"""
@@ -163,8 +174,48 @@ def config_endpoint(value: str, kind: str, ref: str) -> Endpoint:
             source="remote-config",
             location=f"remote-config:{ref}",
             snippet=f"from remote-config {ref}"[:200],
+            provenance=dict(provenance or {}),
+            locator=dict(locator or {}),
         )],
     )
+
+
+def artifact_material(received: int, declared: int | None, encoding: str | None) -> dict[str, Any]:
+    """HTTP content decoding makes encoded Content-Length incomparable with received bytes."""
+    complete: bool | str = "unknown"
+    if declared is not None and (encoding is None or encoding.strip().lower() == "identity"):
+        complete = received == declared
+    return {"complete": complete, "received_bytes": received, "declared_length": declared}
+
+
+def artifact_gaps(
+    decoded: bool, stored: str | None, fields: list[dict[str, str]],
+    transforms: list[dict[str, Any]], material: dict[str, Any],
+) -> list[str]:
+    gaps = set()
+    if not decoded:
+        gaps.add("undecoded")
+    if not stored:
+        gaps.add("not_archived")
+    if any(f["path"].startswith("$text[") for f in fields):
+        gaps.add("field_path_unavailable")
+    if material.get("complete") is False:
+        gaps.add("material_incomplete")
+    if any(t.get("inputs", {}).get("timestamp", {}).get("source") == "default_not_observed" for t in transforms):
+        gaps.add("recipe_input_defaulted")
+    return sorted(gaps)
+
+
+def endpoint_provenance(sha: str, fields: list[dict[str, str]], value: str) -> dict[str, Any]:
+    return {"artifact_sha256": sha,
+            "field_paths": sorted({f["path"] for f in fields if f["value"] == value})}
+
+
+def artifact_locator(stored: str | None) -> dict[str, str]:
+    # Reports cross platforms. Windows drives/rooted paths must not leak on POSIX either.
+    if not stored or PurePosixPath(stored).is_absolute() or PureWindowsPath(stored).anchor:
+        return {}
+    return {"stored_path": stored}
 
 
 def _candidates_of(plan: Any) -> list[dict[str, Any]]:
@@ -208,6 +259,7 @@ def _fetch_one(
     sha = hashlib.sha256(blob).hexdigest()
     # 抓到即落盘，先于解码——解码失败也不能丢掉原始证据。
     stored = archive_blob(archive_dir, sha, blob)
+    material = artifact_material(len(blob), fetched.declared_length, fetched.content_encoding)
     try:
         result = decode_config_blob(blob, recipe=recipe)
     except Exception as exc:  # noqa: BLE001 — 解码失败仍是「取到了」，别退化成「没取成」
@@ -220,14 +272,18 @@ def _fetch_one(
         # 抛异常与「解码链走不通」是同一种处境：字节在手上，内容不知道。
         return ProbeOutcome(url=url, status="undecoded", host=host, path=path,
                             error=error, sha256=sha, size=len(blob),
-                            stored_path=stored)
+                            stored_path=stored, material=material,
+                            gaps=artifact_gaps(False, stored, [], [], material))
 
     domains = tuple(result.domains)
     ips = tuple(result.ips)
+    locator = artifact_locator(stored)
     for d in domains:
-        sink.append(config_endpoint(d, "domain", url))
+        sink.append(config_endpoint(d, "domain", url,
+                                   provenance=endpoint_provenance(sha, result.fields, d), locator=locator))
     for ip in ips:
-        sink.append(config_endpoint(ip, "ip", url))
+        sink.append(config_endpoint(ip, "ip", url,
+                                   provenance=endpoint_provenance(sha, result.fields, ip), locator=locator))
     # ★三分的分界就在这里，两个判断缺一不可：
     #   · 解码链没走通（decoded=False）→ undecoded：**内容未知**。多半是密文而手头没配方，
     #     绝不能说成"里面没有域名"——那是拿一坨看不懂的字节当否定结论。
@@ -246,6 +302,8 @@ def _fetch_one(
         sha256=sha, size=len(blob), decoded=result.decoded,
         decode_chain=tuple(result.decode_chain),
         domains=domains, ips=ips, stored_path=stored,
+        fields=result.fields, transforms=result.transforms, material=material,
+        gaps=artifact_gaps(result.decoded, stored, result.fields, result.transforms, material),
     )
 
 

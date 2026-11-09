@@ -8,20 +8,19 @@ from __future__ import annotations
 import hashlib
 import http.client
 import ipaddress
-import io
 import json
 import re
 import socket
-import ssl
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from apkscan.config.fetch import _ip_is_blocked
 from apkscan.core.case_identity import normalize_case_id
+from apkscan.core.pinned_transport import PinnedConnection as _PinnedConnection
 
 MAX_BYTES = 2 * 1024 * 1024
 TIMEOUT = 15
@@ -123,63 +122,6 @@ def _resolve(request: dict[str, Any]) -> str:
     return addresses[0]
 
 
-class _DeadlineReader(io.RawIOBase):
-    def __init__(self, raw: Any, sock: socket.socket, deadline: float):
-        self.raw, self.sock, self.deadline = raw, sock, deadline
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, buffer: Any) -> int:
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("Response time limit")
-        self.sock.settimeout(remaining)
-        return self.raw.readinto(buffer)
-
-    def close(self) -> None:
-        self.raw.close()
-        super().close()
-
-
-class _DeadlineSocket:
-    def __init__(self, sock: socket.socket, deadline: float):
-        self.sock, self.deadline = sock, deadline
-
-    def makefile(self, mode: str) -> io.BufferedReader:
-        if mode != "rb":
-            raise ValueError("Only binary response reads are supported")
-        raw = self.sock.makefile("rb", buffering=0)
-        return io.BufferedReader(_DeadlineReader(raw, self.sock, self.deadline))
-
-
-class _PinnedConnection(http.client.HTTPConnection):
-    def __init__(self, request: dict[str, Any], address: str, *, timeout: float | None = None):
-        timeout = TIMEOUT if timeout is None else timeout
-        super().__init__(request["host"], request["port"], timeout=timeout)
-        self.address = address
-        self.tls = request["scheme"] == "https"
-        deadline = time.monotonic() + timeout
-
-        class DeadlineResponse(http.client.HTTPResponse):
-            def __init__(self, sock: Any, *args: Any, **kwargs: Any):
-                super().__init__(cast(Any, _DeadlineSocket(sock, deadline)), *args, **kwargs)
-
-        self.response_class = DeadlineResponse
-
-    def connect(self) -> None:
-        sock = socket.create_connection((self.address, self.port), self.timeout)
-        try:
-            if self.tls:
-                context = ssl.create_default_context()
-                context.minimum_version = ssl.TLSVersion.TLSv1_2
-                self.sock = context.wrap_socket(sock, server_hostname=self.host)
-            else:
-                self.sock = sock
-        except Exception:
-            sock.close()
-            raise
-
 
 def fetch_resource(request: dict[str, Any], directory: Path, label: str) -> dict[str, Any]:
     """One GET, no inherited proxy/auth/cookies, TLS verification enabled, bounded body."""
@@ -194,6 +136,7 @@ def fetch_resource(request: dict[str, Any], directory: Path, label: str) -> dict
         connection.request("GET", request["request_target"], headers={
             "Host": request["host_header"], "Accept-Encoding": "identity", "Connection": "close",
             "User-Agent": "fxapk-origin-check/1"})
+        result["peer_ip"] = getattr(connection, "peer_ip", None)
         response = connection.getresponse()
         result["http_status"] = response.status
         result["response_headers"] = response.getheaders()  # preserve duplicate fields

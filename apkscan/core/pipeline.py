@@ -626,10 +626,16 @@ def _fetch_decode_one(
                            stored)
             stored_path = stored
     result = decode_config_blob(blob, recipe=recipe)
+    material = config_probe_run.artifact_material(len(blob), fetched.declared_length, fetched.content_encoding)
+    locator = config_probe_run.artifact_locator(stored_path)
     for domain in result.domains:
-        sink.append(_config_endpoint(domain, "domain", url))
+        sink.append(_config_endpoint(domain, "domain", url,
+                                     provenance=config_probe_run.endpoint_provenance(sha, result.fields, domain),
+                                     locator=locator))
     for ip in result.ips:
-        sink.append(_config_endpoint(ip, "ip", url))
+        sink.append(_config_endpoint(ip, "ip", url,
+                                     provenance=config_probe_run.endpoint_provenance(sha, result.fields, ip),
+                                     locator=locator))
     return {
         "source_url": url,
         "sha256": sha,
@@ -639,6 +645,10 @@ def _fetch_decode_one(
         "domains": list(result.domains),
         "ips": list(result.ips),
         "stored_path": stored_path,
+        "fields": result.fields,
+        "transforms": result.transforms,
+        "material": material,
+        "gaps": config_probe_run.artifact_gaps(result.decoded, stored_path, result.fields, result.transforms, material),
     }
 
 
@@ -1075,6 +1085,26 @@ def _stage_control_chain(state: _PipelineState) -> None:
     端点 attribution + crypto_recipe）组装，不改 leads / closure / service_operator。无下载解码产物（passive
     /无候选/未授权下载）则省略该键——候选仍在 REMOTE_CONFIG 线索里。在 attribution 之后跑（后端归因已就绪）。
     """
+    from apkscan.config.string_graph import bind_config_consumers
+    from apkscan.core.jadx_sources import read_snapshot_sources
+
+    artifacts = state.meta.get("remote_config_artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        return
+    sources = {}
+    source_gaps: list[str] = []
+    cache_root = getattr(state.ctx, "jadx_cache_root", None)
+    receipt = state.meta.get("jadx_query_sources")
+    index_key = state.meta.get("jadx_index_key")
+    if cache_root and isinstance(receipt, dict) and isinstance(index_key, str):
+        sources, source_gaps = read_snapshot_sources(Path(cache_root), index_key, receipt)
+    bindings = bind_config_consumers(artifacts, sources)
+    for binding in bindings:
+        binding["gaps"] = sorted(set(binding["gaps"]) | set(source_gaps))
+    for endpoint in state.endpoints:
+        own = [b for b in bindings if b["value"] == endpoint.value]
+        if own or "config_consumer_bindings" in endpoint.enrichment:
+            endpoint.enrichment["config_consumer_bindings"] = own
     chains = build_control_chains(
         state.meta.get("remote_config_artifacts"),
         state.meta.get("crypto_recipe"),

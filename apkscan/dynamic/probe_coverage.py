@@ -14,7 +14,10 @@ FAMILIES = (
     "clipboard",
     "accessibility",
 )
+_OPTIONAL_FAMILIES = ("config_body", "config_consumer")
 _HOOKS = {
+    "config_body": frozenset({"body_bytes", "response", "events"}),
+    "config_consumer": frozenset({"body_origin", "string_origin", "json_origin", "field_read", "socket_argument", "events"}),
     "crypto": frozenset(
         {"cipher_init", "cipher_final", "secret_key", "iv_spec", "mac_init", "webview_load_url", "events"}
     ),
@@ -86,7 +89,7 @@ def new_probe_state(
                 "event_completeness": "not_attested",
                 "reasons": [],
             }
-            for family in FAMILIES
+            for family in (*FAMILIES, *(name for name in _OPTIONAL_FAMILIES if name in requested))
         },
         "status_messages_seen": 0,
     }
@@ -108,7 +111,7 @@ def record_status(state: dict[str, Any], payload: Any) -> None:
         elif status == "java_unavailable":
             state["java_bridge_ready"] = False
         return
-    if family not in FAMILIES or status not in {
+    if family not in _HOOKS or family not in state["families"] or status not in {
         *_REGISTRATION_STATUSES,
         "triggered",
         "dropped",
@@ -144,7 +147,7 @@ def record_status(state: dict[str, Any], payload: Any) -> None:
 
 
 def note_sink_drop(state: dict[str, Any], family: str, events: list[dict[str, Any]]) -> None:
-    if family not in FAMILIES:
+    if family not in _HOOKS or family not in state["families"]:
         return
     if any(isinstance(event, dict) and event.get("_capped") for event in events):
         family_state = state["families"][family]
@@ -165,7 +168,7 @@ def finalize_probe_state(
     )
     requested = state.get("requested_hooks", [])
     installed: list[str] = []
-    for family in FAMILIES:
+    for family in state["families"]:
         item = state["families"][family]
         if family not in requested:
             item["registration_status"] = "not_requested"

@@ -337,20 +337,27 @@ def test_guarded_session_ignores_environment_proxy(monkeypatch) -> None:
         default_session.close()
 
 
-def test_peer_guard_mixin_invokes_check_on_new_conn() -> None:
-    """接线证明：mixin 的 _new_conn 会对 super() 建立的 socket 调 peer 校验（内网 peer → 建连即掐断）。"""
+def test_peer_guard_mixin_rejects_before_new_conn(monkeypatch) -> None:
+    """Stage C: rejected resolution must never reach a TCP connection."""
     from apkscan.config import fetch as fetchmod
+    from apkscan.core import pinned_transport
 
     mixin = getattr(fetchmod, "_PeerGuardMixin", None)
     if mixin is None:  # urllib3 API 不匹配、降级路径
         pytest.skip("IP 钉定传输不可用（urllib3 API 变动）")
 
     class _Base:
+        host, port = "api.example.test", 443
         def _new_conn(self):
-            return _FakeSock("169.254.169.254")  # super 返回连到内网的 socket
+            pytest.fail("unguarded connection")
+
+    def reject(*args):
+        raise ValueError("blocked")
+    monkeypatch.setattr(pinned_transport, "resolve_public", reject)
+    monkeypatch.setattr(pinned_transport, "connect_pinned", lambda *a, **k: pytest.fail("connected"))
 
     guarded = type("_G", (mixin, _Base), {})
-    with pytest.raises(fetchmod._BlockedPeerError):
+    with pytest.raises(ValueError):
         guarded()._new_conn()
 
 

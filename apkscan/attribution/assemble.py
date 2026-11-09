@@ -21,6 +21,8 @@ guard), and fully sorted output.
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import math
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -329,6 +331,12 @@ def _bridge_endpoint(endpoint: Any) -> tuple[list[AttributionEvidence], list[dic
                 raw_reference=f"endpoints[{value}].evidences[runtime]",
                 confidence=_CONFIDENCE[("runtime", "network_flow")]))
 
+    # A verified active certificate can exist before passive IP enrichment. Its
+    # resource context remains unknown; it cannot invent a hosting/CDN fact.
+    if kind == "ip" and _as_list(enrichment.get("active_observation")) and not contexts:
+        ip = _ip_entity(value)
+        if ip is not None:
+            contexts.append({"ip": ip.value, "resource_context": {}, "_entry": {}})
     return edges, contexts
 
 
@@ -556,7 +564,93 @@ def _ip_signal_features(
     """
     attribution = InfrastructureAttribution.from_entry(entry)
     observations = NetworkObservations.from_endpoint(ip, endpoint, max_overseas_ts=max_overseas_ts)
-    return RoleFeatureAdapter.from_attribution(ip, attribution, observations)
+    features = RoleFeatureAdapter.from_attribution(ip, attribution, observations)
+    features.extend(_active_certificate_features(ip, endpoint, attribution))
+    features.extend(_active_check_features(ip, endpoint, attribution))
+    return features
+
+
+def _active_check_features(ip: NetworkEntity, endpoint: Any, attribution: InfrastructureAttribution) -> list[RoleFeature]:
+    """Compile independently reproducible observations, never contact or tenant identity."""
+    import base64
+    from apkscan.core.probe_checks import compare_http
+    from apkscan.core.tls_bindings import bound_tls_domains
+
+    if (getattr(endpoint, "value", None) != ip.value or attribution.edge_tier
+            or attribution.hosting_category in _CDN_CATEGORIES or attribution.origin_category in _CDN_CATEGORIES
+            or is_known_intercept_ip(ip.value)):
+        return []
+    features = []
+    for row in _as_list(_as_dict(getattr(endpoint, "enrichment", None)).get("active_observation")):
+        if not isinstance(row, dict) or row.get("peer_ip") != ip.value:
+            continue
+        sha = row.get("observation_sha256")
+        receipt = {k: v for k, v in row.items() if k not in {"observation_sha256", "locator"}}
+        if hashlib.sha256(json.dumps(receipt, sort_keys=True, ensure_ascii=True).encode()).hexdigest() != sha:
+            continue
+        if not any(e.source == "active-probe" and e.scope is EvidenceScope.CASE_EVIDENCE
+                   and e.provenance.get("artifact_sha256") == sha for e in getattr(endpoint, "evidences", [])):
+            continue
+        if (row.get("check") in {"tls", "tls-no-sni", "tls-random-sni"}
+                and row.get("outcome") in {"tls_binding_observed", "certificate_selection_observed"}
+                and row.get("chain_verified") is True):
+            domains = bound_tls_domains(row.get("independent_tls_bindings"), ip.value,
+                                        row.get("certificate_sha256", ""), row.get("observed_at", ""))
+            # Conservative producer thresholds: shared >=2; many >=3 independently listed domains.
+            signals = ([RoleSignal.SHARED_TLS] if len(domains) >= 2 else []) + ([RoleSignal.MANY_SHARED_DOMAINS] if len(domains) >= 3 else [])
+            for signal in signals:
+                features.append(RoleFeature(signal=signal, evidence=_evidence(source="active-probe", etype=signal.value, target=ip,
+                    value=json.dumps({"domains": domains, "material_sha256": row["independent_tls_bindings"]["material_sha256"]}, sort_keys=True),
+                    raw_reference=f"probe-target:{sha}", confidence=0.7)))
+        if row.get("check") != "host-compare":
+            continue
+        requests = row.get("requests")
+        if not isinstance(requests, list) or len(requests) != 2 or not all(isinstance(r, dict) and r.get("peer_ip") == ip.value for r in requests):
+            continue
+        try:
+            if any(not isinstance(r.get("body_base64"), str) or len(r["body_base64"]) > 3 * 1024 * 1024
+                   or hashlib.sha256(base64.b64decode(r["body_base64"], validate=True)).hexdigest() != r.get("body_sha256") for r in requests):
+                continue
+        except (ValueError, TypeError):
+            continue
+        if compare_http("host-compare", requests)["outcome"] != "content_difference_observed":
+            continue
+        features.append(RoleFeature(signal=RoleSignal.CONTENT_DIFFERENCE, evidence=_evidence(
+            source="active-probe", etype=RoleSignal.CONTENT_DIFFERENCE.value, target=ip,
+            value="specified Host comparison responses differ", raw_reference=f"probe-target:{sha}", confidence=0.7)))
+    return sorted(features, key=lambda f: f.evidence.id)
+
+
+def _active_certificate_features(ip: NetworkEntity, endpoint: Any, attribution: InfrastructureAttribution) -> list[RoleFeature]:
+    """License one certificate fact; tool traffic never licenses DIRECT_CONNECTION."""
+    from apkscan.core.certificate_ownership import ownership_is_bound
+
+    if (getattr(endpoint, "value", None) != ip.value or attribution.edge_tier
+            or attribution.hosting_category in _CDN_CATEGORIES or attribution.origin_category in _CDN_CATEGORIES
+            or is_known_intercept_ip(ip.value)):
+        return []
+    features = []
+    rows = _as_list(_as_dict(getattr(endpoint, "enrichment", None)).get("active_observation"))
+    for row in rows:
+        if (not isinstance(row, dict) or row.get("check") != "tls" or row.get("outcome") != "tls_binding_observed"
+                or row.get("peer_ip") != ip.value or row.get("tls_verified") is not True
+                or not isinstance(row.get("certificate_sha256"), str) or not isinstance(row.get("sni"), str)):
+            continue
+        sha = row.get("observation_sha256")
+        receipt = {k: v for k, v in row.items() if k not in {"observation_sha256", "locator"}}
+        if hashlib.sha256(json.dumps(receipt, sort_keys=True, ensure_ascii=True).encode()).hexdigest() != sha:
+            continue
+        if not any(e.source == "active-probe" and e.scope is EvidenceScope.CASE_EVIDENCE
+                   and e.provenance.get("artifact_sha256") == sha for e in getattr(endpoint, "evidences", [])):
+            continue
+        if not ownership_is_bound(row.get("certificate_ownership"), row["certificate_sha256"], row["sni"]):
+            continue
+        features.append(RoleFeature(signal=RoleSignal.BUSINESS_CERTIFICATE, evidence=_evidence(
+            source="active-probe", etype=RoleSignal.BUSINESS_CERTIFICATE.value, target=ip,
+            value=json.dumps({"certificate_sha256": row["certificate_sha256"], "business_host": row["sni"],
+                              "ownership_material_sha256": row["certificate_ownership"]["material_sha256"]}, sort_keys=True),
+            raw_reference=f"probe-target:{sha}", confidence=0.7)))
+    return sorted(features, key=lambda f: f.evidence.id)
 
 
 def _score_ip_roles(ip: NetworkEntity, features: list[RoleFeature]) -> tuple[list[dict[str, Any]], list[Any]]:
