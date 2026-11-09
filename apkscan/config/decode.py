@@ -15,7 +15,8 @@ import json
 import logging
 import re
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from apkscan.core import textutil
 from apkscan.core.appcrypto import CryptoRecipe, decrypt_envelope
@@ -47,6 +48,8 @@ class DecodeResult:
     decode_chain: tuple[str, ...]
     domains: tuple[str, ...]
     ips: tuple[str, ...]
+    fields: list[dict[str, str]] = field(default_factory=list)
+    transforms: list[dict[str, Any]] = field(default_factory=list)
 
 
 def decode_config_blob(
@@ -77,7 +80,12 @@ def decode_config_blob(
                 domains, ips = _extract_endpoints(text)
                 if domains or ips or is_json:
                     step = "json" if is_json else "text"
-                    return DecodeResult(True, text, chain + (step,), domains, ips)
+                    steps = chain + (step,)
+                    return DecodeResult(
+                        True, text, steps, domains, ips,
+                        _field_paths(text, is_json, domains, ips),
+                        _transforms(steps, recipe, timestamp),
+                    )
 
             for peeled, name in _peels(data, text, recipe, timestamp):
                 if len(nxt) >= _MAX_FRONTIER:
@@ -87,7 +95,66 @@ def decode_config_blob(
             break
         frontier = nxt
 
-    return DecodeResult(False, None, frontier[0][1] if frontier else (), (), ())
+    steps = frontier[0][1] if frontier else ()
+    return DecodeResult(False, None, steps, (), (), [], _transforms(steps, recipe, timestamp))
+
+
+def _field_paths(
+    text: str, is_json: bool, domains: tuple[str, ...], ips: tuple[str, ...]
+) -> list[dict[str, str]]:
+    """Annotate only the original regex result; JSON unescaping cannot add endpoints."""
+    kinds = {**dict.fromkeys(domains, "domain"), **dict.fromkeys(ips, "ip")}
+    paths: set[tuple[str, str]] = set()
+    if is_json and kinds:
+        pending = [("$", json.loads(text))]
+        while pending:
+            path, value = pending.pop()
+            if isinstance(value, dict):
+                for key in sorted(value, reverse=True):
+                    suffix = f".{key}" if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) else f"[{json.dumps(key, ensure_ascii=False)}]"
+                    pending.append((path + suffix, value[key]))
+            elif isinstance(value, list):
+                pending.extend((f"{path}[{i}]", value[i]) for i in reversed(range(len(value))))
+            elif isinstance(value, str):
+                leaf_domains, leaf_ips = _extract_endpoints(value)
+                for host in (*leaf_domains, *leaf_ips):
+                    if host in kinds:
+                        paths.add((host, path))
+    missing = set(kinds) - {value for value, _ in paths}
+    offsets: dict[str, int] = {}
+    if missing:
+        for pattern in (_URL_RE, _DOMAIN_RE, _IPV4_RE):
+            for match in pattern.finditer(text):
+                host = textutil.host_from_url(match.group(0)) if pattern is _URL_RE else match.group(1)
+                ds: set[str] = set()
+                ps: set[str] = set()
+                _classify_host(host, ds, ps)
+                for value in sorted((ds | ps) & missing):
+                    offsets[value] = min(offsets.get(value, match.start()), match.start())
+        for value in sorted(missing):
+            paths.add((value, f"$text[{offsets[value]}]"))
+    return [{"path": path, "value": value, "kind": kinds[value]}
+            for value, path in sorted(paths)]
+
+
+def _transforms(
+    steps: tuple[str, ...], recipe: CryptoRecipe | None, timestamp: int | str | None
+) -> list[dict[str, Any]]:
+    """Preserve decoding order, including terminal steps, without recording key/IV bytes."""
+    out: list[dict[str, Any]] = []
+    for step in steps:
+        item: dict[str, Any] = {"step": step, "inputs": {}}
+        if step == "aes" and recipe is not None:
+            item["recipe_ref"] = "meta.crypto_recipe"
+            item["recipe_shape"] = {key: getattr(recipe, key) for key in (
+                "algo", "mode", "padding", "key_encoding", "iv_derive")}
+            if (recipe.iv_derive or "").lower() in ("md5(key+ts)[:16]", "md5(key+ts)", "md5"):
+                item["inputs"]["timestamp"] = {
+                    "value": timestamp if timestamp is not None else 0,
+                    "source": "caller_supplied" if timestamp is not None else "default_not_observed",
+                }
+        out.append(item)
+    return out
 
 
 def _peels(

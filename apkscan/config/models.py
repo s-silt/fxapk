@@ -1,12 +1,13 @@
 """config-chain 数据契约：远程配置对象候选 + 下载解码后的配置制品。
 
-两者都是 frozen dataclass（确定性、可哈希、可进 corpus 索引）。``RemoteConfigCandidate`` 由被动发现
+两者都是 frozen dataclass（确定性、可进 corpus 索引）。``RemoteConfigCandidate`` 由被动发现
 （``discover``）产出；``ConfigArtifact`` 由授权档下载+多层解码产出（slice-1b 填充，此处先定契约）。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,10 @@ class ConfigArtifact:
     domains: tuple[str, ...]
     ips: tuple[str, ...]
     stored_path: str | None  # reports/<sample_sha256>/remote_config/ 落盘路径
+    fields: list[dict[str, str]] = field(default_factory=list)
+    transforms: list[dict[str, Any]] = field(default_factory=list)
+    material: dict[str, Any] = field(default_factory=lambda: {"complete": "unknown"})
+    gaps: list[str] = field(default_factory=list)
 
 
 __all__ = ["ConfigArtifact", "RemoteConfigCandidate"]

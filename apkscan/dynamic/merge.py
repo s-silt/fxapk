@@ -2603,6 +2603,13 @@ def _host_of_url(url: str) -> str:
     return host if "." in host else ""
 
 
+def merge_config_addressing(report: Report, runtime_report_path: str) -> dict[str, int]:
+    from apkscan.dynamic.addressing import project_addressing
+
+    payload = _read_runtime_payload(runtime_report_path)
+    return {"bindings": project_addressing(report, payload) if isinstance(payload, RuntimePayload) else 0}
+
+
 class _RuntimeMergeStep(NamedTuple):
     """一条运行时并回步骤：进度文案 + 消费者函数 + 子统计→顶层 stats 的键映射。"""
 
@@ -2615,6 +2622,7 @@ class _RuntimeMergeStep(NamedTuple):
 # merge_and_rerender 的运行时并回步骤表（表驱动，替代十几行手写 stats[x]=sub.get(x,0)）。
 # 顺序即执行顺序，务必保持不变：端点/解密在前，Dead-Drop 二级 C2 复用已并入端点须在其后跑。
 _RUNTIME_MERGE_STEPS: tuple[_RuntimeMergeStep, ...] = (
+    _RuntimeMergeStep("复核配置运行时来源关联 ...", merge_config_addressing, (("addressing_bindings", "bindings"),)),
     # C5b：用静态/实测配方解密运行时信封报文，把明文端点并入（在端点并入之后、重渲之前）。
     _RuntimeMergeStep(
         "解密运行时信封报文 ...",
@@ -2676,6 +2684,29 @@ _RUNTIME_MERGE_STEPS: tuple[_RuntimeMergeStep, ...] = (
 )
 
 
+def runtime_scope_verified(report: Report, payload: object, evidence_namespace: str) -> bool:
+    """Reuse the existing original-APK/round gate for offline projections."""
+    identity = report.meta.get("capture_apk_identity", {})
+    original = identity.get("original") if isinstance(identity, Mapping) else None
+    sample_hash = original.get("sha256") if isinstance(original, Mapping) else None
+    sample_bound = (isinstance(sample_hash, str) and len(sample_hash) == 64
+                    and all(c in "0123456789abcdef" for c in sample_hash))
+    rounds = report.meta.get("capture_rounds")
+    round_bound = isinstance(rounds, list) and any(
+        isinstance(row, Mapping) and row.get("sample_sha256") == sample_hash
+        and evidence_namespace == "capture:" + str(row.get("runtime_report_sha256") or "")
+        for row in rounds)
+    runtime_hash = payload.sha256 if isinstance(payload, RuntimePayload) else ""
+    return bool(
+        sample_bound and round_bound
+        and isinstance(identity, Mapping) and identity.get("which") == "original"
+        and isinstance(payload, RuntimePayload)
+        and payload.get("package_name") == report.package_name
+        and payload.get("runtime_variant") == "original-runtime"
+        and evidence_namespace == "capture:" + runtime_hash
+    )
+
+
 def merge_and_rerender(
     report: Report, endpoints: list[Endpoint] | None, out_dir: str, base: str = "report", *,
     formats: list[str] | None = None, on_progress: Callable[[str], None] | None = None,
@@ -2688,25 +2719,7 @@ def merge_and_rerender(
             validate_ledger(report)
         payload = _read_runtime_payload(rr_path) if (endpoints is None or evidence_namespace) else None
         if evidence_namespace:
-            identity = report.meta.get("capture_apk_identity", {})
-            original = identity.get("original") if isinstance(identity, Mapping) else None
-            sample_hash = original.get("sha256") if isinstance(original, Mapping) else None
-            sample_bound = (isinstance(sample_hash, str) and len(sample_hash) == 64
-                            and all(c in "0123456789abcdef" for c in sample_hash))
-            rounds = report.meta.get("capture_rounds")
-            round_bound = isinstance(rounds, list) and any(
-                isinstance(row, Mapping) and row.get("sample_sha256") == sample_hash
-                and evidence_namespace == "capture:" + str(row.get("runtime_report_sha256") or "")
-                for row in rounds)
-            runtime_hash = payload.sha256 if isinstance(payload, RuntimePayload) else ""
-            verified = bool(
-                sample_bound and round_bound
-                and isinstance(identity, Mapping) and identity.get("which") == "original"
-                and isinstance(payload, RuntimePayload)
-                and payload.get("package_name") == report.package_name
-                and payload.get("runtime_variant") == "original-runtime"
-                and evidence_namespace == "capture:" + runtime_hash
-            )
+            verified = runtime_scope_verified(report, payload, evidence_namespace)
         with capture_scope(evidence_namespace, verified=verified):
             if endpoints is None:
                 endpoints = load_runtime_endpoints(rr_path)

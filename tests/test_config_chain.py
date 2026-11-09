@@ -53,12 +53,12 @@ def test_empty_when_no_artifacts() -> None:
 
 def test_recipe_none_and_backends_without_endpoint() -> None:
     chains = build_control_chains(
-        [{"source_url": "https://x/c.dat", "decoded": False, "domains": ["a.com"], "ips": []}],
+        [{"source_url": "https://cfg.example.test/c.dat", "decoded": False, "domains": ["api.example.test"], "ips": []}],
         None, [],
     )
     assert chains[0]["crypto_recipe"] is None  # 无配方段
     # 后端存在但无对应端点归因 → attribution 空列表（不抛）
-    assert chains[0]["backends"][0] == {"kind": "domain", "value": "a.com", "attribution": []}
+    assert chains[0]["backends"][0] == {"kind": "domain", "value": "api.example.test", "attribution": [], "field_paths": [], "consumer_candidates": [], "consumer_gaps": ["consumer_unbound_no_jadx"], "runtime_correlations": [], "runtime_gaps": ["runtime_binding_unavailable"], "material_comparisons": [], "suspicions": []}
 
 
 def test_bad_artifact_entries_skipped() -> None:

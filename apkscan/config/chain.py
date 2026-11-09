@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import logging
+import json
+from copy import deepcopy
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -44,8 +46,36 @@ def build_control_chains(
         for ip in art.get("ips") or []:
             if isinstance(ip, str) and ip:
                 backends.append(_backend("ip", ip, ep_by_value.get(ip)))
+        fields = art.get("fields")
+        fields = fields if isinstance(fields, list) else []
+        gaps = {g for g in (art.get("gaps") or []) if isinstance(g, str)}
+        if "fields" not in art and art.get("decoded"):
+            gaps.add("field_path_unavailable")
+        for backend in backends:
+            backend["field_paths"] = sorted({
+                f["path"] for f in fields if isinstance(f, dict)
+                and f.get("value") == backend["value"] and isinstance(f.get("path"), str)
+            })
+            endpoint = ep_by_value.get(backend["value"])
+            bindings = getattr(endpoint, "enrichment", {}).get("config_consumer_bindings", [])
+            matching = [b for b in bindings if isinstance(b, dict) and b.get("artifact_sha256") == art.get("sha256")]
+            backend["consumer_candidates"] = sorted(
+                [dict(c, field_path=b["field_path"]) for b in matching for c in b.get("candidates", [])],
+                key=lambda c: (c["field_path"], c["source_path"], c["method_offset"], c["key"]),
+            )
+            backend["consumer_gaps"] = sorted({g for b in matching for g in b.get("gaps", [])}) if matching else ["consumer_unbound_no_jadx"]
+            runtime = getattr(endpoint, "enrichment", {}).get("config_runtime_bindings", [])
+            runtime = [b for b in runtime if isinstance(b, dict) and b.get("artifact_sha256") == art.get("sha256")]
+            for source, target in (("correlations", "runtime_correlations"), ("suspicions", "suspicions"), ("material_comparisons", "material_comparisons")):
+                backend[target] = sorted([dict(c, field_path=b["field_path"]) for b in runtime for c in b.get(source, [])],
+                                         key=lambda c: json.dumps(c, sort_keys=True))
+            backend["runtime_gaps"] = [] if runtime else ["runtime_binding_unavailable"]
         chains.append({
             "source_url": url,
+            "artifact_sha256": art.get("sha256"),
+            "transforms": deepcopy(art.get("transforms") or []),
+            "material": deepcopy(art.get("material") or {"complete": "unknown"}),
+            "gaps": sorted(gaps),
             "stored_path": art.get("stored_path"),  # 落盘的原始配置对象（相对 out_dir）；未落盘 → None
             "crypto_recipe": recipe_summary,
             "decoded": bool(art.get("decoded")),

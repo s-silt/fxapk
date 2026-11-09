@@ -546,6 +546,7 @@ def _single_target_closure(endpoint: Endpoint) -> dict[str, object]:
         "hosting_delivery": hosting,
         "request_target": _request_layer(hosting, origin),
     }
+    _active_references(layers["request_target"], endpoint)
     statuses = {str(layer.get("status")) for layer in layers.values()}
     status = CLOSURE_COMPLETE if statuses == {CLOSURE_COMPLETE} else CLOSURE_PARTIAL
     gaps = [name for name in LAYER_NAMES if layers[name]["status"] != CLOSURE_COMPLETE]
@@ -634,6 +635,13 @@ def _aggregate_source_status(
     return aggregated
 
 
+def _active_references(layer: dict, endpoint: Endpoint) -> None:
+    refs = sorted({ev.location for ev in endpoint.evidences
+                   if ev.source == "active-probe" and ev.scope is EvidenceScope.CASE_EVIDENCE})
+    if refs:
+        layer.setdefault("evidence", {})["active_evidence"] = refs
+
+
 def assemble_target_closure(endpoint: Endpoint) -> dict[str, object]:
     """Assemble five investigation layers and retain per-IP evidence for domains."""
     raw_resolved = endpoint.enrichment.get("resolved_ip_enrichment")
@@ -691,6 +699,7 @@ def assemble_target_closure(endpoint: Endpoint) -> dict[str, object]:
     if origin.get("required") is True and origin.get("status") != CLOSURE_COMPLETE:
         gaps.append("origin")
     resolved_ip_selection = _mapping(endpoint.enrichment.get("resolved_ip_selection"))
+    _active_references(layers["request_target"], endpoint)
     if _non_negative_int(resolved_ip_selection.get("truncated")) > 0:
         status = CLOSURE_PARTIAL
         gaps.append("resolved_ip_limit")

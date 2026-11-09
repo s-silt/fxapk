@@ -17,6 +17,8 @@
 | 批量 | `fxapk batch <目录>` |
 | 一把梭（接了 root 机才跑动态；**会改设备**） | `fxapk auto app.apk --out out`；验收门加 `--strict-case`（退出码 0/5/6 = complete/partial/failed） |
 | 已有报告补多源查询与五层归属 | `fxapk case close out/app.json` |
+| 显式授权的有界主动核验（默认只出计划） | `fxapk probe-target out/app.json --target <IP或域名> --business-host <域名> --allow <IP或域名>`；执行需加 `--execute --mode authorized-active`，最多 6 次请求，归档未脱敏 |
+| 寻址链离线评估（只读） | `fxapk addressing-evaluate <清单.json> --out <结果.json>` |
 | 固化 Phase-1 证据包 | `fxapk case package out/app.json --case-id CASE-001 --producer analyst --out out/case-package.json` |
 | 校验包并与工作树外 corpus 对账（默认 dry-run） | `fxapk corpus reconcile out/case-package.json --corpus <库> [--apply]` |
 | Phase-2 复核记录 | `fxapk case review out/case-package.json --reviewer reviewer --status accepted --gate-receipt phase2/gate-receipt.json --out out/case-review.json` |
@@ -198,7 +200,7 @@ hook 扫 staged 新增行，默认阻断疑似真实 IP、凭据、案件人名�
 
 ## 合规边界
 
-仅用于授权范围内的安全研究与分析，不提供攻击或漏洞利用功能。默认被动：境外服务器只做被动归属（RDAP / WHOIS / DNS / ASN / CT），不主动访问样本业务 URL，但 DNS 查询可能被观察。少数要向目标发请求的能力默认关闭，按显式授权参数启用；`capture-web` 需 `--authorized` 且只在目标与允许清单内做有界 GET。脱壳只针对样本自身，在授权分析机上进行。
+仅用于授权范围内的安全研究与分析，不提供攻击或漏洞利用功能。默认被动：境外服务器只做被动归属（RDAP / WHOIS / DNS / ASN / CT），不主动访问样本业务 URL，但 DNS 查询可能被观察。少数要向目标发请求的能力默认关闭，按显式授权参数启用；`capture-web` 需 `--authorized` 且只在目标与允许清单内做有界 GET。`probe-target` 默认只生成计划，需 `--execute --mode authorized-active` 且目标在报告与 `--allow` 清单内才发起最多 6 次有界连接，结果不构成 Origin 或 App 接触证明。脱壳只针对样本自身，在授权分析机上进行。
 
 ## 报告前材料
 

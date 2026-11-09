@@ -3,6 +3,30 @@
 // 跑：frida -U -f <包名> -l objstore-config-hook.js -q   （必须 -f spawn：配置下发在 Application 极早期，attach 会漏掉冷启动那几次拉取）
 // 改：(1) OBJSTORE_HOST_RE 现场按命中的对象存储域增删；(2) BACKEND_RE 按目标配置里的字段名(base_url/wss/line/node)调；(3) 响应读取兜底已覆盖 OkHttp/URLConnection/InputStream/String，仍空→配 native-ssl-hook.js(密文)/cipher-hook.js(配置加密)
 'use strict';
+// Binary companion to the existing preview; host ConfigBodyCollector archives it.
+// A missing/oversized/unknown-length body is never a full-body hash.
+var _configBodyCount = 0, _configBodyBytes = 0;
+function _emitConfigBody(req, resp, bytes) {
+    if (_configBodyCount >= 40 || _configBodyBytes >= 5 * 1024 * 1024) return;
+    try {
+        var headers = resp.headers(), values = {};
+        for (var i = 0; i < Math.min(headers.size(), 64); i++)
+            values[String(headers.name(i))] = String(headers.value(i)).slice(0, 4096);
+        var body = resp.body(), declared = body === null ? -1 : Number(body.contentLength());
+        var size = bytes === null ? 0 : Math.min(bytes.length, 512 * 1024, 5 * 1024 * 1024 - _configBodyBytes);
+        var payload = {type: 'fxapk-config-body-v1', source_url: String(req.url()).slice(0, 8192),
+            method: String(req.method()), observed_at: new Date().toISOString(), response_headers: values,
+            declared_length: declared, body_complete: bytes !== null && size === bytes.length && size === declared};
+        if (bytes === null) send(payload);
+        else {
+            var copy = new Uint8Array(size);
+            for (var j = 0; j < size; j++) copy[j] = bytes[j] & 255;
+            send(payload, copy.buffer);
+        }
+        _configBodyCount += 1;
+        _configBodyBytes += size;
+    } catch (_) {}
+}
 
 // ============================================================
 // 重入保护：本探针 hook 了 java.lang.String.<init>（D 段）。一旦 hook 上，本脚本内部任何
@@ -228,9 +252,10 @@ Java.perform(function () {
                 try {
                     var peek = resp.peekBody(1024 * 512);
                     var rbytes = peek.bytes();
+                    _emitConfigBody(req, resp, rbytes);
                     console.log('[objstore][http]   <- ' + resp.code() + ' 下发配置正文(' + rbytes.length + 'B): ' + _preview(rbytes, 2000));
                     _scanBackend(_asText(rbytes), url);
-                } catch (e2) { console.log('[objstore][http]   resp-body skip(可能流式/二进制): ' + e2); }
+                } catch (e2) { _emitConfigBody(req, resp, null); console.log('[objstore][http]   resp-body skip(可能流式/二进制): ' + e2); }
             } catch (e) { console.log('[objstore][http] inspect skip: ' + e); }
             return resp;
         }, 'http');

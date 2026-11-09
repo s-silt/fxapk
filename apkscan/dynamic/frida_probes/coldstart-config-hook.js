@@ -3,6 +3,30 @@
 // 跑：frida -U -f <包名> -l coldstart-config-hook.js -q   （必须 -f spawn，attach 已起进程会漏掉最早几个请求）
 // 改：(1) TENANT_HINT_RE/RESP_BACKEND_RE 现场按目标参数名调；(2) 纯Flutter/native看 [conn] socket兜底给IP；(3) 密文响应配 cipher-hook.js / native-ssl-hook.js；(4) ASSET_NAME_RE 放宽可全量dump assets；(5) OkHttp 类名按版本：3.x=okhttp3.RealCall，4.x=okhttp3.internal.connection.RealCall（本脚本两者都试）
 'use strict';
+// Binary companion to the existing preview; host ConfigBodyCollector archives it.
+// A missing/oversized/unknown-length body is never a full-body hash.
+var _configBodyCount = 0, _configBodyBytes = 0;
+function _emitConfigBody(req, resp, bytes) {
+    if (_configBodyCount >= 40 || _configBodyBytes >= 5 * 1024 * 1024) return;
+    try {
+        var headers = resp.headers(), values = {};
+        for (var i = 0; i < Math.min(headers.size(), 64); i++)
+            values[String(headers.name(i))] = String(headers.value(i)).slice(0, 4096);
+        var body = resp.body(), declared = body === null ? -1 : Number(body.contentLength());
+        var size = bytes === null ? 0 : Math.min(bytes.length, 512 * 1024, 5 * 1024 * 1024 - _configBodyBytes);
+        var payload = {type: 'fxapk-config-body-v1', source_url: String(req.url()).slice(0, 8192),
+            method: String(req.method()), observed_at: new Date().toISOString(), response_headers: values,
+            declared_length: declared, body_complete: bytes !== null && size === bytes.length && size === declared};
+        if (bytes === null) send(payload);
+        else {
+            var copy = new Uint8Array(size);
+            for (var j = 0; j < size; j++) copy[j] = bytes[j] & 255;
+            send(payload, copy.buffer);
+        }
+        _configBodyCount += 1;
+        _configBodyBytes += size;
+    } catch (_) {}
+}
 
 // ---- 通用工具：bytes -> hex / base64 / 安全预览 ----
 function _hex(bytes) {
@@ -140,12 +164,13 @@ Java.perform(function () {
                 try {
                     var peek = resp.peekBody(1024 * 256); // 256KB 上限（long 参数，JS number 自动转）
                     var rbytes = peek.bytes();
+                    _emitConfigBody(req, resp, rbytes);
                     var pv = _preview(rbytes, 1200);
                     console.log('[coldstart][http]   <- ' + resp.code() + ' resp-body: ' + pv);
                     if (RESP_BACKEND_RE.test(pv)) {
                         console.log('[coldstart][http][BACKEND!][LEAD->真后端] 响应体含真后端线索(host/url/wss/pay) <- ' + url);
                     }
-                } catch (e2) { console.log('[coldstart][http]   resp-body skip: ' + e2); }
+                } catch (e2) { _emitConfigBody(req, resp, null); console.log('[coldstart][http]   resp-body skip: ' + e2); }
             } catch (e) { console.log('[coldstart][http] inspect skip: ' + e); }
             return resp;
         }, 'coldstart][http');

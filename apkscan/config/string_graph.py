@@ -15,10 +15,14 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +201,137 @@ def _pattern_hits(body: str, pattern: re.Pattern[str], needles: tuple[str, ...])
         if not any(needle in folded for needle in needles):
             return ()
     return tuple(sorted({m.group(0).strip() for m in pattern.finditer(body)}))
+
+
+_CONFIG_SINK_RE = re.compile(
+    r"\bHttpUrl\s*\.\s*parse\s*\(|\bbaseUrl\s*\(|\bRetrofit\s*\.\s*Builder\s*\("
+    r"|\bnewWebSocket\s*\(|\bnew\s+Socket\s*\(|\bconnect\s*\("
+    r"|\bloadUrl\s*\(|\bnew\s+URL\s*\("
+)
+_FIELD_KEY_RE = re.compile(r'\.([A-Za-z_][A-Za-z0-9_]*)|\[("(?:[^"\\]|\\.)*")\]|\[\d+\]')
+_MAX_CONSUMER_TOKENS = 20000
+
+
+def _field_keys(path: str) -> set[str]:
+    """Read the emitted JSONPath grammar, never infer keys from textual offsets."""
+    if not path.startswith("$") or path.startswith("$text["):
+        return set()
+    keys: set[str] = set()
+    pos = 1
+    for match in _FIELD_KEY_RE.finditer(path, pos):
+        if match.start() != pos:
+            return set()
+        pos = match.end()
+        if match.group(1):
+            keys.add(match.group(1))
+        elif match.group(2):
+            try:
+                keys.add(json.loads(match.group(2)))
+            except ValueError:
+                return set()
+    return keys if pos == len(path) else set()
+
+
+def bind_config_consumers(
+    artifacts: object, sources: Mapping[str, str] | None,
+) -> list[dict[str, Any]]:
+    """Bind field keys to network syntax in the same innermost Java method.
+
+    Sources must be the caller's verified JADX output, keyed by relative path.
+    This is lexical co-occurrence only: no value propagation or consumption proof.
+    No source, no key path and bounded scanning each remain explicit coverage gaps.
+    """
+    rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for art in artifacts if isinstance(artifacts, list) else []:
+        if not isinstance(art, dict) or not art.get("decoded"):
+            continue
+        for item in art.get("fields") or []:
+            if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("path", "value")):
+                continue
+            key = (str(art.get("sha256") or ""), item["path"], item["value"])
+            rows[key] = {"artifact_sha256": key[0], "field_path": key[1], "value": key[2],
+                         "candidates": [], "gaps": []}
+    wanted = set().union(*(_field_keys(key[1]) for key in rows)) if rows else set()
+    by_key: dict[str, list[dict[str, Any]]] = {key: [] for key in sorted(wanted)}
+    partial = False
+    worked = 0
+    for source_path, text in sorted((sources or {}).items()):
+        if not wanted:
+            break
+        if not isinstance(text, str):
+            partial = True
+            continue
+        size = len(text.encode("utf-8"))
+        if size > _MAX_TEXT_BYTES or worked + size > _MAX_SCOPE_WORK_BYTES:
+            partial = True
+            continue
+        worked += size
+        masked = _mask(text)
+        scopes = _extract_scopes(text)
+        pairs = _brace_pairs(masked)
+        for match in _BLOCK_START_RE.finditer(masked):
+            if _NEW_PREFIX_RE.search(masked[max(0, match.start() - 16):match.start()]):
+                start = match.end() - 1
+                if start in pairs:
+                    scopes.append(("anonymous-class", start, pairs[start], True))
+        scopes.sort(key=lambda s: s[1])
+        tokens: list[tuple[int, str, str]] = []
+        for match in _STR_LIT_RE.finditer(text):
+            if masked[match.start()] != '"':
+                continue  # A quote inside a comment/character literal is not a Java string.
+            try:
+                value = json.loads(match.group(0))
+            except ValueError:
+                continue
+            if value in wanted:
+                tokens.append((match.start(), "key", value))
+                if len(tokens) >= _MAX_CONSUMER_TOKENS:
+                    partial = True
+                    break
+        for match in _CONFIG_SINK_RE.finditer(masked):
+            tokens.append((match.start(), "sink", re.sub(r"\s+", "", match.group(0))))
+            if len(tokens) >= _MAX_CONSUMER_TOKENS:
+                partial = True
+                break
+        # Assign tokens to the innermost method using a sweep, not pairwise scope scans.
+        active: list[tuple[str, int, int, bool]] = []
+        index = 0
+        methods: dict[tuple[str, int], dict[str, set[str]]] = {}
+        for position, kind, value in sorted(tokens):
+            while index < len(scopes) and scopes[index][1] < position:
+                scope = scopes[index]
+                while active and active[-1][2] <= scope[1]:
+                    active.pop()
+                active.append(scope)
+                index += 1
+            while active and active[-1][2] <= position:
+                active.pop()
+            if active and not active[-1][3]:
+                name, start, _, _ = active[-1]
+                methods.setdefault((name, start), {"key": set(), "sink": set()})[kind].add(value)
+        for (name, start), hits in sorted(methods.items()):
+            if not hits["sink"]:
+                continue
+            for key in sorted(hits["key"]):
+                by_key[key].append({
+                    "status": "consumer_candidate", "binding": "heuristic_same_method",
+                    "key": key, "method": name, "method_offset": start,
+                    "source_path": source_path, "source_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "sinks": sorted(hits["sink"]),
+                })
+    for key, row in sorted(rows.items()):
+        keys = _field_keys(key[1])
+        candidates = [c for field_key in sorted(keys) for c in by_key.get(field_key, [])]
+        row["candidates"] = sorted(candidates, key=lambda c: (c["source_path"], c["method_offset"], c["key"]))
+        gaps = set()
+        if not sources:
+            gaps.add("consumer_unbound_no_jadx")
+        if not keys:
+            gaps.add("consumer_unbound_field_path")
+        if partial:
+            gaps.add("consumer_scan_partial")
+        row["gaps"] = sorted(gaps)
+    return [row for _, row in sorted(rows.items())]
 
 
 def scan_java_source(
@@ -649,5 +784,6 @@ __all__ = [
     "SUPPRESSION_PARAM_TABLE",
     "SUPPRESSION_THIRD_PARTY",
     "StringChain",
+    "bind_config_consumers",
     "scan_java_source",
 ]
