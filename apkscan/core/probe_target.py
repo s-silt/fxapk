@@ -17,15 +17,15 @@ from urllib.parse import urlsplit
 
 from apkscan.core.atomic import atomic_create_bytes
 from apkscan.core.certificate_ownership import verify_certificate_ownership
-from apkscan.core.models import Evidence, EvidenceScope
-from apkscan.core.pinned_transport import connect_pinned, resolve_public
+from apkscan.core.models import ANALYSIS_MODE_AUTHORIZED_ACTIVE, Evidence, EvidenceScope
+from apkscan.core.pinned_transport import connect_first, resolve_public
 from apkscan.core.report_schema import ensure_writable_report_version
 from apkscan.report.json import _to_jsonable
 
 __all__ = ["build_plan", "probe_tls", "run_plan", "verify_certificate_ownership"]
 
 META_WRITE_OWNER = "core.probe_target"
-META_WRITE_CATEGORIES = {"network_attribution": "signal", "closure": "signal"}
+META_WRITE_CATEGORIES = {"network_attribution": "signal", "closure": "signal", "mode": "signal"}
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 
@@ -100,7 +100,7 @@ def probe_tls(plan: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("resolution_budget_exceeded")
-        raw = connect_pinned(addresses[0], 443, timeout=remaining)
+        raw = connect_first(addresses, 443, timeout=remaining, deadline=deadline)
         row["peer_ip"] = str(raw.getpeername()[0])
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -173,6 +173,12 @@ def run_plan(plan: dict[str, Any], out: Path, report: dict, *, authorized: bool 
             row = run_http_check(check, plan, budget)
         files[f"{check}.json"] = _append_observation(result, plan["target"], row)
     _refresh_active_views(result)
+    # ★网络模式痕迹要如实：run_plan 走到这里已在授权档向目标发起过请求（authorized 门在入口），
+    #   归档报告不能再声称全程被动；corpus 与 jsonl 把 mode 当可信度/可复现性依据在读。
+    #   只改归档副本 result，调用方传入的 report 不变。
+    meta = result.get("meta")
+    if isinstance(meta, dict):
+        meta["mode"] = ANALYSIS_MODE_AUTHORIZED_ACTIVE
     files.update({"plan.json": json.dumps(plan, sort_keys=True).encode(),
                   "report.json": json.dumps(result, ensure_ascii=False, sort_keys=True).encode()})
     files.update(_retained_active_files(result))

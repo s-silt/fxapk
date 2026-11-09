@@ -82,7 +82,7 @@ def observe_http(request: dict[str, Any], *, max_bytes: int, timeout: float) -> 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("request_deadline")
-        connection = PinnedConnection({**request, "_read_budget": meter}, addresses[0], timeout=remaining)
+        connection = PinnedConnection({**request, "_read_budget": meter}, addresses, timeout=remaining)
         connection.request(request["method"], request["request_target"], headers={
             "Host": request["host_header"], "Accept-Encoding": "identity", "Connection": "close", "User-Agent": "fxapk-probe-target/1"})
         row["peer_ip"] = connection.peer_ip
@@ -134,7 +134,8 @@ def observe_http(request: dict[str, Any], *, max_bytes: int, timeout: float) -> 
 
 def compare_http(check: str, rows: list[dict]) -> dict[str, Any]:
     result: dict[str, Any] = {"check": check, "outcome": "inconclusive", "origin_status": "not_confirmed"}
-    if len(rows) != 2 or any(r.get("outcome") != "observed" or r.get("body_complete") is not True for r in rows):
+    if (len(rows) != 2 or any(r.get("outcome") != "observed" or r.get("body_complete") is not True
+                              or r.get("representation_complete") is not True for r in rows)):
         return result
     a, b = rows
     keys = ("sni", "port", "request_target", "method") + (("peer_ip",) if check == "host-compare" else ("host_header",))
@@ -157,7 +158,8 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict:
 
 
 def relation_matches(edge: dict, row: dict) -> bool:
-    if row.get("outcome") != "observed" or row.get("body_complete") is not True or row.get("body_sha256") != edge["source_sha256"]:
+    if (row.get("outcome") != "observed" or row.get("body_complete") is not True
+            or row.get("representation_complete") is not True or row.get("body_sha256") != edge["source_sha256"]):
         return False
     if not 200 <= row.get("http_status", 0) < 300:
         return False

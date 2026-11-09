@@ -56,3 +56,14 @@ def test_process_scope_requires_observed_identity(monkeypatch):
     scope = _addressing_context({"pid": 123, "package": "test.example.app"}, "test-device", modified=True)
     assert scope["process_start"] is None and scope["target_attributed"] is False
     assert scope["runtime_variant"] == "modified-runtime"
+
+
+def test_frida_device_serial_validates_usb_handle():
+    from types import SimpleNamespace
+    from apkscan.dynamic.capture import _frida_device_serial
+
+    assert _frida_device_serial(SimpleNamespace(type="usb", id="emulator-5554")) == "emulator-5554"
+    assert _frida_device_serial(SimpleNamespace(type="local", id="local")) is None
+    assert _frida_device_serial(SimpleNamespace(type="usb", id="bad serial")) is None
+    assert _frida_device_serial(SimpleNamespace(type="usb", id="a" * 129)) is None
+

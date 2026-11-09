@@ -42,7 +42,7 @@ def test_http_does_not_redirect_and_archives_exact_response(monkeypatch):
         peer_ip = "192.0.2.1"
         sock = None
         def __init__(self, request, address, **kwargs):
-            assert address == "192.0.2.1" and request["host"] == "api.example.test"
+            assert address == ["192.0.2.1"] and request["host"] == "api.example.test"
         def request(self, method, path, headers): calls.append((method, path, headers))
         def getresponse(self):
             stream = BytesIO(b"moved")
@@ -95,7 +95,7 @@ def test_bos_request_id_is_retained_even_when_object_is_missing(monkeypatch):
 
 def test_comparisons_need_complete_same_peer_and_single_variable():
     from apkscan.core.probe_checks import compare_http
-    a = {"outcome": "observed", "body_complete": True, "http_status": 200,
+    a = {"outcome": "observed", "body_complete": True, "representation_complete": True, "http_status": 200,
          "body_sha256": "a" * 64, "peer_ip": "192.0.2.1", "sni": "api.example.test", "port": 443,
          "request_target": "/public", "method": "GET", "host_header": "api.example.test"}
     b = {**a, "body_sha256": "b" * 64, "host_header": "random.example.test"}
@@ -106,6 +106,21 @@ def test_comparisons_need_complete_same_peer_and_single_variable():
     assert compare_http("resource", [{**a, "http_status": 404}, {**a, "http_status": 404}])["outcome"] == "inconclusive"
 
 
+def test_compare_http_rejects_incomplete_representation_gzip():
+    from apkscan.core.probe_checks import compare_http
+    a = {"outcome": "observed", "body_complete": True, "representation_complete": True, "http_status": 200,
+         "body_sha256": "a" * 64, "peer_ip": "192.0.2.1", "sni": "api.example.test", "port": 443,
+         "request_target": "/public", "method": "GET", "host_header": "api.example.test",
+         "response_headers": [["content-encoding", "identity"]]}
+    gzip_diff = {**a, "body_sha256": "b" * 64, "host_header": "random.example.test",
+                 "representation_complete": False, "response_headers": [["content-encoding", "gzip"]]}
+    assert compare_http("host-compare", [a, gzip_diff])["outcome"] == "inconclusive"
+    gzip_same_peer2 = {**a, "peer_ip": "192.0.2.2", "representation_complete": False,
+                       "response_headers": [["content-encoding", "gzip"]]}
+    assert compare_http("resource", [a, gzip_same_peer2])["outcome"] == "inconclusive"
+    assert compare_http("resource", [a, {**gzip_same_peer2, "body_sha256": "b" * 64}])["outcome"] == "inconclusive"
+
+
 def test_multi_checks_share_budget_preserve_bodies_and_do_not_modify_report(tmp_path, monkeypatch):
     from apkscan.core import probe_checks as pc
     calls = []
@@ -113,7 +128,7 @@ def test_multi_checks_share_budget_preserve_bodies_and_do_not_modify_report(tmp_
         calls.append((request, max_bytes, timeout))
         body = b"business" if request["label"] == "business" else b"random"
         return {**request, "outcome": "observed", "observed_at": "2026-11-09T00:00:00Z",
-                "peer_ip": "192.0.2.1", "body_complete": True, "http_status": 200,
+                "peer_ip": "192.0.2.1", "body_complete": True, "representation_complete": True, "http_status": 200,
                 "body_sha256": hashlib.sha256(body).hexdigest(), "body_base64": __import__("base64").b64encode(body).decode(),
                 "consumed_bytes": len(body)}
     monkeypatch.setattr(pc, "observe_http", observe)
@@ -143,7 +158,7 @@ def test_follow_requires_explicit_verified_relation_and_allowlist(tmp_path, monk
         calls.append(request["url"])
         raw = body if request["url"] == edge["source_url"] else b"{}"
         return {**request, "outcome": "observed", "observed_at": "2026-11-09T00:00:00Z", "peer_ip": "192.0.2.1",
-                "http_status": 200, "body_complete": True, "body_sha256": hashlib.sha256(raw).hexdigest(),
+                "http_status": 200, "body_complete": True, "representation_complete": True, "body_sha256": hashlib.sha256(raw).hexdigest(),
                 "body_base64": __import__("base64").b64encode(raw).decode(), "consumed_bytes": len(raw)}
     monkeypatch.setattr(pc, "observe_http", observe)
     p = plan(checks=["follow"], follow_edges=[edge], max_objects=2)
@@ -178,7 +193,7 @@ def test_comparison_sni_keeps_chain_validation_and_never_claims_business_identit
     context.wrap_socket = wrap
     monkeypatch.setattr(pt.ssl, "create_default_context", lambda: context)
     monkeypatch.setattr(pt, "resolve_public", lambda *a, **k: ["192.0.2.1"])
-    monkeypatch.setattr(pt, "connect_pinned", lambda *a, **k: sock)
+    monkeypatch.setattr(pt, "connect_first", lambda *a, **k: sock)
     row, _ = pt.probe_tls({**plan(checks=[check]), "tls_check": check})
     assert row["outcome"] == "certificate_selection_observed" and row["tls_verified"] is False
     assert row["chain_verified"] is True and row["hostname_verified"] is False
@@ -192,7 +207,8 @@ def test_host_difference_signal_requires_bound_receipt_and_same_peer(tmp_path, m
     def observe(request, **kwargs):
         raw = request["label"].encode()
         return {**request, "outcome": "observed", "peer_ip": "192.0.2.1", "http_status": 200, "body_complete": True,
-                "body_sha256": hashlib.sha256(raw).hexdigest(), "body_base64": __import__("base64").b64encode(raw).decode(), "consumed_bytes": len(raw)}
+                "representation_complete": True, "body_sha256": hashlib.sha256(raw).hexdigest(),
+                "body_base64": __import__("base64").b64encode(raw).decode(), "consumed_bytes": len(raw)}
     monkeypatch.setattr(pc, "observe_http", observe)
     path = pt.run_plan(plan(checks=["host-compare"], url="https://api.example.test/public"), tmp_path, report(), authorized=True)
     ep = report_from_dict(json.loads((path.parent / "report.json").read_text())).endpoints[0]
@@ -212,7 +228,7 @@ def test_follow_rejects_ambiguous_json_duplicate_keys():
     raw = b'{"next":"https://other.example.test/x","next":"https://api.example.test/x"}'
     sha = hashlib.sha256(raw).hexdigest()
     edge = {"source_sha256": sha, "field_pointer": "/next", "target_url": "https://api.example.test/x"}
-    row = {"outcome": "observed", "http_status": 200, "body_complete": True, "body_sha256": sha,
+    row = {"outcome": "observed", "http_status": 200, "body_complete": True, "representation_complete": True, "body_sha256": sha,
            "body_base64": base64.b64encode(raw).decode()}
     assert not relation_matches(edge, row)
 

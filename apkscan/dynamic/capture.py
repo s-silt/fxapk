@@ -1863,6 +1863,15 @@ def _build_injection_source(
     return "\n".join(parts)
 
 
+def _frida_device_serial(handle: Any) -> str | None:
+    if getattr(handle, "type", None) != "usb":
+        return None
+    device_id = getattr(handle, "id", None)
+    if isinstance(device_id, str) and 0 < len(device_id) <= 128 and re.fullmatch(r"[A-Za-z0-9._:-]+", device_id):
+        return device_id
+    return None
+
+
 def _addressing_context(context: dict[str, Any], serial: str | None, *, modified: bool) -> dict[str, Any]:
     scope = {**context, "capture_ref": "observer:" + uuid.uuid4().hex,
              "runtime_variant": "modified-runtime" if modified else "original-runtime",
@@ -1984,7 +1993,7 @@ def _start_frida_session(
         if config_body_sink is not None and config_body_directory is not None:
             from apkscan.dynamic.config_artifacts import ConfigBodyCollector
 
-            scope = _addressing_context(capture_context, serial,
+            scope = _addressing_context(capture_context, serial or _frida_device_serial(device_handle),
                                        modified=allow_behavior_modification and antidetect == "java")
             collector = ConfigBodyCollector(config_body_directory, scope)
 

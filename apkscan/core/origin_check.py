@@ -111,32 +111,33 @@ def _public_ip(value: str) -> str:
     return str(address)
 
 
-def _resolve(request: dict[str, Any]) -> str:
+def _resolve(request: dict[str, Any]) -> list[str]:
     if request.get("connect_ip"):
-        return _public_ip(request["connect_ip"])
-    # Resolve once, validate every answer and pin one address; no hidden reconnect/DNS rebind.
+        return [_public_ip(request["connect_ip"])]
+    # Resolve once, validate every answer and pin addresses; no hidden reconnect/DNS rebind.
     answers = socket.getaddrinfo(request["host"], request["port"], type=socket.SOCK_STREAM)
     addresses = list(dict.fromkeys(_public_ip(str(row[4][0])) for row in answers))
     if not addresses:
         raise ValueError("No usable address")
-    return addresses[0]
+    return addresses
 
 
 
 def fetch_resource(request: dict[str, Any], directory: Path, label: str) -> dict[str, Any]:
     """One GET, no inherited proxy/auth/cookies, TLS verification enabled, bounded body."""
     result: dict[str, Any] = {"request": request, "observed_at": datetime.now(timezone.utc).isoformat(),
-                              "status": "failed", "body_complete": False}
+                              "status": "failed", "body_complete": False, "connected_ip": None}
     connection = None
     try:
-        address = _resolve(request)
-        result["connected_ip"] = address
-        connection = _PinnedConnection(request, address)
+        addresses = _resolve(request)
+        connection = _PinnedConnection(request, addresses)
         started = time.monotonic()
         connection.request("GET", request["request_target"], headers={
             "Host": request["host_header"], "Accept-Encoding": "identity", "Connection": "close",
             "User-Agent": "fxapk-origin-check/1"})
-        result["peer_ip"] = getattr(connection, "peer_ip", None)
+        peer_ip = getattr(connection, "peer_ip", None)
+        result["connected_ip"] = peer_ip
+        result["peer_ip"] = peer_ip
         response = connection.getresponse()
         result["http_status"] = response.status
         result["response_headers"] = response.getheaders()  # preserve duplicate fields

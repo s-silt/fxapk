@@ -1,6 +1,7 @@
 """Shared fail-closed transport: validate every DNS answer, then connect numerically."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 import http.client
 import io
 import ssl
@@ -28,7 +29,7 @@ def _resolve_public(host: str, port: int) -> list[str]:
         ipaddress.ip_address(host)
     except ValueError:
         answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        addresses = sorted({public_ip(str(row[4][0])) for row in answers})
+        addresses = list(dict.fromkeys(public_ip(str(row[4][0])) for row in answers))
     else:
         addresses = [public_ip(host)]
     if not addresses:
@@ -86,6 +87,28 @@ def connect_pinned(address: str, port: int, *, timeout: float | None, source_add
         raise
 
 
+def connect_first(addresses: Sequence[str], port: int, *, timeout: float | None,
+                  deadline: float | None = None, source_address: Any = None,
+                  socket_options: Any = None) -> socket.socket:
+    if not addresses:
+        raise ValueError("no_public_address")
+    last_error: OSError | None = None
+    for address in addresses:
+        attempt_timeout = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("connection_budget_exceeded")
+            attempt_timeout = remaining if timeout is None else min(timeout, remaining)
+        try:
+            return connect_pinned(address, port, timeout=attempt_timeout,
+                                  source_address=source_address, socket_options=socket_options)
+        except OSError as exc:
+            last_error = exc
+    assert last_error is not None
+    raise last_error
+
+
 class _DeadlineReader(io.RawIOBase):
     def __init__(self, raw: Any, sock: socket.socket, deadline: float, budget: dict[str, int] | None = None):
         self.raw, self.sock, self.deadline = raw, sock, deadline
@@ -127,12 +150,14 @@ class _DeadlineSocket:
 
 
 class PinnedConnection(http.client.HTTPConnection):
-    def __init__(self, request: dict[str, Any], address: str, *, timeout: float | None = None):
+    def __init__(self, request: dict[str, Any], address: str | Sequence[str], *, timeout: float | None = None):
         timeout = 15 if timeout is None else timeout
         super().__init__(request["host"], request["port"], timeout=timeout)
-        self.address = address
+        self.addresses = [address] if isinstance(address, str) else list(address)
+        self.address = self.addresses[0] if self.addresses else ""
         self.tls = request["scheme"] == "https"
-        deadline = time.monotonic() + timeout
+        self._deadline = time.monotonic() + timeout
+        deadline = self._deadline
 
         class DeadlineResponse(http.client.HTTPResponse):
             def __init__(self, sock: Any, *args: Any, **kwargs: Any):
@@ -141,7 +166,7 @@ class PinnedConnection(http.client.HTTPConnection):
         self.response_class = DeadlineResponse
 
     def connect(self) -> None:
-        sock = connect_pinned(self.address, self.port, timeout=self.timeout)
+        sock = connect_first(self.addresses, self.port, timeout=self.timeout, deadline=self._deadline)
         self.peer_ip = str(sock.getpeername()[0])
         try:
             if self.tls:

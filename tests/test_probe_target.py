@@ -60,6 +60,7 @@ def test_tls_binding_and_archive_do_not_become_app_contact_or_origin(tmp_path, m
     receipt = pt.run_plan(plan, tmp_path, base, authorized=True)
     saved = json.loads((receipt.parent / "report.json").read_text())
     assert base == before
+    assert saved["meta"]["mode"] == "authorized-active"
     ep = saved["endpoints"][0]
     assert ep["enrichment"]["active_observation"][0]["certificate_ownership"]["status"] == "unknown"
     assert ep["evidences"][-1]["source"] == "active-probe"
@@ -176,7 +177,7 @@ def test_tls_probe_preserves_sni_verification_and_limits_material(monkeypatch, f
         return sock
     context.wrap_socket = wrap
     monkeypatch.setattr(pt, "resolve_public", lambda *a, **k: ["192.0.2.1"])
-    monkeypatch.setattr(pt, "connect_pinned", lambda *a, **k: sock)
+    monkeypatch.setattr(pt, "connect_first", lambda *a, **k: sock)
     monkeypatch.setattr(pt.ssl, "create_default_context", lambda: context)
     plan = pt.build_plan(report(), target="192.0.2.1", business_host="api.example.test", allow=["192.0.2.1"], max_bytes=1 if failure == "oversized" else 1024)
     result, der = pt.probe_tls(plan)
@@ -223,3 +224,20 @@ def test_followup_projection_preserves_each_active_receipt_and_certificate(tmp_p
     plan = pt.build_plan(base, target="192.0.2.1", business_host="api.example.test", allow=["192.0.2.1"])
     with pytest.raises(ValueError, match="prior_active_receipt_hash_mismatch"):
         pt.run_plan(plan, tmp_path, base, authorized=True)
+
+
+def test_run_plan_upgrades_report_mode_to_authorized_active(tmp_path, monkeypatch):
+    from apkscan.core import probe_target as pt
+    base = report()
+    base["meta"]["mode"] = "passive"
+    der = b"synthetic-certificate"
+    monkeypatch.setattr(pt, "probe_tls", lambda *a, **k: ({"check": "tls", "outcome": "tls_binding_observed",
+        "peer_ip": "192.0.2.1", "sni": "api.example.test", "host_header": None,
+        "observed_at": "2026-11-09T00:00:00Z", "certificate_sha256": hashlib.sha256(der).hexdigest(),
+        "san": ["api.example.test"], "tls_verified": True}, der))
+    plan = pt.build_plan(base, target="192.0.2.1", business_host="api.example.test", allow=["192.0.2.1"])
+    receipt = pt.run_plan(plan, tmp_path, base, authorized=True)
+    saved = json.loads((receipt.parent / "report.json").read_text())
+    assert base["meta"]["mode"] == "passive"
+    assert saved["meta"]["mode"] == "authorized-active"
+

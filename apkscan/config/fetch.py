@@ -150,11 +150,11 @@ try:
         socket_options: Any
 
         def _new_conn(self):  # type: ignore[no-untyped-def]
-            from apkscan.core.pinned_transport import connect_pinned, resolve_public
+            from apkscan.core.pinned_transport import connect_first, resolve_public
 
             addresses = resolve_public(self.host, self.port)
-            sock = connect_pinned(addresses[0], self.port, timeout=self.timeout,
-                                  source_address=self.source_address, socket_options=self.socket_options)
+            sock = connect_first(addresses, self.port, timeout=self.timeout,
+                                 source_address=self.source_address, socket_options=self.socket_options)
             self.peer_ip = str(sock.getpeername()[0])
             return sock
 

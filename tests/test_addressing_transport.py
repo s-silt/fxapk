@@ -94,3 +94,52 @@ def test_response_reader_caps_headers_and_body_together():
     assert meter == {"remaining": 0, "consumed": 5}
     with pytest.raises(OSError, match="byte_budget"):
         reader.readinto(output)
+
+
+def test_resolve_public_preserves_getaddrinfo_order(monkeypatch):
+    from apkscan.core import pinned_transport as pt
+    from apkscan.config import fetch
+    monkeypatch.setattr(fetch, "_ip_is_blocked", lambda ip: False)
+    monkeypatch.setattr(pt.socket, "getaddrinfo", lambda *a, **k: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.5", 443)),
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::5", 443, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.5", 443)),
+    ])
+    assert pt.resolve_public("api.example.test", 443) == ["203.0.113.5", "2001:db8::5"]
+
+
+def test_connect_first_fallback_and_non_public_fail_closed(monkeypatch):
+    from apkscan.core import pinned_transport as pt
+    from apkscan.config import fetch
+    monkeypatch.setattr(fetch, "_ip_is_blocked", lambda ip: str(ip) == "192.0.2.99")
+    attempts = []
+
+    class Sock:
+        def __init__(self, peer):
+            self.peer = peer
+        def settimeout(self, value): pass
+        def connect(self, target):
+            addr = target[0]
+            attempts.append(addr)
+            if addr == "203.0.113.5":
+                raise ConnectionRefusedError("first_refused")
+            if addr == "198.51.100.8":
+                raise TimeoutError("second_timed_out")
+        def getpeername(self): return self.peer, 443
+        def close(self): pass
+
+    monkeypatch.setattr(pt.socket, "socket", lambda *a: Sock("2001:db8::5"))
+    sock = pt.connect_first(["203.0.113.5", "2001:db8::5"], 443, timeout=2)
+    assert sock.getpeername()[0] == "2001:db8::5"
+    assert attempts == ["203.0.113.5", "2001:db8::5"]
+
+    attempts.clear()
+    with pytest.raises(ValueError, match="non_public_address"):
+        pt.connect_first(["192.0.2.99", "2001:db8::5"], 443, timeout=2)
+    assert attempts == []
+
+    attempts.clear()
+    with pytest.raises(TimeoutError, match="second_timed_out"):
+        pt.connect_first(["203.0.113.5", "198.51.100.8"], 443, timeout=2)
+    assert attempts == ["203.0.113.5", "198.51.100.8"]
+
