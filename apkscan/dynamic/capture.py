@@ -190,7 +190,8 @@ Java.perform(function () {
 """
 
 # ★#8 合法抓包模式（both=mitm+floor；floor-only/no-proxy=不设代理只带外抓；mitm-only=不起 floor）。
-_CAPTURE_MODES = frozenset({"both", "floor-only", "mitm-only", "no-proxy"})
+_CAPTURE_MODES = frozenset(capabilities.CAPTURE_MODES)
+_ANTIDETECT_MODES = frozenset(capabilities.ANTIDETECT_MODES)
 
 #: P0-a：行为修改 shim 注入轮（modified-runtime）的 observed-contact 证据降钉令牌。仍以 "runtime" 开头
 #: → ``is_runtime_seen`` 保持 True（该值确实在运行时出现过）；但**不在**
@@ -542,13 +543,14 @@ def run(
         return empty_result(STATUS_ERROR, f"mode 取值非法：{mode!r}（可选 {'/'.join(sorted(_CAPTURE_MODES))}）")
     # ★行为修改档位校验（第二道授权门在 antidetect 之外，见 allow_behavior_modification）：只允许 off/java；
     #    native 主仓暂无内置 native shim，取该值不静默降级而是拒绝——遵「不可判定不得返回正常值」。
-    if antidetect not in ("off", "java"):
+    if antidetect not in _ANTIDETECT_MODES:
         logger.error(
-            "[capture] antidetect 取值非法：%r（可选 off/java；native 主仓暂无内置 native shim）", antidetect
+            "[capture] antidetect 取值非法：%r（可选 %s；native 主仓暂无内置 native shim）",
+            antidetect, "/".join(capabilities.ANTIDETECT_MODES),
         )
         return empty_result(
             STATUS_ERROR,
-            f"antidetect 取值非法：{antidetect!r}（可选 off/java；native 主仓暂无内置 native shim）",
+            f"antidetect 取值非法：{antidetect!r}（可选 {'/'.join(capabilities.ANTIDETECT_MODES)}；native 主仓暂无内置 native shim）",
         )
     use_mitm = mode not in ("floor-only", "no-proxy")
     use_floor = mode != "mitm-only"
