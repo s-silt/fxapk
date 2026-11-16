@@ -5,9 +5,12 @@
 
 ## 待发布
 
+## 1.27.1 — 2026-11-16
+
 - `capture --mode` 非法取值的报错文案补上 `no-proxy`；capture 模式与 `--antidetect` 档位改由 `apkscan.dynamic.capabilities` 单一定义，测试拦截手写副本。
 - 静默 except 基线契约（`tests/contracts/test_silent_except_baseline.py`）：存量逐条登记理由，新增即失败；归因时序预扫、socket 快照解析、指纹规则正则、phase2 报告重读、corpus 校验路径解析、富化子进程清理等处的失败改为写日志，避免工具失败被读成阴性。
 - pytest 默认只收集 `tests/`。
+- 验证范围为合成回归与跨平台 CI；可选插件源码与版本未变。
 
 ## 1.27.0 — 2026-11-09
 
