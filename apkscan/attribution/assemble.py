@@ -754,7 +754,11 @@ def _overseas_contact_timestamps(endpoints: Sequence[Any]) -> list[float]:
             country = _ip_endpoint_country(ep)
             if ts is not None and country and country != "CN" and _endpoint_asn_country(ep) != "CN":
                 out.append(ts)
-        except Exception:  # noqa: BLE001 - 一个坏端点不得沉掉时序预扫
+        except Exception as exc:  # noqa: BLE001 - 一个坏端点不得沉掉时序预扫
+            # 跳过会让时序池少一个点，留 warning，避免「工具失败」被读成「无境外接触」。
+            logger.warning(
+                "[attribution] 境外接触时序预扫跳过一个端点：%s", type(exc).__name__
+            )
             continue
     return out
 

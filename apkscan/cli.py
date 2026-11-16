@@ -957,12 +957,14 @@ def capture(
             typer.echo("该功能未安装：apkscan.dynamic.capture 不可用（动态抓包模块尚未就绪）。")
             raise typer.Exit(code=1) from None
 
-        if mode not in ("both", "floor-only", "mitm-only", "no-proxy"):
-            typer.echo(f"--mode 取值非法：{mode!r}（可选 both / floor-only / mitm-only）")
+        from apkscan.dynamic.capabilities import ANTIDETECT_MODES, CAPTURE_MODES
+
+        if mode not in CAPTURE_MODES:
+            typer.echo(f"--mode 取值非法：{mode!r}（可选 {' / '.join(CAPTURE_MODES)}）")
             raise typer.Exit(code=2)
-        if antidetect not in ("off", "java"):
+        if antidetect not in ANTIDETECT_MODES:
             typer.echo(
-                f"--antidetect 取值非法：{antidetect!r}（可选 off / java；native 主仓暂无内置 native shim）"
+                f"--antidetect 取值非法：{antidetect!r}（可选 {' / '.join(ANTIDETECT_MODES)}；native 主仓暂无内置 native shim）"
             )
             raise typer.Exit(code=2)
         from apkscan.core.evidence_archive import ArchiveError
@@ -1155,9 +1157,11 @@ def auto(
 
         # ★与 capture 命令同口径：native 主仓无落点，显式拒绝而非静默当"未授权"跳过——
         #   否则帮助说"将报错"、实际却只是悄悄不跑旁路，用户拿不到真实原因。
-        if antidetect not in ("off", "java"):
+        from apkscan.dynamic.capabilities import ANTIDETECT_MODES
+
+        if antidetect not in ANTIDETECT_MODES:
             typer.echo(
-                f"--antidetect 取值非法：{antidetect!r}（可选 off / java；native 主仓暂无内置 native shim）"
+                f"--antidetect 取值非法：{antidetect!r}（可选 {' / '.join(ANTIDETECT_MODES)}；native 主仓暂无内置 native shim）"
             )
             raise typer.Exit(code=2)
         out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/

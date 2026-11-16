@@ -25,7 +25,7 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证分析 CLI：按能力门�
 
 设备排查默认先 `fxapk doctor --no-fix`；修复前核对该设备和操作类别的授权。专用测试机身份不等于清数据、替换样本或行为修改授权。
 
-**脱敏只管 `digest`。** 以下出口原样输出高敏值，运行时各自向 stderr 提醒一行：`jsonl` / `diff` / `lead show|restore|replay` / `corpus events|ls|seen|shared-config|shared-native|shared-build-env|link-candidates` / `probe-leads` / `pcap-leads`，以及 `export` CSV、HTML/PDF、文书、corpus 存证、`case_correlation.json`、`report.json` 本身。判断方法：它的 stdout 会不会出现线索值。`corpus link-discover|link-explain|link-groups` 默认 `--evidence-values omit`，显式 `raw` 即恢复原值；`link-labels-validate|link-evaluate|link-readiness|link-train` 只输出聚合结果。不要对用户说「已全部脱敏」。
+**脱敏只管 `digest`。** 以下出口原样输出高敏值，运行时各自向 stderr 提醒一行：`jsonl` / `diff` / `lead show|restore|replay` / `corpus events|ls|seen|shared-config|shared-native|shared-build-env|link-candidates` / `probe-leads` / `pcap-leads`，以及 `export` CSV、HTML/PDF、文书、corpus 存证、`case_correlation.json`、`report.json` 本身。判断方法：它的 stdout 会不会出现线索值。`corpus link-discover|link-explain|link-groups` 默认 `--evidence-values omit`，显式 `raw` 即恢复原值；`link-labels-validate|link-evaluate|link-readiness|link-train` 只输出聚合结果。不要对用户说「已全部脱敏」。名单以 `apkscan.core.redact.UNREDACTED_AGENT_COMMANDS` 为准，接线与文档同步由 `tests/test_redact.py` 锁定。
 
 ## 3. 行为铁律：先跑 fxapk，据产物决策
 
@@ -67,8 +67,8 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证分析 CLI：按能力门�
 3. 富化/判型：读逐目标、逐来源回执，区分 `hit` / `no_record` / `failed` / `skipped` / `disabled`；命中少可能是真无记录。
 4. 降噪：剔反诈拦截页和大厂共享端点；CDN 边缘不当落地机。
 5. 串案（已提供授权库时）：独特字值跨案自查。共享 native SHA、证书、域名或包名不等于同族或同一主体，须排除公共库、SDK、壳、构建链和正版重打包继承。
-6. 五层闭环：`fxapk case close`，逐目标核验 ①运行时业务证据 ②IP 资源持有者 ③起源 ASN ④云/IDC/CDN 分发关系 ⑤最终调证对象。CDN 没有 Origin 必须保持 `partial`。
-7. 验收：只有 `report.meta.closure.status=complete` 才能称证据闭环。`partial`/`failed` 原样汇报 `gaps` 与 `next_actions`。`auto --strict-case` 退出码 `0/5/6` = `complete/partial/failed`。
+6. 五层闭环：`fxapk case close`，逐目标核验 ①运行时业务证据 ②IP 资源持有者 ③起源 ASN ④云/IDC/CDN 分发关系 ⑤最终调证对象。CDN 没有 Origin 必须保持 `partial`（`tests/test_closure.py::test_cdn_without_origin_cannot_be_complete`）。
+7. 验收：只有 `report.meta.closure.status=complete` 才能称证据闭环。`partial`/`failed` 原样汇报 `gaps` 与 `next_actions`。`auto --strict-case` 退出码 `0/5/6` = `complete/partial/failed`（`auto` 的 5/6 由 `tests/test_auto.py`、`case close` 的 0/5/6 由 `tests/test_case_cli.py` 锁定）。
 
 **动态证据口径**：`capture status=done` 只表示采集流程完成；`case close` 只有同一公网业务候选同时满足目标 App 归因、业务端点判定和双向载荷门才判 `complete`；归因不唯一、APK 身份未知或只有 modified-runtime 证据最多 `partial`；只有通道或零业务流量为 `failed`。探针线索的 confidence 是 advice 的投影：单源待核→LOW、建议调证→MEDIUM，只有 merge 阶段与静态/pcap 二次印证才升 HIGH。
 
@@ -102,7 +102,7 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证分析 CLI：按能力门�
 
 然后：`findings`（CRITICAL/HIGH/MEDIUM 事实判断，`counts.omitted` 告诉你省了多少）→ **leads**（`category`/`value`/`subject`/`advice`/`where_to_request`/`evidence_to_obtain`/`notes`，优先 advice=建议调证）。
 
-境外画像：`meta.overseas_targets` 是 **profile-only** 投影（只列 Shodan/CT 有实质画像的主机），必须同时读 `overseas_target_coverage` 与 `summary.overseas_*` 计数；「已画像 0」不等于「候选 0」。五层归因在 `endpoints[].enrichment["attribution"]`：`resource_holder → origin_network → hosting_provider → edge_provider → service_operator`，per-IP 产链，`service_operator` 恒 unknown，不从 ASN/RDAP 推断。**IP 落在某云厂商 ASN ≠ App 由该厂商运营。**
+境外画像：`meta.overseas_targets` 是 **profile-only** 投影（只列 Shodan/CT 有实质画像的主机），必须同时读 `overseas_target_coverage` 与 `summary.overseas_*` 计数；「已画像 0」不等于「候选 0」。五层归因在 `endpoints[].enrichment["attribution"]`：`resource_holder → origin_network → hosting_provider → edge_provider → service_operator`，per-IP 产链，`service_operator` 恒 unknown，不从 ASN/RDAP 推断（`tests/test_attribution.py` 锁定）。**IP 落在某云厂商 ASN ≠ App 由该厂商运营。**
 
 ## 6. 网页观察与 Native 恢复（可选 REA 插件）
 
@@ -144,7 +144,7 @@ git config core.hooksPath .githooks    # 提交前泄漏扫描，改代码必开
 ## 10. 开发约定
 
 - 文档/指令变更只做格式、引用、契约与泄漏检查；代码行为变更必过本地三关：`python -m ruff check apkscan tests` + `python -m pyright apkscan` + `python -m pytest -q`。`-m "not slow"` 排除需要 `FXAPK_TEST_APK` 的真 spawn 等价测试。
-- Python type hints；pytest，不用 unittest。富化器继承 `BaseEnricher`，失败返回 `EnrichmentResult(ok=False)`，不裸 except、不吞 log。
+- Python type hints；pytest，不用 unittest。富化器继承 `BaseEnricher`，失败返回 `EnrichmentResult(ok=False)`，不裸 except、不吞 log（只含 pass/continue/break 的 except 由 `tests/contracts/test_silent_except_baseline.py` 按基线拦截新增）。
 - 分析器并行（`core/pipeline.py` + `snapshot.py`）守「串行 == 并行 逐字节一致」；set 派生顺序显式排序。逃生开关：`FXAPK_NO_PARALLEL=1`、`FXAPK_MAX_WORKERS=N`、`FXAPK_WORKER_BASE_MB`、`FXAPK_MEM_SAFETY`。
 - CI 装 `pip install -e "."`：可选依赖进 `pyproject` extra，需要它的 CI job 要装；依赖 extra 的测试 `pytest.importorskip`。可选插件默认发现不得让坏插件拖垮核心命令。
 - 合并前等 CI 绿（`gh run watch <id> --exit-status`）；不 `--no-verify`，不 force push master；未经指示不主动 commit。

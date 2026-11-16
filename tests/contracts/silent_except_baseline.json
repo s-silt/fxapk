@@ -1,0 +1,195 @@
+{
+  "readme": [
+    "静默 except 基线：except 块体只有 pass/continue/break/.../裸字符串的存量写法。",
+    "键 = 文件::函数限定名::异常类型::语句；count = 出现次数（不含行号）；reason = 为什么允许静默（必填）。",
+    "本文件由 python -m tests.contracts.silent_except --write 生成，",
+    "由 test_silent_except_baseline.py 与现实做双向严格比对。",
+    "★不要为了变绿无脑重生成：新增项应改成留日志或返回失败状态。"
+  ],
+  "entries": {
+    "apkscan/analyzers/api_surface.py::ApiSurfaceAnalyzer._scan_native::UnicodeDecodeError::continue": {
+      "count": 1,
+      "reason": "字符类已限 ASCII，解码失败不可达；跳过非 ASCII 候选"
+    },
+    "apkscan/analyzers/certificate.py::_parse_dt::ValueError::continue": {
+      "count": 1,
+      "reason": "按格式列表逐个尝试解析日期"
+    },
+    "apkscan/analyzers/certificate.py::_parse_dt::ValueError::pass": {
+      "count": 1,
+      "reason": "ISO 解析失败后改试其他日期格式"
+    },
+    "apkscan/analyzers/endpoints.py::EndpointsAnalyzer._nonstandard_loopback_ips._harvest::ValueError::continue": {
+      "count": 1,
+      "reason": "输入解析回退：值不是该格式就换下一个候选，失败本身就是判定结果"
+    },
+    "apkscan/analyzers/jadx.py::_make_tree_writable::OSError::continue": {
+      "count": 1,
+      "reason": "清理前尽力去只读位；成败由 _remove_tree_checked 的存在性复核判定"
+    },
+    "apkscan/analyzers/jadx.py::_remove_tree_checked::OSError::pass": {
+      "count": 1,
+      "reason": "删除结果由紧随其后的存在性复核判定并报告"
+    },
+    "apkscan/analyzers/native_config_channel.py::NativeConfigChannelAnalyzer._templates::UnicodeDecodeError::continue": {
+      "count": 1,
+      "reason": "非 ASCII 字节串不是 URL 模板，跳过"
+    },
+    "apkscan/attribution/assemble.py::_active_check_features::(ValueError, TypeError)::continue": {
+      "count": 1,
+      "reason": "载荷哈希核对失败时排除该请求（fail-closed），不计入特征"
+    },
+    "apkscan/commands/reanalysis_cli.py::_publish_pair::FileNotFoundError::pass": {
+      "count": 1,
+      "reason": "回滚时删除可能尚未写出的文件，不存在即目标状态"
+    },
+    "apkscan/commands/reanalysis_cli.py::reanalysis::FileNotFoundError::pass": {
+      "count": 1,
+      "reason": "回滚时删除可能尚未写出的文件，不存在即目标状态"
+    },
+    "apkscan/config/fetch.py::_assert_peer_public::OSError::pass": {
+      "count": 1,
+      "reason": "拒绝连接后关闭 socket，关闭失败不改变拒绝结论"
+    },
+    "apkscan/config/fetch.py::_checked_addresses::ValueError::continue": {
+      "count": 1,
+      "reason": "DNS 返回的非 IP 条目跳过，后续按剩余地址做公网校验"
+    },
+    "apkscan/config/string_graph.py::bind_config_consumers::ValueError::continue": {
+      "count": 1,
+      "reason": "正则命中的片段不是合法 JSON 就不是配置对象，跳过"
+    },
+    "apkscan/core/atomic.py::_allocate_private_temporary::FileExistsError::continue": {
+      "count": 1,
+      "reason": "临时文件名冲突时换下一个随机名重试"
+    },
+    "apkscan/core/batch_enrich.py::classify_target::ValueError::pass": {
+      "count": 1,
+      "reason": "不是 IP 就继续按域名分类（try/else 分支）"
+    },
+    "apkscan/core/corpus.py::reconcile_inventory::(ValueError, RecursionError)::pass": {
+      "count": 1,
+      "reason": "整体不是 JSON 时按 JSONL 逐行处理，逐行错误另有回执"
+    },
+    "apkscan/core/corpus.py::snapshot_manifest::OSError::pass": {
+      "count": 1,
+      "reason": "最新快照读不出就照常新建快照，不影响正确性"
+    },
+    "apkscan/core/dex_records.py::collect_dex_records::StopIteration::continue": {
+      "count": 1,
+      "reason": "迭代器耗尽即该路结束，属正常控制流"
+    },
+    "apkscan/core/enrichment.py::_dispatch_bounded::StopIteration::break": {
+      "count": 1,
+      "reason": "待派发端点耗尽即停止派发，属正常控制流"
+    },
+    "apkscan/core/enrichment.py::_terminate_new_children::psutil.NoSuchProcess::continue": {
+      "count": 2,
+      "reason": "子进程已退出（NoSuchProcess）即目标状态；其他失败写 warning"
+    },
+    "apkscan/core/jadx_index.py::scan_java_sources::(ValueError, OSError)::continue": {
+      "count": 1,
+      "reason": "rglob 结果不能归一成相对路径时跳过该文件"
+    },
+    "apkscan/core/leakscan.py::_ipv4_findings::ValueError::continue": {
+      "count": 1,
+      "reason": "形似地址但不是合法 IP 的串不是泄漏嫌疑"
+    },
+    "apkscan/core/leakscan.py::_ipv6_findings::ValueError::continue": {
+      "count": 1,
+      "reason": "形似地址但不是合法 IP 的串不是泄漏嫌疑"
+    },
+    "apkscan/core/logsetup.py::LocatingFormatter.format::Exception::pass": {
+      "count": 1,
+      "reason": "位于日志 formatter 内，再写日志会递归；拼接失败保留原日志文本"
+    },
+    "apkscan/core/phase2/decision.py::_atomic_write_text::FileNotFoundError::pass": {
+      "count": 1,
+      "reason": "清理临时文件，不存在即目标状态"
+    },
+    "apkscan/core/pipeline.py::_dependency_versions::PackageNotFoundError::continue": {
+      "count": 1,
+      "reason": "未安装的可选依赖不列入版本表"
+    },
+    "apkscan/core/proctree.py::_posix_kill_group::(ProcessLookupError, PermissionError, OSError)::pass": {
+      "count": 1,
+      "reason": "杀进程组后由下方存活验证定性，不在这里掩盖"
+    },
+    "apkscan/core/proctree.py::_posix_kill_group::psutil.NoSuchProcess::pass": {
+      "count": 1,
+      "reason": "杀进程组后由下方存活验证定性，不在这里掩盖"
+    },
+    "apkscan/core/proctree.py::_posix_owned_processes::(psutil.NoSuchProcess, ProcessLookupError)::continue": {
+      "count": 1,
+      "reason": "进程在枚举期间退出或无权读取属性，按不属于本次调用处理"
+    },
+    "apkscan/core/proctree.py::_posix_owned_processes::psutil.AccessDenied::pass": {
+      "count": 1,
+      "reason": "进程在枚举期间退出或无权读取属性，按不属于本次调用处理"
+    },
+    "apkscan/core/proctree.py::_posix_owned_processes::psutil.NoSuchProcess::continue": {
+      "count": 1,
+      "reason": "进程在枚举期间退出或无权读取属性，按不属于本次调用处理"
+    },
+    "apkscan/core/proctree.py::_run_owned_impl::subprocess.TimeoutExpired::pass": {
+      "count": 2,
+      "reason": "根进程宽限期内未退出，随后走强制终止路径"
+    },
+    "apkscan/core/webctx.py::load_web_evidence::ValueError::continue": {
+      "count": 2,
+      "reason": "_iter_files 保证在 root 下，不可达分支"
+    },
+    "apkscan/dynamic/addressing.py::project_addressing::(OSError, ValueError, TypeError)::pass": {
+      "count": 1,
+      "reason": "读取或核对失败时 verified 保持 False（fail-closed），状态已写进结果"
+    },
+    "apkscan/dynamic/capture.py::_capture::_MitmStartupError::pass": {
+      "count": 1,
+      "reason": "status/reason 已在抛出点设好，跳到 finally 统一清理"
+    },
+    "apkscan/dynamic/pcap_ingest.py::_load_attribution_ledger::ValueError::continue": {
+      "count": 1,
+      "reason": "输入解析回退：值不是该格式就换下一个候选，失败本身就是判定结果"
+    },
+    "apkscan/dynamic/pcap_ingest.py::_runtime_dns_endpoint_dicts::ValueError::pass": {
+      "count": 1,
+      "reason": "输入解析回退：值不是该格式就换下一个候选，失败本身就是判定结果"
+    },
+    "apkscan/dynamic/pcap_ingest.py::_sanitize_ledger_capture::ValueError::continue": {
+      "count": 1,
+      "reason": "输入解析回退：值不是该格式就换下一个候选，失败本身就是判定结果"
+    },
+    "apkscan/dynamic/probe_ingest.py::_network_target::ValueError::pass": {
+      "count": 1,
+      "reason": "不是 IP 就按主机名处理（try/else 分支）"
+    },
+    "apkscan/dynamic/socket_attr.py::parse_socket_timeline::(TypeError, ValueError)::continue": {
+      "count": 1,
+      "reason": "坏 JSON 行逐行跳过，函数文档已声明该行为"
+    },
+    "apkscan/enrichers/_http.py::_host_is_public::ValueError::pass": {
+      "count": 1,
+      "reason": "不是 IP 字面量就按主机名走 DNS 校验"
+    },
+    "apkscan/enrichers/_rate_limit.py::RateController.observe::(ValueError, TypeError, OverflowError)::pass": {
+      "count": 1,
+      "reason": "非法 Retry-After 时保留更保守的本地窗口"
+    },
+    "apkscan/enrichers/multisource.py::_fold_routing_history::(TypeError, ValueError)::continue": {
+      "count": 1,
+      "reason": "非数字的 peers 字段不参与路由历史统计"
+    },
+    "apkscan/enrichers/shodan.py::_cookie_names::(CookieError, ValueError)::pass": {
+      "count": 1,
+      "reason": "非法 Cookie 头不产出 Cookie 名"
+    },
+    "apkscan/network/converters.py::_safe_headers::(TypeError, ValueError)::continue": {
+      "count": 1,
+      "reason": "无法清洗的头值丢弃，不输出未清洗原值"
+    },
+    "apkscan/network/fingerprints.py::normalize_domain::ValueError::pass": {
+      "count": 1,
+      "reason": "不是 IP 就按域名归一（try/else 分支）"
+    }
+  }
+}

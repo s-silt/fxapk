@@ -29,8 +29,11 @@ CAP_CA_TRUSTED = "ca_trusted"      # mitm CA 已装进设备系统信任库
 CAP_TSHARK = "tshark"              # 主机侧 tshark 可用（keylog 深度解密）
 CAP_TLS_KEYS = "tls_keys"          # 抓包产出了 NSS TLS Key Log
 
-#: 支持的 capture 模式（与 cli.py capture --mode / capture._CAPTURE_MODES 对齐）。
+#: 支持的 capture 模式（单一事实源，cli.py capture --mode 与 capture.py 共用）。
 CAPTURE_MODES: tuple[str, ...] = ("floor-only", "both", "mitm-only", "no-proxy")
+
+#: 支持的行为修改 shim 档位（单一事实源，cli.py capture/auto --antidetect 与 capture.py 共用）。
+ANTIDETECT_MODES: tuple[str, ...] = ("off", "java")
 
 #: 每种模式的**底座能力**——全满足即该模式能产出核心产物（floor.pcap / 代理明文流）。
 #: ★both 的底座 = floor（mitm 是增强）：缺 mitm/CA 时 both 自动等效降级为 floor-only，仍抓 pcap。

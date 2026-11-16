@@ -274,12 +274,12 @@ def fetch_config_object(
                 if sock is not None:
                     sock.shutdown(socket.SHUT_RDWR)
                     sock.close()
-            except Exception:  # noqa: BLE001 — 解包失败仍走 resp.close() 兜底
-                pass
+            except Exception as exc:  # noqa: BLE001 — 解包失败仍走 resp.close() 兜底
+                logger.debug("[remote_config] 看门狗掐断 socket 失败：%s", type(exc).__name__)
             try:
                 resp.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[remote_config] 看门狗关闭响应失败：%s", type(exc).__name__)
 
         guard = threading.Thread(target=_deadline_guard, daemon=True)
         guard.start()
@@ -314,12 +314,12 @@ def fetch_config_object(
         if resp is not None:
             try:
                 resp.close()
-            except Exception:  # noqa: BLE001 — 关闭失败无关紧要
-                pass
+            except Exception as exc:  # noqa: BLE001 — 关闭失败不影响下载结果
+                logger.debug("[remote_config] 关闭响应失败：%s", type(exc).__name__)
         try:
             session.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[remote_config] 关闭会话失败：%s", type(exc).__name__)
 
 
 __all__ = ["FetchResult", "fetch_config_object"]
