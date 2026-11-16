@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import logging
 import re
 from dataclasses import dataclass, field
@@ -297,6 +298,7 @@ class ReToolkitAnalyzer(BaseAnalyzer):
         decoded_budget = _MAX_STUB_DECODE_BYTES
         checked = 0
         skipped_oversize = 0
+        skipped_invalid = 0
         exhausted = False
         for s in dex_strings:
             if checked >= _MAX_STUB_CANDIDATES or decoded_budget <= 0:
@@ -319,7 +321,8 @@ class ReToolkitAnalyzer(BaseAnalyzer):
             checked += 1
             try:
                 data = base64.b64decode(compact + "=" * (-len(compact) % 4), validate=False)
-            except Exception:  # noqa: BLE001 — 非法 base64（非候选输入，非内部故障）跳过
+            except (binascii.Error, ValueError):  # 非法 base64 是输入属性，不是内部故障
+                skipped_invalid += 1
                 continue
             if len(data) < _MIN_STUB_BYTES or data.startswith(_CONTAINER_MAGICS):
                 continue
@@ -343,6 +346,8 @@ class ReToolkitAnalyzer(BaseAnalyzer):
                 "[re_toolkit] 跳过 %d 个超 %d 字节的 base64 载荷（远大于真实 syscall 桩，不参与判定）",
                 skipped_oversize, _MAX_STUB_PAYLOAD_BYTES,
             )
+        if skipped_invalid:
+            logger.debug("[re_toolkit] %d 个 base64 形态候选解码失败，已跳过", skipped_invalid)
         return out
 
     # ------------------------------------------------------------------

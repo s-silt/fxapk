@@ -525,7 +525,9 @@ def _score_one_edge(
             try:
                 if rx and not re.search(str(rx), headers[val]):
                     continue
-            except re.error:
+            except re.error as exc:
+                # 规则里的正则写坏会让该规则永不命中，必须可见，否则「未命中」会被读成阴性。
+                logger.warning("[attribution] 指纹规则 header=%s 的 regex 非法，已跳过：%s", val, exc)
                 continue
             _add("response_header", "response_header", f"response_header:{val}", w, strong_kind=True)
     # 观测 cookie 归一到**名**（剥 =value / 属性），与规则的 cookie 名精确比。

@@ -73,6 +73,8 @@ apkscan = ["rules/*.yaml", "rules/*.txt", "rules/**/*.yaml", "report/templates/*
 "apkscan.dynamic" = ["frida_js/*.js", "frida_probes/*.js"]
 
 [tool.pytest.ini_options]
+# 只收集仓内测试；本地 tmp/、out/ 里的临时检出不得混进来。
+testpaths = ["tests"]
 markers = [
     # 重型真 spawn 端到端校验（加载真实 APK + 起进程池，~40s）。仅当显式设置
     # FXAPK_TEST_APK=<样本路径> 时运行；普通工作树即使存有本地 APK 也保持 skip。

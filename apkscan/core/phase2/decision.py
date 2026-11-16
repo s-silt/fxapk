@@ -1248,10 +1248,7 @@ def _gate_proposal_hosts(proposal: Any) -> tuple[str, ...]:
         # ★用 url/ip/domain 三种 kind 各试一次（复审 P1#2）：URL 值必须走 kind=url 才能提出 hostname，
         # 仅 host/ip 会把 "https://100.64.0.2:443/a" 漏掉或截成 "https:"。取并集，噪音不匹配 established 不误报。
         for kind in ("url", "ip", "domain"):
-            try:
-                normalized = normalize_host(kind, value)
-            except Exception:
-                continue
+            normalized = normalize_host(kind, value)  # 解析失败返回 ""，不抛
             if normalized:
                 hosts.append(str(normalized))
 

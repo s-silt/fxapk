@@ -399,8 +399,10 @@ def _terminate_new_children(before: set[int]) -> None:
     for proc in procs:
         try:
             proc.kill()
-        except psutil.Error:
+        except psutil.NoSuchProcess:
             continue
+        except psutil.Error as exc:
+            logger.warning("[enrich] 无法结束富化子进程 pid=%s：%s", proc.pid, type(exc).__name__)
     deadline = time.monotonic() + 2.0
     for proc in procs:
         remaining = deadline - time.monotonic()
@@ -408,8 +410,10 @@ def _terminate_new_children(before: set[int]) -> None:
             break
         try:
             proc.wait(timeout=remaining)
-        except (psutil.TimeoutExpired, psutil.Error, KeyboardInterrupt):
+        except psutil.NoSuchProcess:
             continue
+        except (psutil.TimeoutExpired, psutil.Error, KeyboardInterrupt) as exc:
+            logger.warning("[enrich] 富化子进程 pid=%s 未确认退出：%s", proc.pid, type(exc).__name__)
 
 
 def _record_cancel(endpoint: Endpoint, provider: str, status: str) -> None:
