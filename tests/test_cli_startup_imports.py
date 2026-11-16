@@ -48,9 +48,11 @@ def test_lightweight_cli_does_not_load_http_implementation(args: list[str]) -> N
     env = dict(os.environ)
     for name in ("PYTHONPATH", "FXHX_API_KEY", "CLIPROXYAPI_API_KEY"):
         env.pop(name, None)
+    # Pin both ends of this test-owned pipe, independently of the host locale.
+    env["PYTHONIOENCODING"] = "utf-8:strict"
     result = subprocess.run(
         [sys.executable, "-c", _SCRIPT, *args], cwd=_ROOT, env=env,
-        input="", capture_output=True, text=True, timeout=30,
+        input="", capture_output=True, text=True, encoding="utf-8", timeout=30,
     )
     assert result.returncode == 0, result.stderr
 

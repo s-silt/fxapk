@@ -66,7 +66,7 @@ def test_new_report_records_provenance(
         report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
     path = tmp_path / "report.json"
     dump(report, str(path))
-    payload = json.loads(path.read_text())
+    payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["meta"]["tool_version"] == effective
     expected = {
         "effective_version": effective,
