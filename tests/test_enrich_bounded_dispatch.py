@@ -3,8 +3,8 @@ from concurrent.futures import Future
 
 import pytest
 
-from apkscan.core import enrichment
-from apkscan.core.models import Endpoint
+from fxapk.core import enrichment
+from fxapk.core.models import Endpoint
 
 
 @pytest.mark.parametrize("entrypoint", ["_enrich_endpoints", "_run_enrichment"])
@@ -56,7 +56,7 @@ def test_dispatch_window_is_bounded_and_every_endpoint_runs_once(monkeypatch, en
 
 
 def test_unexpected_gate_error_is_not_suppressed() -> None:
-    from apkscan.core.registry import BaseEnricher
+    from fxapk.core.registry import BaseEnricher
 
     class NeverEnricher(BaseEnricher):
         name = "never"

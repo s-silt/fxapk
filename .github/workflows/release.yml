@@ -59,6 +59,15 @@ jobs:
           python -m build plugins/fxapk-rea --outdir plugin-dist
           python -m build plugins/fxapk-asc --outdir plugin-dist
           python -m build plugins/fxapk-flutter --outdir plugin-dist
+      # ★上传前用**即将上传的同一个 wheel** 跑用户路径：离线分析 → digest → 证据打包 → 校验 →
+      #   损坏副本必须非零。失败则不上传；这里不重新构建，发布的就是被验证的产物。
+      - name: Smoke-test the exact wheel to be published
+        run: |
+          python -m venv /tmp/release-smoke
+          /tmp/release-smoke/bin/python -m pip install --upgrade pip
+          /tmp/release-smoke/bin/python -m pip install dist/*.whl
+          /tmp/release-smoke/bin/python -I tools/release_smoke.py --expect-version "${GITHUB_REF_NAME#v}"
+          sha256sum dist/*.whl
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

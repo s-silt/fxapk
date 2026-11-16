@@ -7,7 +7,7 @@ import random
 
 import pytest
 
-from apkscan.attribution.graph import build_infrastructure_graph
+from fxapk.attribution.graph import build_infrastructure_graph
 from tests.attribution_graph_fakes import cert, domain, domestic_relay_score, evidence, ip
 
 

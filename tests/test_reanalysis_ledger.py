@@ -1,4 +1,4 @@
-"""P3-C 红态契约：apkscan/core/reanalysis_ledger.py（账本投影 + sidecar 发布）。
+"""P3-C 红态契约：fxapk/core/reanalysis_ledger.py（账本投影 + sidecar 发布）。
 
 核心不变量（设计见本地 P3 v4 spec §6 P3-C）：
 - 单次投影调用只追加 ACTION_PROPOSED——绝无 ACTION_AUTHORIZED / OUTCOME（R1 锁 14/15）；
@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from apkscan.core import judgment_ledger as jl
-from apkscan.core import reanalysis as rp
-from apkscan.core import reanalysis_contract as rxc
-from apkscan.core import reanalysis_ledger as rl
-from apkscan.core.judgment_ledger import EventType
-from apkscan.core.recognition_contract import (
+from fxapk.core import judgment_ledger as jl
+from fxapk.core import reanalysis as rp
+from fxapk.core import reanalysis_contract as rxc
+from fxapk.core import reanalysis_ledger as rl
+from fxapk.core.judgment_ledger import EventType
+from fxapk.core.recognition_contract import (
     ActorKind,
     AuthorizationLevel,
     ProducerKind,
@@ -124,8 +124,8 @@ def test_projection_is_idempotent_for_identical_replan():
 def test_projection_skips_after_terminal_outcome_without_crashing():
     # codex 复审 P1：终态（已授权+已出结果）后同输入重规划，不得撞底座
     # duplicate record_id——须走 already_recorded 幂等跳过。
-    from apkscan.core.recognition_codec import build_action_outcome
-    from apkscan.core.recognition_contract import (
+    from fxapk.core.recognition_codec import build_action_outcome
+    from fxapk.core.recognition_contract import (
         ActionUsage,
         OutcomeStatus,
     )
@@ -179,7 +179,7 @@ def test_projection_dedupe_skip_within_one_batch():
     # 在生成层被非终态 dedupe 跳过，而不是撞底座。
     import dataclasses as _dc
 
-    from apkscan.core.recognition_codec import build_next_action
+    from fxapk.core.recognition_codec import build_next_action
 
     base = make_gap_ledger()
     planned = _planned()

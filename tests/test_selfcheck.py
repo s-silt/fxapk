@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.plugins import registry
-from apkscan.selfcheck import run_selfcheck
+from fxapk import cli
+from fxapk.plugins import registry
+from fxapk.selfcheck import run_selfcheck
 
 runner = CliRunner()
 
@@ -50,8 +50,8 @@ def test_selfcheck_reports_installed_rea_disabled_without_loading(monkeypatch) -
     )
     monkeypatch.setattr(registry, "_entry_points", lambda: [entry])
     monkeypatch.delenv("FXAPK_ENABLE_REA", raising=False)
-    monkeypatch.setattr("apkscan.core.registry.detect_capabilities", lambda **_kwargs: set())
-    monkeypatch.setattr("apkscan.selfcheck.build_credential_components", lambda: [])
+    monkeypatch.setattr("fxapk.core.registry.detect_capabilities", lambda **_kwargs: set())
+    monkeypatch.setattr("fxapk.selfcheck.build_credential_components", lambda: [])
 
     res = run_selfcheck(online=False, probe_network=False)
 

@@ -5,12 +5,12 @@
 """
 from __future__ import annotations
 
-from apkscan.analyzers.api_surface import (
+from fxapk.analyzers.api_surface import (
     ApiSurfaceAnalyzer,
     rejection_reason,
     semantics_for,
 )
-from apkscan.core.models import Severity
+from fxapk.core.models import Severity
 from tests.conftest import FakeContext
 
 
@@ -307,7 +307,7 @@ def test_native_so_extraction_reads_whole_lib_not_sampled():
 
 def test_oversized_so_skipped_by_declared_size():
     """声明大小超单库上限的 .so 不读（防超大/zip-bomb 膨胀内存）。"""
-    from apkscan.analyzers.api_surface import _MAX_SO_BYTES
+    from fxapk.analyzers.api_surface import _MAX_SO_BYTES
 
     so = b"\x7fELF/api/home/getContactList"
     result = ApiSurfaceAnalyzer().analyze(

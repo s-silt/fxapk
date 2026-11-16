@@ -7,7 +7,7 @@ import importlib.resources
 
 import pytest
 
-from apkscan.core import attribution, registry
+from fxapk.core import attribution, registry
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +92,7 @@ def test_ruleset_digest_covers_subdir_files() -> None:
     """★分目录规则文件须入 digest（否则分目录改了规则、digest 不变、破坏可复现锚点）。"""
     digest = registry.ruleset_digest()
     assert digest != "unknown" and len(digest) == 16
-    walked = {rel for rel, _ in registry._walk_rule_files(importlib.resources.files("apkscan") / "rules", "")}
+    walked = {rel for rel, _ in registry._walk_rule_files(importlib.resources.files("fxapk") / "rules", "")}
     assert any(rel.startswith("providers/") and rel.endswith(".yaml") for rel in walked)  # 子目录文件被递归收进
     assert any(rel.startswith("providers/investigative/") for rel in walked)  # investigative 深层子目录也入 digest
 

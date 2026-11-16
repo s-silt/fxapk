@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from apkscan.report.digest import build_digest
+from fxapk.report.digest import build_digest
 
 
 def test_digest_projects_ui_observation_statuses() -> None:

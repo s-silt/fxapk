@@ -1,4 +1,4 @@
-"""apkscan.core.appcrypto（C5b 解密器）单测。
+"""fxapk.core.appcrypto（C5b 解密器）单测。
 
 覆盖：
 - 合成密文解密成功（AES-CFB/Pkcs7 + base64 + iv=md5(key+ts).hex[:16]）→ 解回原明文。
@@ -19,8 +19,8 @@ import warnings
 
 import pytest
 
-from apkscan.core import appcrypto
-from apkscan.core.appcrypto import CryptoRecipe, decrypt_envelope
+from fxapk.core import appcrypto
+from fxapk.core.appcrypto import CryptoRecipe, decrypt_envelope
 
 _KEY = "0123456789abcdef0123456789abcdef"
 _TS = 1700000000000

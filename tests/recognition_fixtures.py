@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from apkscan.core.recognition_contract import (
+from fxapk.core.recognition_contract import (
     Actor,
     ActorKind,
     AllowedConclusion,
@@ -44,7 +44,7 @@ from apkscan.core.recognition_contract import (
     SubjectKind,
     SubjectRef,
 )
-from apkscan.core.recognition_codec import (
+from fxapk.core.recognition_codec import (
     build_action_outcome,
     build_claim_candidate,
     build_evidence_anchor,
@@ -56,7 +56,7 @@ from apkscan.core.recognition_codec import (
     build_review_decision,
     compute_coverage_context_digest,
 )
-from apkscan.core.judgment_ledger import EventType, LedgerEvent, make_event
+from fxapk.core.judgment_ledger import EventType, LedgerEvent, make_event
 
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
@@ -468,8 +468,8 @@ def make_completed_action_ledger(
 
 
 def make_candidate_label_feedback() -> object:
-    from apkscan.core.recognition_codec import build_candidate_label_feedback
-    from apkscan.core.recognition_contract import LabelKind
+    from fxapk.core.recognition_codec import build_candidate_label_feedback
+    from fxapk.core.recognition_contract import LabelKind
 
     return build_candidate_label_feedback(
         label_kind=LabelKind.FAMILY_ASSIGNMENT,

@@ -7,7 +7,7 @@
 """
 
 from __future__ import annotations
-from apkscan.core import atomic as atomic_io
+from fxapk.core import atomic as atomic_io
 
 from concurrent.futures import ThreadPoolExecutor
 import copy
@@ -17,7 +17,7 @@ import threading
 
 import pytest
 
-from apkscan.core.models import (
+from fxapk.core.models import (
     ADVICE_INVESTIGATE,
     Confidence,
     Endpoint,
@@ -28,9 +28,9 @@ from apkscan.core.models import (
     Report,
     Severity,
 )
-from apkscan.report import html as report_html
-from apkscan.report import json as report_json
-from apkscan.report.html import (
+from fxapk.report import html as report_html
+from fxapk.report import json as report_json
+from fxapk.report.html import (
     group_leads_by_category,
     network_leads_by_advice,
     sort_leads_by_confidence,
@@ -640,7 +640,7 @@ def test_html_template_has_no_unsafe_filter() -> None:
     import importlib.resources
 
     tmpl = (
-        importlib.resources.files("apkscan") / "report" / "templates" / "report.html.j2"
+        importlib.resources.files("fxapk") / "report" / "templates" / "report.html.j2"
     ).read_text(encoding="utf-8")
     assert "|safe" not in tmpl
     assert "| safe" not in tmpl
@@ -801,7 +801,7 @@ def test_html_render_empty_report(tmp_path: Path) -> None:
 def test_template_loaded_via_importlib_resources(sample_report: Report, tmp_path: Path) -> None:
     """html 模板经 importlib.resources 定位而非 Path(__file__) 相对路径，仍能正常渲染。
 
-    锚顶层包 'apkscan'，并断言模板加载链不再引用模块级 __file__ 相对目录常量
+    锚顶层包 'fxapk'，并断言模板加载链不再引用模块级 __file__ 相对目录常量
     （exe-ready：PyInstaller onefile 下资源不是真实目录，靠 importlib.resources + as_file）。
     """
     # 模块不再保留 __file__ 相对的模板目录常量。
@@ -818,7 +818,7 @@ def test_template_loaded_via_importlib_resources(sample_report: Report, tmp_path
 
 
 def test_lead_is_c2_only_network_and_investigate() -> None:
-    from apkscan.core.models import Lead, LeadCategory
+    from fxapk.core.models import Lead, LeadCategory
 
     assert (
         Lead(category=LeadCategory.DOMAIN, value="c2.backend.example.com", advice="建议调证").is_c2
@@ -835,7 +835,7 @@ def test_lead_is_c2_only_network_and_investigate() -> None:
 
 
 def test_lead_is_runtime_seen() -> None:
-    from apkscan.core.models import Evidence, Lead, LeadCategory
+    from fxapk.core.models import Evidence, Lead, LeadCategory
 
     runtime = Lead(
         category=LeadCategory.DOMAIN,
@@ -857,7 +857,7 @@ def test_lead_is_runtime_contact_tiers_observed_vs_derived() -> None:
     """observed-contact（runtime / runtime-pcap）才 is_runtime_contact；runtime-derived 等其余
     runtime* 只算 is_runtime_seen（动态侧出现）、不算接触——办案人徽标据此分档，勿把「出现在
     runtime 报告里」误当「实连/确认 C2」。"""
-    from apkscan.core.models import (
+    from fxapk.core.models import (
         OBSERVED_CONTACT_SOURCES,
         Evidence,
         Lead,
@@ -897,7 +897,7 @@ def test_merge_runtime_into_lead_dict_upgrades_contact_on_observed_source() -> N
 
     无修复即失败：旧实现只翻 is_runtime_seen，pcap 实抓确认的 C2 在 dict 上被降级为「未确认接触」，
     与属性重算值矛盾、下游按新字段筛「确认接触」会漏掉真确认端点。"""
-    from apkscan.core.models import merge_runtime_into_lead_dict
+    from fxapk.core.models import merge_runtime_into_lead_dict
 
     def _static_lead_dict() -> dict:
         # 序列化态静态 lead：is_runtime_seen / is_runtime_contact 均为 False。
@@ -950,7 +950,7 @@ def test_merge_runtime_into_lead_dict_upgrades_contact_on_observed_source() -> N
 
 
 def test_merge_runtime_into_lead_dict_cannot_upgrade_from_non_case_scope() -> None:
-    from apkscan.core.models import merge_runtime_into_lead_dict
+    from fxapk.core.models import merge_runtime_into_lead_dict
 
     def _static_lead_dict() -> dict:
         return {
@@ -979,7 +979,7 @@ def test_merge_runtime_into_lead_dict_cannot_upgrade_from_non_case_scope() -> No
 
 
 def test_case_scope_can_upgrade_after_same_batch_evidence_signature() -> None:
-    from apkscan.core.models import merge_runtime_into_lead_dict
+    from fxapk.core.models import merge_runtime_into_lead_dict
 
     existing = {
         "category": "IP",
@@ -1023,7 +1023,7 @@ def test_case_scope_can_upgrade_after_same_batch_evidence_signature() -> None:
 def test_json_includes_c2_flags(sample_report: Report, tmp_path: Path) -> None:
     import json as _json
 
-    from apkscan.report import json as report_json
+    from fxapk.report import json as report_json
 
     p = tmp_path / "r.json"
     report_json.dump(sample_report, str(p))
@@ -1035,8 +1035,8 @@ def test_json_includes_c2_flags(sample_report: Report, tmp_path: Path) -> None:
 
 
 def test_html_marks_c2_servers(tmp_path: Path) -> None:
-    from apkscan.core.models import Evidence, Lead, LeadCategory, Report
-    from apkscan.report import html as report_html
+    from fxapk.core.models import Evidence, Lead, LeadCategory, Report
+    from fxapk.report import html as report_html
 
     rpt = Report(
         package_name="com.x",
@@ -1072,8 +1072,8 @@ def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
     ``runtime-derived`` 断言 `badge-c2-live` 不出现，即钉住「手编 / 合成来源不得升『实连』」。
     断言用 ``class="badge badge-c2-*"`` span 标记（CSS 规则 `.badge-c2-*{}` / 注释里也含中文标签，
     故不能只按可见文字判定）。"""
-    from apkscan.core.models import Evidence, Lead, LeadCategory, Report
-    from apkscan.report import html as report_html
+    from fxapk.core.models import Evidence, Lead, LeadCategory, Report
+    from fxapk.report import html as report_html
 
     def _render(source: str | None) -> str:
         refs = [Evidence(
@@ -1140,9 +1140,9 @@ def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> Non
     据宽口径 is_runtime_seen 会把它误呈成「实连/确认 C2」——办案人面的活体确认信任边界漏点。"""
     import json as _json
 
-    from apkscan.core.models import Report
-    from apkscan.dynamic.merge import load_runtime_endpoints, merge_runtime_endpoints
-    from apkscan.report import html as report_html
+    from fxapk.core.models import Report
+    from fxapk.dynamic.merge import load_runtime_endpoints, merge_runtime_endpoints
+    from fxapk.report import html as report_html
 
     # 手编 runtime 报告：公网 IP 端点，evidence 用非 runtime* 来源（模拟无真实 observed-contact 证据）；
     # merge 会把它钉成 runtime-derived（非 observed-contact），而非最强的 runtime。
@@ -1201,8 +1201,8 @@ def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> Non
 def test_non_c2_lead_gets_no_red_badge(tmp_path: Path) -> None:
     """措辞层锁：is_c2=False 的 lead 绝不渲任何 badge-c2* 红徽标
     （SDK/reference/shared 信号不被静态红徽标覆盖的第一道锁）。"""
-    from apkscan.core.models import Lead, LeadCategory, Report
-    from apkscan.report import html as report_html
+    from fxapk.core.models import Lead, LeadCategory, Report
+    from fxapk.report import html as report_html
 
     # is_c2 是派生属性（DOMAIN/IP + 建议调证 ⇒ True）——SDK_SERVICE 即使建议调证
     # 也非 C2，正是「SDK 信号不被红徽标覆盖」的用例本体。
@@ -1224,8 +1224,8 @@ def test_json_keeps_is_c2_internal_field(tmp_path: Path) -> None:
     """内部兼容语义与外部文书语义分测：文案纠错绝不动 json 出口的 is_c2 字段。"""
     import json as _json
 
-    from apkscan.core.models import Lead, LeadCategory, Report
-    from apkscan.report import json as report_json
+    from fxapk.core.models import Lead, LeadCategory, Report
+    from fxapk.report import json as report_json
 
     rpt = Report(
         package_name="com.x",
@@ -1251,8 +1251,8 @@ def test_json_injects_evidence_id_on_every_evidence(sample_report: Report, tmp_p
     序列化后都带 evidence_id，且与 integrity.evidence_id(source, location) 一致。"""
     import json as _json
 
-    from apkscan.core.integrity import evidence_id
-    from apkscan.report import json as report_json
+    from fxapk.core.integrity import evidence_id
+    from fxapk.report import json as report_json
 
     p = tmp_path / "r.json"
     report_json.dump(sample_report, str(p))
@@ -1281,7 +1281,7 @@ def test_json_evidence_id_ignores_snippet(tmp_path: Path) -> None:
     """同 source|location、snippet 不同的两条证据，evidence_id 相同（id 不随 snippet 漂移）。"""
     import json as _json
 
-    from apkscan.report import json as report_json
+    from fxapk.report import json as report_json
 
     rpt = Report(
         package_name="com.x",
@@ -1410,7 +1410,7 @@ def test_dedicated_section_categories_really_have_their_own_block(tmp_path: Path
 
     这份名单一旦与模板漂移，要么某类被渲染两遍，要么它以为有人管、实际没人管。
     """
-    from apkscan.report.html import DEDICATED_SECTION_CATEGORIES, other_lead_groups
+    from fxapk.report.html import DEDICATED_SECTION_CATEGORIES, other_lead_groups
 
     leads = [
         Lead(
@@ -1436,9 +1436,9 @@ def test_skip_advice_rows_collapsed_in_html(tmp_path: Path) -> None:
     """§1.5（用户裁定 2026-08-19）：「无需调证」条目不逐行进 HTML 文书——
     换诚实计数指针；机器出口（json）保持完整（完整性对照锁）。"""
 
-    from apkscan.core.models import Lead, LeadCategory, Report
-    from apkscan.report import html as report_html
-    from apkscan.report import json as report_json
+    from fxapk.core.models import Lead, LeadCategory, Report
+    from fxapk.report import html as report_html
+    from fxapk.report import json as report_json
 
     rpt = Report(
         package_name="com.x",
@@ -1483,13 +1483,13 @@ def test_polish_toc_and_offline_discipline(sample_report: Report, tmp_path: Path
     from importlib import resources
 
     path = tmp_path / "r.html"
-    from apkscan.report import html as report_html
+    from fxapk.report import html as report_html
 
     report_html.render(sample_report, str(path))
     html = path.read_text(encoding="utf-8")
     assert '<nav id="toc"' in html
     assert 'id="toc-script"' in html
-    template_text = (resources.files("apkscan.report") / "templates" / "report.html.j2").read_text(
+    template_text = (resources.files("fxapk.report") / "templates" / "report.html.j2").read_text(
         encoding="utf-8"
     )
     literal_urls = [

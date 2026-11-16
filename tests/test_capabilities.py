@@ -6,7 +6,7 @@ floor-only 仍抓 pcap；明文阶梯强→弱降级；floor 底座也缺 → �
 
 from __future__ import annotations
 
-from apkscan.dynamic import capabilities as C
+from fxapk.dynamic import capabilities as C
 
 _FLOOR = {C.CAP_ADB, C.CAP_DEVICE, C.CAP_DEVICE_TCPDUMP, C.CAP_ROOT_CAPTURE}
 

@@ -12,9 +12,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.recognition_labels import load_recognition_labels
-from apkscan.core.recognition_training import (
+from fxapk import cli
+from fxapk.core.recognition_labels import load_recognition_labels
+from fxapk.core.recognition_training import (
     SplitConfig,
     build_split_manifest,
     encode_split_manifest,
@@ -106,7 +106,7 @@ def _manifest_text() -> str:
 
 
 def _empty_label_set():
-    from apkscan.core.recognition_labels import RecognitionLabelSet
+    from fxapk.core.recognition_labels import RecognitionLabelSet
 
     return RecognitionLabelSet(
         records=(), active=(), effective=(), kind_counts=(), status_counts=(), layer_counts=()

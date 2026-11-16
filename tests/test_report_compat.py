@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from apkscan.core.report_compat import report_revision_warnings
+from fxapk.core.report_compat import report_revision_warnings
 
 
 def _warnings(

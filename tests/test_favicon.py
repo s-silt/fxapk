@@ -11,9 +11,9 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.favicon import FaviconAnalyzer
-from apkscan.core.models import AnalyzerResult, Confidence, LeadCategory
-from apkscan.dynamic.fingerprint import favicon_hash
+from fxapk.analyzers.favicon import FaviconAnalyzer
+from fxapk.core.models import AnalyzerResult, Confidence, LeadCategory
+from fxapk.dynamic.fingerprint import favicon_hash
 from tests.conftest import FakeContext
 
 # 一段非平凡的"图标"字节（够长触发 base64 换行，且不在 denylist 里）。

@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from apkscan.core.models import EvidenceScope
-from apkscan.core.report_io import load_report, report_from_dict
-from apkscan.core.report_schema import (
+from fxapk.core.models import EvidenceScope
+from fxapk.core.report_io import load_report, report_from_dict
+from fxapk.core.report_schema import (
     UnsupportedReportSchema,
     migrate_report_payload,
     report_schema_info,
@@ -104,7 +104,7 @@ def test_future_report_schema_is_rejected_before_typed_write_path(tmp_path) -> N
 
 
 def test_future_report_schema_is_rejected_by_raw_runtime_mutators(tmp_path) -> None:  # noqa: ANN001
-    from apkscan.dynamic import pcap_ingest, probe_ingest
+    from fxapk.dynamic import pcap_ingest, probe_ingest
 
     path = tmp_path / "future.json"
     original = json.dumps(_legacy_payload("9.0"), ensure_ascii=False, indent=2).encode()
@@ -119,7 +119,7 @@ def test_future_report_schema_is_rejected_by_raw_runtime_mutators(tmp_path) -> N
 
 
 def test_future_report_schema_is_rejected_by_config_probe_raw_merge(tmp_path) -> None:  # noqa: ANN001
-    from apkscan.cli import _merge_config_probe_into_report
+    from fxapk.cli import _merge_config_probe_into_report
 
     class Result:
         endpoints: tuple[object, ...] = ()

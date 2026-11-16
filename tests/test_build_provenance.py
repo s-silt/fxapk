@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-import apkscan.analyzers.build_provenance as bp
-from apkscan.analyzers.build_provenance import (
+import fxapk.analyzers.build_provenance as bp
+from fxapk.analyzers.build_provenance import (
     TIER_SELF_HOSTED,
     TIER_THIRD_PARTY,
     TIER_UNKNOWN,
@@ -21,7 +21,7 @@ from apkscan.analyzers.build_provenance import (
     extract_paths,
     parse_build_identifier,
 )
-from apkscan.core.models import AnalyzerResult, Severity
+from fxapk.core.models import AnalyzerResult, Severity
 from tests.conftest import FakeContext
 
 # 合成的私有构建平台路径（结构仿真实形态，标识/项目名均为编造）。
@@ -161,7 +161,7 @@ def test_per_root_quota_stops_one_library_starving_the_rest() -> None:
     后面的 Go 控制面库整库没被扫——报告 self_hosted 是空的，读的人会当成"没有自建路径"。
     这个缺陷只在跑**完整分析器**时暴露：直接调 extract_paths 是绕过预算的，测不出来。
     """
-    from apkscan.analyzers.build_provenance import BuildProvenanceAnalyzer
+    from fxapk.analyzers.build_provenance import BuildProvenanceAnalyzer
 
     noisy = b"\x00".join(
         f"/Users/thirdparty/Projects/vendor/src/module{i:03d}/file{i:03d}.cpp".encode()
@@ -479,7 +479,7 @@ def test_corpus_build_env_lookup_is_reachable_from_cli() -> None:
     """
     import inspect
 
-    from apkscan.commands import corpus as cmd
+    from fxapk.commands import corpus as cmd
 
     src = inspect.getsource(cmd)
     assert "find_by_build_env" in src, "corpus seen 没有接构建环境反查"
@@ -502,7 +502,7 @@ def test_sparse_build_env_is_kept_out_of_cross_case_dimension() -> None:
     都靠这个挡；而真实构建环境实测 26–32 条，两侧中间是空的。
     串案对假阳性最敏感——一条噪音就能把两个互不相干的案件聚成一簇。
     """
-    from apkscan.core import corpus as C
+    from fxapk.core import corpus as C
 
     got = C._build_environments(_env_report([
         {"root": "c:/content", "identifier": "test-UHD.hvc", "count": 1},
@@ -517,7 +517,7 @@ def test_sparse_build_env_is_kept_out_of_cross_case_dimension() -> None:
 
 def test_build_env_without_count_is_not_dropped() -> None:
     """★缺 count 字段（旧报告）时放行——不因少个字段就丢掉已有数据。"""
-    from apkscan.core import corpus as C
+    from fxapk.core import corpus as C
 
     got = C._build_environments(_env_report([
         {"root": "/opt/work", "identifier": "Env1856-Gccc-Verify"},

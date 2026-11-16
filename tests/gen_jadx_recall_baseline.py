@@ -10,7 +10,7 @@ master 行为对账。
 用法（子命令均从仓库根运行）：
 
 0) ``replay`` —— ★端到端一步式（CI 的 ``jadx-recall-replay`` job 与人工复核
-   都走它）：从本仓库 git 对象库导出 :data:`MASTER_COMMIT` 的 apkscan 树 →
+   都走它）：从本仓库 git 对象库导出 :data:`MASTER_COMMIT` 的 fxapk 树 →
    在该树上起子进程跑 ``dump`` → 与钉住基线对账（``verify`` 同一裁决函数）::
 
        python tests/gen_jadx_recall_baseline.py replay [--dump-out master.json]
@@ -19,7 +19,7 @@ master 行为对账。
    会给出 ``git fetch`` 补取命令；也含 dump 输出非法 JSON、或合法 JSON 但结构
    损坏——结构损坏是流程失败，绝不伪装成「对账差异」误导人去改基线）。
 
-1) ``dump`` —— 在「当前 sys.path 可导入的那份 apkscan」下实测语料的提取面与
+1) ``dump`` —— 在「当前 sys.path 可导入的那份 fxapk」下实测语料的提取面与
    默认限额路径面，JSON 落 stdout（``replay`` 的子进程走的就是它；单独手跑
    属分步排障）::
 
@@ -62,7 +62,7 @@ verify 裁判两测）。
 
        python tests/gen_jadx_recall_baseline.py digest
 
-import 纪律：模块级只碰标准库（语料模块、apkscan、基线数据模块、测试模块全部
+import 纪律：模块级只碰标准库（语料模块、fxapk、基线数据模块、测试模块全部
 在子命令内延迟 import）——``dump`` 必须能在 master 树的 sys.path 下运行，而
 pytest 侧只需要 :func:`baseline_fingerprint` 这个纯函数。★replay/verify 的
 裁决链（:func:`diff_dump_against_pinned`）只许 import 纯数据模块
@@ -153,21 +153,26 @@ def baseline_fingerprint(
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _measure(workdir: Path) -> dict[str, Any]:
+#: 基线 commit 早于包更名，那棵树里的导入包名仍是 apkscan；当前树是 fxapk。
+MASTER_PACKAGE = "apkscan"
+
+
+def _measure(workdir: Path, package: str = "fxapk") -> dict[str, Any]:
     """在 workdir 下建索引并实测：提取面 (callee,line) 集 + 默认限额路径节点序。"""
-    from apkscan.core.jadx_callpath import trace_callpath
-    from apkscan.core.jadx_index import (
-        INDEX_SCHEMA_VERSION,
-        DexInput,
-        DexRole,
-        JadxIndexManifest,
-        JadxIndexStore,
-        Limits,
-        build_key_material,
-        derive_index_key,
-        scan_java_sources,
-        verify_dex_inputs,
-    )
+    import importlib
+
+    trace_callpath = importlib.import_module(f"{package}.core.jadx_callpath").trace_callpath
+    jadx_index = importlib.import_module(f"{package}.core.jadx_index")
+    INDEX_SCHEMA_VERSION = jadx_index.INDEX_SCHEMA_VERSION
+    DexInput = jadx_index.DexInput
+    DexRole = jadx_index.DexRole
+    JadxIndexManifest = jadx_index.JadxIndexManifest
+    JadxIndexStore = jadx_index.JadxIndexStore
+    Limits = jadx_index.Limits
+    build_key_material = jadx_index.build_key_material
+    derive_index_key = jadx_index.derive_index_key
+    scan_java_sources = jadx_index.scan_java_sources
+    verify_dex_inputs = jadx_index.verify_dex_inputs
 
     from tests.jadx_recall_corpus import CORPUS, PARITY_QUERIES, REMOVAL_QUERIES
 
@@ -233,8 +238,8 @@ def _measure(workdir: Path) -> dict[str, Any]:
     }
 
 
-def _cmd_dump(workdir: str) -> int:
-    print(json.dumps(_measure(Path(workdir)), ensure_ascii=False, indent=1, sort_keys=True))
+def _cmd_dump(workdir: str, package: str = "fxapk") -> int:
+    print(json.dumps(_measure(Path(workdir), package), ensure_ascii=False, indent=1, sort_keys=True))
     return 0
 
 
@@ -379,11 +384,11 @@ def _cmd_verify(dump_path: str) -> int:
 
 
 def _cmd_replay(dump_out: str | None) -> int:
-    """端到端重放：git archive :data:`MASTER_COMMIT` 的 apkscan 树 → 该树上起
+    """端到端重放：git archive :data:`MASTER_COMMIT` 的 fxapk 树 → 该树上起
     子进程 dump → 进程内与钉住基线对账。
 
     dump 必须是子进程：master 树靠 PYTHONPATH 前插生效，本进程的 sys.path 与
-    已加载模块（editable finder 的缓存）无法安全地就地切到另一棵 apkscan。
+    已加载模块（editable finder 的缓存）无法安全地就地切到另一棵 fxapk。
     exit 语义：0=一致，1=对账有差异，2=环境/流程失败（含 dump 输出非法 JSON
     或结构损坏——与对账差异区分开，CI 红叉时先看是哪一类，别把流程失败当
     基线漂移去改基线）。
@@ -403,7 +408,7 @@ def _cmd_replay(dump_out: str | None) -> int:
         )
         return 2
     archive = subprocess.run(
-        ["git", "archive", "--format=tar", MASTER_COMMIT, "apkscan"],
+        ["git", "archive", "--format=tar", MASTER_COMMIT, MASTER_PACKAGE],
         cwd=repo_root,
         capture_output=True,
     )
@@ -418,8 +423,8 @@ def _cmd_replay(dump_out: str | None) -> int:
         master_tree.mkdir()
         with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
             tar.extractall(master_tree, filter="data")
-        if not (master_tree / "apkscan" / "__init__.py").is_file():
-            print("导出的 master 树里没有 apkscan 包——archive 覆盖面变了？", file=sys.stderr)
+        if not (master_tree / MASTER_PACKAGE / "__init__.py").is_file():
+            print(f"导出的 master 树里没有 {MASTER_PACKAGE} 包——archive 覆盖面变了？", file=sys.stderr)
             return 2
         env = dict(os.environ)
         prior = env.get("PYTHONPATH")
@@ -431,6 +436,8 @@ def _cmd_replay(dump_out: str | None) -> int:
                 sys.executable,
                 str(Path(__file__).resolve()),
                 "dump",
+                "--package",
+                MASTER_PACKAGE,
                 "--workdir",
                 str(Path(tmp) / "work"),
             ],
@@ -491,8 +498,8 @@ def _cmd_digest() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     # 入口脚本约定：注入仓库根一处，随后全部绝对包限定导入（tests.*）。
-    # ★追加而非前插：master 复测靠 PYTHONPATH 前插 master 树拿 apkscan——
-    #   仓库根若插在它前面，分支 apkscan 会把 master 树静默压掉。
+    # ★追加而非前插：master 复测靠 PYTHONPATH 前插 master 树拿 fxapk——
+    #   仓库根若插在它前面，分支 fxapk 会把 master 树静默压掉。
     repo_root = str(Path(__file__).resolve().parent.parent)
     if repo_root not in sys.path:
         sys.path.append(repo_root)
@@ -505,8 +512,9 @@ def main(argv: list[str] | None = None) -> int:
     replay.add_argument(
         "--dump-out", default=None, help="把 master dump JSON 另存一份（排障用）"
     )
-    dump = sub.add_parser("dump", help="实测当前环境 apkscan 的提取面与路径面")
+    dump = sub.add_parser("dump", help="实测当前环境 fxapk 的提取面与路径面")
     dump.add_argument("--workdir", required=True, help="空工作目录（建索引用）")
+    dump.add_argument("--package", default="fxapk", help="导入包名；重放旧基线 commit 时为 apkscan")
     verify = sub.add_parser("verify", help="master dump 与钉住基线精确对账")
     verify.add_argument("dump_path", help="dump 子命令输出的 JSON 文件")
     sub.add_parser("digest", help="打印钉住基线的指纹")
@@ -515,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "replay":
         return _cmd_replay(args.dump_out)
     if args.command == "dump":
-        return _cmd_dump(args.workdir)
+        return _cmd_dump(args.workdir, args.package)
     if args.command == "verify":
         return _cmd_verify(args.dump_path)
     return _cmd_digest()

@@ -11,12 +11,12 @@ import pytest
 import requests
 from typer.testing import CliRunner
 
-from apkscan.cli import app
-from apkscan.core import hunter_quota as quota
-from apkscan.core.models import Endpoint
-from apkscan.core.response_evidence import capture_responses, retain_response
-from apkscan.enrichers.multisource import HunterPassiveEnricher, FofaPassiveEnricher
-from apkscan.enrichers.multisource import _business_error
+from fxapk.cli import app
+from fxapk.core import hunter_quota as quota
+from fxapk.core.models import Endpoint
+from fxapk.core.response_evidence import capture_responses, retain_response
+from fxapk.enrichers.multisource import HunterPassiveEnricher, FofaPassiveEnricher
+from fxapk.enrichers.multisource import _business_error
 
 
 def account(remaining=500, phone="10000000000", limit=500):
@@ -259,7 +259,7 @@ def test_query_stays_within_free_history_and_no_redirects():
 
 def test_batch_dry_run_does_not_read_account_or_reserve(tmp_path, monkeypatch):
     session = Session()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [HunterPassiveEnricher(session=session)])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [HunterPassiveEnricher(session=session)])
     targets = tmp_path / "targets.txt"
     targets.write_text("quota.example.test\n", encoding="utf-8")
     result = CliRunner().invoke(app, ["enrich", "batch", "--targets", str(targets), "--out", str(tmp_path / "out"), "--providers", "hunter"])
@@ -270,7 +270,7 @@ def test_batch_dry_run_does_not_read_account_or_reserve(tmp_path, monkeypatch):
 
 def test_new_case_output_and_no_resume_cannot_reset_account(tmp_path, monkeypatch):
     session = Session(account(10))
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [HunterPassiveEnricher(session=session)])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [HunterPassiveEnricher(session=session)])
     targets = tmp_path / "targets.txt"
     targets.write_text("quota.example.test\n", encoding="utf-8")
     for index in range(2):

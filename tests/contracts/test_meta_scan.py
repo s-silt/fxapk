@@ -144,8 +144,8 @@ def test_module_constant_key_is_resolved() -> None:
 def test_cross_module_constant_key_is_resolved() -> None:
     """跨模块一跳：``meta[_inv.INVENTORY_META_KEY]``（本仓 pcap_ingest/probe_ingest 的写法）。"""
     # ★键是完整模块路径（见 test_same_stem_modules_do_not_share_a_constant_table）
-    symbols = {"apkscan.core.runtime_inventory": {"INVENTORY_META_KEY": "runtime_merged_inventory"}}
-    src = ("from apkscan.core import runtime_inventory as _inv\n"
+    symbols = {"fxapk.core.runtime_inventory": {"INVENTORY_META_KEY": "runtime_merged_inventory"}}
+    src = ("from fxapk.core import runtime_inventory as _inv\n"
            "def f(meta):\n    meta[_inv.INVENTORY_META_KEY] = 1\n")
     got = {a.key for a in meta_scan.scan_source(src, symbols=symbols) if a.kind == "write"}
     assert got == {"runtime_merged_inventory"}
@@ -389,17 +389,17 @@ def test_things_that_merely_look_like_report_meta_are_not_counted(src: str) -> N
 def test_same_stem_modules_do_not_share_a_constant_table(tmp_path: Path) -> None:
     """★符号表按完整模块路径建，不用文件名短名。
 
-    本仓真实存在 ``apkscan/commands/corpus.py`` 与 ``apkscan/core/corpus.py``
+    本仓真实存在 ``fxapk/commands/corpus.py`` 与 ``fxapk/core/corpus.py``
     （另有三个 ``models.py``）。短名做键会把两张常量表合并，
     后扫描的模块无声覆盖先扫描的，于是跨模块常量键可能解析到**错的值**。
     """
-    (tmp_path / "apkscan" / "a").mkdir(parents=True)
-    (tmp_path / "apkscan" / "b").mkdir(parents=True)
+    (tmp_path / "fxapk" / "a").mkdir(parents=True)
+    (tmp_path / "fxapk" / "b").mkdir(parents=True)
     (tmp_path / "tests").mkdir()
-    (tmp_path / "apkscan" / "a" / "dup.py").write_text('K = "from_a"\n', encoding="utf-8")
-    (tmp_path / "apkscan" / "b" / "dup.py").write_text('K = "from_b"\n', encoding="utf-8")
-    (tmp_path / "apkscan" / "user.py").write_text(
-        "from apkscan.b.dup import K\ndef f(meta):\n    meta[K] = 1\n", encoding="utf-8"
+    (tmp_path / "fxapk" / "a" / "dup.py").write_text('K = "from_a"\n', encoding="utf-8")
+    (tmp_path / "fxapk" / "b" / "dup.py").write_text('K = "from_b"\n', encoding="utf-8")
+    (tmp_path / "fxapk" / "user.py").write_text(
+        "from fxapk.b.dup import K\ndef f(meta):\n    meta[K] = 1\n", encoding="utf-8"
     )
 
     res = meta_scan.scan_repository(tmp_path)
@@ -446,8 +446,8 @@ def test_coverage_key_domain_comes_from_registry_not_runtime() -> None:
     否则一个因能力门控而未运行的分析器会从契约里整个消失，
     它那份「我没看全」的事实也就无从登记——而那恰恰是最该留痕的情形。
     """
-    from apkscan.analyzers.web_evidence import COVERAGE_SUFFIXES, iter_coverage_meta_keys
-    from apkscan.core.registry import discover_analyzers
+    from fxapk.analyzers.web_evidence import COVERAGE_SUFFIXES, iter_coverage_meta_keys
+    from fxapk.core.registry import discover_analyzers
 
     web = sorted(a.name for a in discover_analyzers()
                  if "web" in (getattr(a, "requires", None) or []))
@@ -467,7 +467,7 @@ def test_coverage_key_rejects_suffix_outside_the_family() -> None:
       而它本该承载「我没看全」这类最不该丢的事实。静态扫描只认得族标记，
       拦不住这种拼写错误，只有运行期校验能。
     """
-    from apkscan.analyzers.web_evidence import coverage_meta_key
+    from fxapk.analyzers.web_evidence import coverage_meta_key
 
     assert coverage_meta_key("web_inline_config", "read_failed") == "web_inline_config_read_failed"
     with pytest.raises(ValueError):
@@ -536,9 +536,9 @@ def test_production_and_test_consumers_are_separated(tmp_path: Path) -> None:
     若扫描把 tests/ 的读取算作消费方，这批键会假装合格通过检查——
     而它们恰恰是问题最集中的一批（有人写、有测试读、但**产物链路上无人消费**）。
     """
-    (tmp_path / "apkscan").mkdir()
+    (tmp_path / "fxapk").mkdir()
     (tmp_path / "tests").mkdir()
-    (tmp_path / "apkscan" / "w.py").write_text(
+    (tmp_path / "fxapk" / "w.py").write_text(
         'def f(report):\n    report.meta["only_test_reads"] = 1\n', encoding="utf-8"
     )
     (tmp_path / "tests" / "t.py").write_text(
@@ -572,9 +572,9 @@ def test_analyzer_unresolved_writes_match_reviewed_baseline() -> None:
     got = {
         (access.file, access.key)
         for access in res.unresolved
-        if access.kind == "write" and access.file.startswith("apkscan/analyzers/")
+        if access.kind == "write" and access.file.startswith("fxapk/analyzers/")
     }
-    assert got == {("apkscan/analyzers/manifest.py", "<dynamic:whole-meta>")}
+    assert got == {("fxapk/analyzers/manifest.py", "<dynamic:whole-meta>")}
 
 
 def _dex_helper_result_owners(root: Path) -> set[str]:
@@ -584,7 +584,7 @@ def _dex_helper_result_owners(root: Path) -> set[str]:
     直接写键，helper 会写进它传入的 AnalyzerResult。
     """
     owners: set[str] = set()
-    for path in (root / "apkscan" / "analyzers").glob("*.py"):
+    for path in (root / "fxapk" / "analyzers").glob("*.py"):
         if path.name == "_common.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -614,11 +614,11 @@ def test_common_meta_writes_have_explicit_compensation() -> None:
     common_writes = {
         key
         for key, accesses in res.produced.items()
-        if any(a.kind == "write" and a.file == "apkscan/analyzers/_common.py" for a in accesses)
+        if any(a.kind == "write" and a.file == "fxapk/analyzers/_common.py" for a in accesses)
     }
     common_unresolved = {
         a.key for a in res.unresolved
-        if a.kind == "write" and a.file == "apkscan/analyzers/_common.py"
+        if a.kind == "write" and a.file == "fxapk/analyzers/_common.py"
     }
     assert common_writes == {"dex_strings_truncated"}
     assert common_unresolved == set()
@@ -627,7 +627,7 @@ def test_common_meta_writes_have_explicit_compensation() -> None:
 def _owners_for_access(file: str, key: str) -> set[str]:
     module = Path(file).stem
     if module == "web_evidence":
-        from apkscan.core.registry import discover_analyzers
+        from fxapk.core.registry import discover_analyzers
         # The shared reader accepts every registered web analyzer, including HAR.
         return {
             analyzer.name for analyzer in discover_analyzers()
@@ -691,7 +691,7 @@ def _owner_from_module_path(file: str) -> str:
     """owner 就是产生层的模块路径；由路径推导，避免另建中心 owner 清单。"""
     path = Path(file)
     parts = list(path.with_suffix("").parts)
-    assert parts[0] == "apkscan"
+    assert parts[0] == "fxapk"
     parts = parts[1:]
     if parts[-1] == "__init__":
         parts.pop()
@@ -700,9 +700,9 @@ def _owner_from_module_path(file: str) -> str:
 
 def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
     """具体键、有限键族、共享 helper 写入都必须与分析器声明双向一致。"""
-    from apkscan.core.meta_contract import META_KEY_REGISTRY, PIPELINE_OWNER
-    from apkscan.analyzers.web_evidence import iter_coverage_meta_keys
-    from apkscan.core.registry import discover_analyzers
+    from fxapk.core.meta_contract import META_KEY_REGISTRY, PIPELINE_OWNER
+    from fxapk.analyzers.web_evidence import iter_coverage_meta_keys
+    from fxapk.core.registry import discover_analyzers
 
     root = Path(__file__).resolve().parents[2]
     res = meta_scan.scan_repository(root)
@@ -718,7 +718,7 @@ def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
     # 普通字面量写入。classify 写 report.meta，属于 pipeline 后阶段，不是分析器返回块。
     for key, accesses in res.produced.items():
         for access in accesses:
-            if not access.file.startswith("apkscan/analyzers/"):
+            if not access.file.startswith("fxapk/analyzers/"):
                 continue
             module = Path(access.file).stem
             if module in {"_common", "classify"}:
@@ -733,7 +733,7 @@ def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
     # 有限键族不在 produced：扫描器把它单独放在 families，必须显式展开。
     assert any(a.key.startswith("<family:web_coverage:") for a in res.families)
     for key in iter_coverage_meta_keys():
-        owners = _owners_for_access("apkscan/analyzers/web_evidence.py", key)
+        owners = _owners_for_access("fxapk/analyzers/web_evidence.py", key)
         declared_owners = {owner for declared_key, owner in declared if declared_key == key}
         assert owners & declared_owners, f"有限键族 owner 未声明：{key!r} -> {owners}"
         observed.update((key, owner) for owner in owners)
@@ -766,19 +766,19 @@ def test_non_analyzer_meta_declarations_match_all_static_writes_both_ways() -> N
     """第一方 stage 的模块内声明与实际写入必须键、owner 双向一致。"""
     root = Path(__file__).resolve().parents[2]
     res = meta_scan.scan_repository(root)
-    excluded = {"apkscan/core/report_io.py"}  # 反序列化边界按设计开放
+    excluded = {"fxapk/core/report_io.py"}  # 反序列化边界按设计开放
     observed_files = {
         access.file
         for accesses in res.produced.values()
         for access in accesses
         if access.kind == "write"
-        and access.file.startswith("apkscan/")
-        and not access.file.startswith("apkscan/analyzers/")
+        and access.file.startswith("fxapk/")
+        and not access.file.startswith("fxapk/analyzers/")
         and access.file not in excluded
     }
 
     declared: set[tuple[str, str]] = set()
-    for path in (root / "apkscan").rglob("*.py"):
+    for path in (root / "fxapk").rglob("*.py"):
         declaration = _static_meta_declaration(path)
         if declaration is None:
             continue
@@ -806,7 +806,7 @@ def test_template_scan_catches_jinja_reads() -> None:
     """模板是独立一路证据：本仓模板里有 ``meta.get("uniapp")`` 这类兼容旧键的读法，
     漏扫会把仍在被渲染的键误判成孤儿。"""
     root = Path(__file__).resolve().parents[2]
-    tpl_keys = meta_scan.scan_templates(root / "apkscan")
+    tpl_keys = meta_scan.scan_templates(root / "fxapk")
     assert tpl_keys, "模板里一个 meta 读取都没扫到，正则或路径有问题"
 
 

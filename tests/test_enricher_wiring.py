@@ -18,11 +18,11 @@ from urllib.parse import urlsplit
 import pytest
 import requests
 
-from apkscan.core.enrichment import enrich_selected_targets
-from apkscan.core.models import Endpoint
-from apkscan.core.registry import discover_enrichers
-from apkscan.enrichers import spamhaus
-from apkscan.enrichers.spamhaus import SpamhausDropEnricher
+from fxapk.core.enrichment import enrich_selected_targets
+from fxapk.core.models import Endpoint
+from fxapk.core.registry import discover_enrichers
+from fxapk.enrichers import spamhaus
+from fxapk.enrichers.spamhaus import SpamhausDropEnricher
 
 _DROP_BODY = (
     '{"cidr":"192.0.2.0/24","sblid":"SBL000001","rir":"arin"}\n'
@@ -62,8 +62,8 @@ def no_external_transports(monkeypatch):
     def denied(*args, **kwargs):
         raise requests.RequestException("external transport disabled in wiring tests")
     monkeypatch.setattr(requests.sessions.Session, "request", denied)
-    monkeypatch.setattr("apkscan.enrichers.rdap.query_whois", denied)
-    monkeypatch.setattr("apkscan.enrichers.whois.query_whois", denied)
+    monkeypatch.setattr("fxapk.enrichers.rdap.query_whois", denied)
+    monkeypatch.setattr("fxapk.enrichers.whois.query_whois", denied)
 
 
 @pytest.fixture()
@@ -158,7 +158,7 @@ def test_ripestat_is_case_close_only_and_reachable_there(
     这条同时锁住"分流正确"与"结案路径确实够得着它"——两侧都断言，
     只断言其一的话，把 case_close_only 翻成 False 也不会被发现。
     """
-    from apkscan.enrichers import multisource
+    from fxapk.enrichers import multisource
 
     seen: list[str] = []
 
@@ -194,7 +194,7 @@ def test_ripestat_new_data_calls_are_actually_requested(
     monkeypatch: pytest.MonkeyPatch, drop_http: _CountingHttp
 ) -> None:
     """★新接的三个 data call 必须真被请求到——否则字段永远为空，等于没接。"""
-    from apkscan.enrichers import multisource
+    from fxapk.enrichers import multisource
 
     requested: list[str] = []
 
@@ -315,7 +315,7 @@ def _patch_public_ip_filter(monkeypatch: pytest.MonkeyPatch, allowed: str) -> No
     ★patch 打在**定义它的子模块** ``closure.sources`` 上：该函数只在子模块内部被互相
     调用，打到包命名空间够不着，会静默失效（测试照绿但已不测原来那件事）。
     """
-    from apkscan.core.closure import sources as closure_sources
+    from fxapk.core.closure import sources as closure_sources
 
     monkeypatch.setattr(
         closure_sources,
@@ -335,8 +335,8 @@ def test_closure_entrypoint_reaches_resolved_ip_and_lands_in_report(
     """
     import json
 
-    from apkscan.core.closure import ClosureConfig, close_report
-    from apkscan.core.models import Confidence, Evidence, Lead, LeadCategory, Report
+    from fxapk.core.closure import ClosureConfig, close_report
+    from fxapk.core.models import Confidence, Evidence, Lead, LeadCategory, Report
 
     resolved_ip = "198.51.100.77"
     _patch_public_ip_filter(monkeypatch, resolved_ip)
@@ -405,9 +405,9 @@ def test_resolved_ip_cap_is_disclosed_not_silent(
 
     否则"这 8 个都没被列入"会被读成"该域名全部解析地址都没被列入"。
     """
-    from apkscan.core.closure import ClosureConfig
-    from apkscan.core.closure import sources as closure_sources
-    from apkscan.core.closure.sources import _MAX_RESOLVED_IPS_PER_TARGET, _enrich_resolved_ips
+    from fxapk.core.closure import ClosureConfig
+    from fxapk.core.closure import sources as closure_sources
+    from fxapk.core.closure.sources import _MAX_RESOLVED_IPS_PER_TARGET, _enrich_resolved_ips
 
     # ★期望值**写死 8**，不拿被测常量算：用 _MAX_RESOLVED_IPS_PER_TARGET 反算期望，
     #   改动该常量时测试会跟着变、永远不红（实测过这个突变逃逸）。上限是对外契约，
@@ -443,11 +443,11 @@ def test_resolved_ip_enrichment_passes_include_case_close(
     用 spamhaus 测不到这条：它 ``case_close_only=False``，无论该参数真假都会跑。
     必须用一个**结案专属**的富化器，才能让"参数被传错"暴露出来。
     """
-    from apkscan.core.closure import ClosureConfig
-    from apkscan.core.closure import sources as closure_sources
-    from apkscan.core.closure.sources import _enrich_resolved_ips
-    from apkscan.core.models import EnrichmentResult
-    from apkscan.core.registry import BaseEnricher
+    from fxapk.core.closure import ClosureConfig
+    from fxapk.core.closure import sources as closure_sources
+    from fxapk.core.closure.sources import _enrich_resolved_ips
+    from fxapk.core.models import EnrichmentResult
+    from fxapk.core.registry import BaseEnricher
 
     calls: list[str] = []
 
@@ -535,7 +535,7 @@ def test_deferred_marking_is_replaced_by_real_outcome_at_closure(
     否则 deferred 会变成"终态"，让结案时的真实查询结果永远写不进去——
     等于把一个占位状态固化成了结论。
     """
-    from apkscan.enrichers import multisource
+    from fxapk.enrichers import multisource
 
     class _RipeSession:
         def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any):  # noqa: ANN401

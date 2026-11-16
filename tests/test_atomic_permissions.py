@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import atomic
+from fxapk.core import atomic
 
 
 _POSIX_PERMISSION_REASON = (

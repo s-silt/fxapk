@@ -34,10 +34,10 @@ import textwrap
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-# 入口脚本：注入仓库根一处，令 tests 包与 apkscan 均可导入（tests/conftest 提供 FakeContext）。
+# 入口脚本：注入仓库根一处，令 tests 包与 fxapk 均可导入（tests/conftest 提供 FakeContext）。
 sys.path.insert(0, str(_REPO_ROOT))
 
-from apkscan.core.atomic import atomic_write_text  # noqa: E402
+from fxapk.core.atomic import atomic_write_text  # noqa: E402
 from tests.synthetic import snapshot  # noqa: E402
 from tests.synthetic.samples import SAMPLES  # noqa: E402
 

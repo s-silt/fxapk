@@ -6,9 +6,9 @@ rank_assets 降序、pipeline 附加阶段写 meta["asset_scores"]。纯离线�
 
 from __future__ import annotations
 
-from apkscan.config.asset_score import AssetScore, rank_assets, score_asset
-from apkscan.core import pipeline
-from apkscan.core.models import AnalysisConfig, Endpoint, Evidence, EvidenceScope
+from fxapk.config.asset_score import AssetScore, rank_assets, score_asset
+from fxapk.core import pipeline
+from fxapk.core.models import AnalysisConfig, Endpoint, Evidence, EvidenceScope
 
 
 def _ep(value, kind, sources=(), enrichment=None):

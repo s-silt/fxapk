@@ -78,7 +78,7 @@ def compute_orphans(root: Path) -> tuple[dict[str, list[str]], set[str]]:
       全仓动态点的冻结留给下一轮。
     """
     res = meta_scan.scan_repository(root)
-    tpl_root = root / "apkscan"
+    tpl_root = root / "fxapk"
     tpl_keys = set(meta_scan.scan_templates(tpl_root)) if tpl_root.is_dir() else set()
 
     orphans: dict[str, list[str]] = {}
@@ -123,10 +123,10 @@ def compute_orphans(root: Path) -> tuple[dict[str, list[str]], set[str]]:
 
 def declared_categories(root: Path) -> dict[str, str]:
     """汇总写入方旁的显式类别声明；冲突、漏项都直接失败。"""
-    from apkscan.core.meta_contract import META_KEY_REGISTRY
+    from fxapk.core.meta_contract import META_KEY_REGISTRY
 
     categories = {key: contract.category for key, contract in META_KEY_REGISTRY.items()}
-    for path in (root / "apkscan").rglob("*.py"):
+    for path in (root / "fxapk").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in tree.body:
             if not isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -181,8 +181,8 @@ def _family_concrete_keys(family: str, suffix: str) -> list[str] | None:
     """
     if family != "web_coverage":
         return None
-    from apkscan.analyzers.web_evidence import COVERAGE_SUFFIXES
-    from apkscan.core.registry import discover_analyzers
+    from fxapk.analyzers.web_evidence import COVERAGE_SUFFIXES
+    from fxapk.core.registry import discover_analyzers
 
     if suffix not in COVERAGE_SUFFIXES:
         return None

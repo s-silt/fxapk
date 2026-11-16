@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import parallel
-from apkscan.core.snapshot import SnapshotContext, build_snapshot
+from fxapk.core import parallel
+from fxapk.core.snapshot import SnapshotContext, build_snapshot
 from tests.conftest import FakeContext
 
 
@@ -78,7 +78,7 @@ def test_build_snapshot_materializes_protocol() -> None:
 def test_snapshot_preserves_dex_ledgers_and_preread_worker_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from apkscan.core import snapshot as snapshot_mod
+    from fxapk.core import snapshot as snapshot_mod
 
     path = "assets/large.json"
     ctx = _fake(files={path: b"source-bytes"})
@@ -130,7 +130,7 @@ def test_snapshot_satisfies_analysis_context_protocol() -> None:
     """runtime_checkable 结构闸：快照实例必须带齐 AnalysisContext 协议全部成员（含数据字段）。
     协议加字段而快照漏带 → 此测变红，而不是消费方 getattr 兜底静默拿空值（extra_dex_paths
     曾如此漏带）。与 snapshot.py 底部的 pyright 静态校验同口径，一静一动互为兜底。"""
-    from apkscan.core.context import AnalysisContext
+    from fxapk.core.context import AnalysisContext
 
     snap = build_snapshot(_fake(platform="android", apk_path="/x.apk"))
     assert isinstance(snap, AnalysisContext)
@@ -148,7 +148,7 @@ def test_extra_dex_paths_reach_analyzer_through_parallel_path(
     并断言分析器看到的 ctx 类型是 SnapshotContext——若并行链断裂回退串行（分析器会看到
     FakeContext 而"碰巧"读到字段），本测同样变红，不给回退路径假绿的机会。
     """
-    from apkscan.core.models import AnalyzerResult
+    from fxapk.core.models import AnalyzerResult
 
     dex_paths = ["/dump/classes.dex", "/dump/classes02.dex"]
 
@@ -328,7 +328,7 @@ def test_analyze_eligible_falls_back_to_serial_without_apk(monkeypatch: pytest.M
         name = "spy"
 
         def analyze(self, ctx):  # type: ignore[no-untyped-def]
-            from apkscan.core.models import AnalyzerResult
+            from fxapk.core.models import AnalyzerResult
             r = AnalyzerResult(analyzer="spy")
             r.meta = {"saw": ctx.package_name}
             return r
@@ -345,7 +345,7 @@ def test_analyze_eligible_falls_back_to_serial_without_apk(monkeypatch: pytest.M
 
 def test_permissions_meta_deterministically_sorted() -> None:
     # ★ 并行确定性根因修复：meta["permissions"] 排序，跨进程/跨运行稳定。
-    from apkscan.analyzers.permissions import PermissionsAnalyzer
+    from fxapk.analyzers.permissions import PermissionsAnalyzer
 
     ctx = _fake(permissions=[
         "android.permission.WRITE_SMS", "android.permission.CAMERA", "android.permission.READ_SMS",
@@ -358,7 +358,7 @@ def test_permissions_meta_deterministically_sorted() -> None:
 def test_permissions_short_name_collision_keeps_deterministic_full_name() -> None:
     # ★ 同短名碰撞确定性：两个不同全名归一到同一短名（MDM），无论输入顺序如何，
     #   都稳定保留字典序最小的全名 —— 去重在排序之后才能保证"留哪个全名"可复现。
-    from apkscan.analyzers.permissions import PermissionsAnalyzer
+    from fxapk.analyzers.permissions import PermissionsAnalyzer
 
     a = PermissionsAnalyzer().analyze(
         _fake(permissions=["com.b.permission.MDM", "com.a.permission.MDM"])
@@ -374,7 +374,7 @@ def test_worker_init_and_analyze_resolve_run_and_error(
 ) -> None:
     # ★ 真并行 worker 路径覆盖（进程内直接驱动，不真 spawn）：_worker_init 缓存快照 + 发现分析器、
     #   _worker_analyze 按 name 解析并运行 + 未知 name 错误路径 + 分析器异常被捕获为错误（不抛、不丢）。
-    from apkscan.core.models import AnalyzerResult
+    from fxapk.core.models import AnalyzerResult
 
     class _Spy:
         name = "spy"
@@ -412,7 +412,7 @@ def test_worker_init_and_analyze_resolve_run_and_error(
 
 def _eligible_for(ctx: object) -> list[tuple]:
     """复刻 pipeline.run 的 requires 门控，返回 [(name, analyzer)]（android 上几乎全部分析器）。"""
-    from apkscan.core.registry import detect_capabilities, discover_analyzers
+    from fxapk.core.registry import detect_capabilities, discover_analyzers
 
     caps = detect_capabilities(online=False)
     caps.add("apk")
@@ -446,8 +446,8 @@ def test_serial_parallel_byte_identical_real_apk() -> None:
     同一分析器、pool.map 保序聚合、以及跨进程不同 PYTHONHASHSEED 下分析器输出仍确定（含二进制读
     经 worker 惰性重开真实 APK 与串行取到一致字节）。
     """
-    from apkscan.core.apk import ApkParseError, load_apk
-    from apkscan.core.models import AnalysisConfig
+    from fxapk.core.apk import ApkParseError, load_apk
+    from fxapk.core.models import AnalysisConfig
 
     assert _REAL_APK is not None  # skipif 已保证，仅为类型收窄
     try:
@@ -482,7 +482,7 @@ class _Spy:
         self.name = name
 
     def analyze(self, ctx):  # type: ignore[no-untyped-def]
-        from apkscan.core.models import AnalyzerResult
+        from fxapk.core.models import AnalyzerResult
 
         r = AnalyzerResult(analyzer=self.name)
         r.meta = {"pkg": getattr(ctx, "package_name", "")}
@@ -577,7 +577,7 @@ def test_analyze_parallel_low_mem_falls_back_serial_without_pool(
     eligible = [("a", _Spy("a")), ("b", _Spy("b")), ("c", _Spy("c"))]
     ctx = _fake(package_name="com.evil", platform="android", apk_path="/x.apk")
     monkeypatch.delenv("FXAPK_MAX_WORKERS", raising=False)
-    monkeypatch.setattr("apkscan.core.snapshot.build_snapshot", lambda c: object())
+    monkeypatch.setattr("fxapk.core.snapshot.build_snapshot", lambda c: object())
     monkeypatch.setattr(parallel, "_decide_workers", lambda *a, **k: 1)
 
     class _NoPool:
@@ -600,7 +600,7 @@ def test_env_max_workers_one_short_circuits_before_build_snapshot(
         built["flag"] = True
         return object()
 
-    monkeypatch.setattr("apkscan.core.snapshot.build_snapshot", _spy_build)
+    monkeypatch.setattr("fxapk.core.snapshot.build_snapshot", _spy_build)
 
     class _NoPool:
         def __init__(self, *a, **k) -> None:  # type: ignore[no-untyped-def]
@@ -678,7 +678,7 @@ def test_decide_workers_per_worker_scales_with_snapshot(monkeypatch: pytest.Monk
 
 def test_build_snapshot_total_budget_stops_preread(monkeypatch: pytest.MonkeyPatch) -> None:
     # 钉死 _MAX_SNAPSHOT_TOTAL_BYTES 累计预读预算的 break：超预算后停止预读，部分文件被跳过。
-    from apkscan.core import snapshot as snap_mod
+    from fxapk.core import snapshot as snap_mod
 
     monkeypatch.setattr(snap_mod, "_MAX_SNAPSHOT_TOTAL_BYTES", 1000)  # 1000B 预算
     files = {f"assets/f{i}.json": b"x" * 400 for i in range(5)}  # 5×400B=2000B > 预算
@@ -944,8 +944,8 @@ def test_snapshot_carries_jadx_baseline_index_through_pickle() -> None:
 
 def test_build_snapshot_charges_discarded_reads_and_caps_bad_reads() -> None:
     """★sfind-588bc9e1：被丢弃的超大预读字节计入 64MiB 总预算；失败读数有上限。"""
-    from apkscan.core import apk as apk_mod
-    from apkscan.core import snapshot as snap_mod
+    from fxapk.core import apk as apk_mod
+    from fxapk.core import snapshot as snap_mod
 
     # 场景1：40MB 丢弃读（>32MB）+ 30MB 正常读 → total=70MB>64MiB → 后续不再收进快照。
     # 修复前丢弃不计 total：mid.json 会被收进快照。声明尺寸全部谎报为 10B，

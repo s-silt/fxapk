@@ -1,8 +1,8 @@
 """Local product configuration never implies billing or credential authorization."""
 import pytest
 
-from apkscan.core.models import Endpoint
-from apkscan.enrichers.multisource import HunterPassiveEnricher, FofaPassiveEnricher, _api_endpoint
+from fxapk.core.models import Endpoint
+from fxapk.enrichers.multisource import HunterPassiveEnricher, FofaPassiveEnricher, _api_endpoint
 
 
 @pytest.mark.parametrize("mode,reason", [("free_only", "free_only_billing_unverified"),

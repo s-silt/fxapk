@@ -1,4 +1,4 @@
-"""跨样本关联候选聚类（apkscan.dynamic.correlate）测试。
+"""跨样本关联候选聚类（fxapk.dynamic.correlate）测试。
 
 纯读各样本 report.json（dict）→ 抽候选指纹 → 倒排 + union-find 聚类 → 关联候选簇。
 共享指纹只用于人工复核召回，不能独立认定主体或自动并案。全离线纯函数，不碰真机。
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.dynamic.correlate import (
+from fxapk.dynamic.correlate import (
     CORRELATION_DISCLAIMER,
     Cluster,
     Fingerprint,

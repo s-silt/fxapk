@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-from apkscan.core import pipeline
-from apkscan.core.models import AnalysisConfig
+from fxapk.core import pipeline
+from fxapk.core.models import AnalysisConfig
 
 _EXPECTED_STAGES = [
     "analyze",
@@ -99,7 +99,7 @@ def test_analyze_stage_failure_marks_failed(fake_ctx, monkeypatch) -> None:  # t
 
 def test_apply_stage_failures_does_not_upgrade_failed() -> None:
     # 单元：已判 failed 的不因"其它阶段也崩"被上调；有 analyze 崩即 failed（优先级最高）。
-    from apkscan.core.models import ANALYSIS_STATUS_FAILED
+    from fxapk.core.models import ANALYSIS_STATUS_FAILED
 
     state = pipeline._PipelineState(
         ctx=object(), config=AnalysisConfig(), platform="android", capabilities=set()
@@ -132,7 +132,7 @@ def test_network_attribution_failure_is_additive_no_degrade(fake_ctx, monkeypatc
 
 def test_network_attribution_failure_does_not_touch_strict_exit(fake_ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     # ★codex 复审 P1-2：附加视图崩不得污染 --strict 退出码（analysis_status 仍 complete → 无错误退出码）。
-    from apkscan.cli import _strict_exit_code
+    from fxapk.cli import _strict_exit_code
 
     _stub_discovery(monkeypatch)
     monkeypatch.setattr(pipeline, "_stage_network_attribution", _boom)
@@ -155,7 +155,7 @@ def test_additive_exemption_does_not_mask_real_stage_failure(fake_ctx, monkeypat
 
 def test_apply_stage_failures_exempts_additive_stages() -> None:
     # 单元：stage_status 只有附加阶段 network_attribution error → analysis_status 不从 complete 降级。
-    from apkscan.core.models import ANALYSIS_STATUS_COMPLETE
+    from fxapk.core.models import ANALYSIS_STATUS_COMPLETE
 
     state = pipeline._PipelineState(
         ctx=object(), config=AnalysisConfig(), platform="android", capabilities=set()
@@ -169,7 +169,7 @@ def test_apply_stage_failures_exempts_additive_stages() -> None:
 def test_stage_attribution_forms_fronting_cluster_across_endpoints() -> None:
     """★B2-b 生产入口触发：_stage_attribution 跑完后，两个认不出名但共享同一 SPKI 前置指纹的 IP 端点
     被跨端点聚成 fronting-cluster-0001；孤点保留证据但不编号。验证接线端到端生效（非仅单测）。"""
-    from apkscan.core.models import Endpoint
+    from fxapk.core.models import Endpoint
 
     state = pipeline._PipelineState(
         ctx=object(), config=AnalysisConfig(), platform="android", capabilities=set()

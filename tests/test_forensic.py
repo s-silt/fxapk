@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import forensic, infra
-from apkscan.core.models import Endpoint, Evidence
-from apkscan.core.leads import _domain_lead, _ip_lead
+from fxapk.core import forensic, infra
+from fxapk.core.models import Endpoint, Evidence
+from fxapk.core.leads import _domain_lead, _ip_lead
 
 
 def test_classify_icp_is_registration_not_hosting() -> None:

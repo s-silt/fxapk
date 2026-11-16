@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.dynamic.actions import ActionResult, AndroidActions
-from apkscan.plugins.contracts import CaptureRoundContext
+from fxapk.dynamic.actions import ActionResult, AndroidActions
+from fxapk.plugins.contracts import CaptureRoundContext
 
 
 @pytest.fixture
@@ -127,7 +127,7 @@ def test_round_disk_receipt_is_bound_and_artifact_hashes_match_bytes(plugin, fak
 def test_android_cli_each_subprocess_timeout_uses_remaining_deadline(plugin, monkeypatch, tmp_path):
     from fxapk_android_ui.android_cli import AndroidCli
     import fxapk_android_ui.android_cli as adapter
-    from apkscan.core.proctree import OwnedRun
+    from fxapk.core.proctree import OwnedRun
 
     clock = [10.0]
     timeouts = []
@@ -351,7 +351,7 @@ def test_plan_stops_when_input_reports_security_exception_at_exit_zero(plugin, m
     from types import SimpleNamespace
 
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda *_a, **_k: SimpleNamespace(
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda *_a, **_k: SimpleNamespace(
         returncode=0, stdout="", stderr="java.lang.SecurityException: INJECT_EVENTS denied"))
     monkeypatch.setattr(AndroidActions, "back", lambda *_a: pytest.fail("continued after denied input"))
     result = plugin._run_plan(plan({"kind": "tap", "x": 1, "y": 2}, {"kind": "back"}), out=tmp_path / "out")
@@ -433,7 +433,7 @@ def test_layout_failure_preserves_bounded_controlled_diagnostics_without_echo(pl
 
 @pytest.mark.parametrize("owned,terminated,forced", [(False, True, False), (True, False, False), (True, True, True)])
 def test_android_cli_refuses_success_when_process_tree_is_not_clean(plugin, monkeypatch, owned, terminated, forced):
-    from apkscan.core.proctree import OwnedRun
+    from fxapk.core.proctree import OwnedRun
     import fxapk_android_ui.android_cli as adapter
 
     monkeypatch.setattr(adapter, "run_owned", lambda *_a, **_k: OwnedRun(
@@ -475,7 +475,7 @@ def test_android_cli_timeout_stops_windows_wrapper_descendant(plugin, tmp_path, 
 
     if sys.platform != "win32":
         pytest.skip("Windows command wrapper timeout regression")
-    from apkscan.core import proctree
+    from fxapk.core import proctree
     from tests.windows_timeout_observation import WindowsTimeoutObservation
 
     child = tmp_path / "synthetic_child.py"

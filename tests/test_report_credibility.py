@@ -4,16 +4,16 @@
 
 from __future__ import annotations
 
-from apkscan import cli
-from apkscan.core import pipeline
-from apkscan.core.models import (
+from fxapk import cli
+from fxapk.core import pipeline
+from fxapk.core.models import (
     ANALYSIS_STATUS_COMPLETE,
     ANALYSIS_STATUS_FAILED,
     ANALYSIS_STATUS_PARTIAL,
     REPORT_SCHEMA_VERSION,
     Report,
 )
-from apkscan.core.registry import ruleset_digest
+from fxapk.core.registry import ruleset_digest
 
 
 def _status(name: str, st: str) -> dict:
@@ -86,7 +86,7 @@ def test_ruleset_digest_stable_and_formatted() -> None:
 
 def test_dependency_versions_recorded() -> None:
     """★codex #2：关键依赖版本进 report.meta 复现锚点（androguard 大版本漂移会改解析结果，须可追）。"""
-    from apkscan.core.pipeline import _dependency_versions
+    from fxapk.core.pipeline import _dependency_versions
 
     deps = _dependency_versions()
     assert isinstance(deps, dict)
@@ -102,9 +102,9 @@ def test_ruleset_digest_is_eol_invariant() -> None:
     import hashlib
     import importlib.resources
 
-    from apkscan.core import registry as _registry
+    from fxapk.core import registry as _registry
 
-    rules_dir = importlib.resources.files("apkscan") / "rules"
+    rules_dir = importlib.resources.files("fxapk") / "rules"
     # 复刻 ruleset_digest 的递归遍历（含 providers/ 分目录）+ 相对路径作 key。
     entries = sorted(_registry._walk_rule_files(rules_dir, ""), key=lambda kv: kv[0])
 

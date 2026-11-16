@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers import sensitive_api
-from apkscan.analyzers.sensitive_api import SensitiveApiAnalyzer, _token_match
-from apkscan.core.models import Severity
+from fxapk.analyzers import sensitive_api
+from fxapk.analyzers.sensitive_api import SensitiveApiAnalyzer, _token_match
+from fxapk.core.models import Severity
 from tests.conftest import FakeContext
 
 

@@ -18,13 +18,13 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.commands import reanalysis_cli
-from apkscan.core import judgment_ledger as jl
-from apkscan.core import reanalysis as rp
-from apkscan.core import reanalysis_contract as rxc
-from apkscan.core import recognition_codec as codec
-from apkscan.core import recognition_contract as rc
+from fxapk import cli
+from fxapk.commands import reanalysis_cli
+from fxapk.core import judgment_ledger as jl
+from fxapk.core import reanalysis as rp
+from fxapk.core import reanalysis_contract as rxc
+from fxapk.core import recognition_codec as codec
+from fxapk.core import recognition_contract as rc
 from tests.recognition_fixtures import (
     FIXED_TIME,
     make_actor,

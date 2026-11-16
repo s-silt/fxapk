@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.jadx_index import (
+from fxapk import cli
+from fxapk.core.jadx_index import (
     DexInput,
     DexRole,
     IndexBuildResult,
@@ -147,7 +147,7 @@ def _install_process_bombs(monkeypatch: pytest.MonkeyPatch) -> None:
     import os as _os
     import subprocess as _subprocess
 
-    from apkscan.core import proctree
+    from fxapk.core import proctree
 
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("只读查询绝不允许启动子进程")
@@ -254,7 +254,7 @@ def test_callpath_unavailable_reason_folded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """CacheUnavailable 透出 + 伪造 reason 带路径 → 折叠为稳定码。"""
-    from apkscan.core.jadx_index import CacheUnavailable
+    from fxapk.core.jadx_index import CacheUnavailable
 
     cache_root, key = _build_index(tmp_path)
     monkeypatch.setattr(

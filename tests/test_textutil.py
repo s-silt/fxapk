@@ -6,7 +6,7 @@ js_bundle/jadx）处理，textutil 保持零规则依赖，故此处只验证 bo
 
 from __future__ import annotations
 
-from apkscan.core.textutil import is_noise_bare_ip
+from fxapk.core.textutil import is_noise_bare_ip
 
 
 def test_zero_first_or_last_octet_is_noise():

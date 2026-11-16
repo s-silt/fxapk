@@ -1,4 +1,4 @@
-from apkscan.dynamic import pcap_ingest
+from fxapk.dynamic import pcap_ingest
 
 
 def test_capture_file_and_bytes_budget_are_explicit(tmp_path, monkeypatch):
@@ -10,7 +10,7 @@ def test_capture_file_and_bytes_budget_are_explicit(tmp_path, monkeypatch):
 
 
 def test_capture_readiness_needs_attribution_same_endpoint_and_identity():
-    from apkscan.dynamic.capture_plan import decide_capture
+    from fxapk.dynamic.capture_plan import decide_capture
     decision = decide_capture({"meta": {"capture_quality": {
         "target_attributed_count": 1, "business_candidate_count": 2,
         "bidirectional_business_count": 1, "bidirectional_target_count": 0}}})
@@ -21,7 +21,7 @@ def test_capture_readiness_needs_attribution_same_endpoint_and_identity():
 
 
 def test_capture_plan_does_not_guarantee_origin_or_nonempty_capture():
-    from apkscan.dynamic.capture_plan import plan_capture
+    from fxapk.dynamic.capture_plan import plan_capture
     text = "\n".join(plan_capture({}))
     assert "永远有结果" not in text and "已保证你不会" not in text
     assert "不能保证" in text and "不能直接认定源站" in text

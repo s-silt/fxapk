@@ -2,8 +2,8 @@ import json
 
 from typer.testing import CliRunner
 
-from apkscan.cli import app
-from apkscan.core.source_catalog import source_catalog, source_access_summary
+from fxapk.cli import app
+from fxapk.core.source_catalog import source_catalog, source_access_summary
 
 
 def test_catalog_has_verified_dates_and_never_claims_account_access():
@@ -43,5 +43,5 @@ def test_cli_catalog_is_read_only_and_filters_categories():
 def test_safe_yaml_loader_variants_have_identical_catalog_data():
     from importlib.resources import files
     import yaml
-    raw = files("apkscan").joinpath("rules/source_access.yaml").read_text(encoding="utf-8")
+    raw = files("fxapk").joinpath("rules/source_access.yaml").read_text(encoding="utf-8")
     assert yaml.load(raw, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader)) == yaml.safe_load(raw)

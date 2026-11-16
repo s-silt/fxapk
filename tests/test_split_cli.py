@@ -11,8 +11,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.recognition_training import load_split_manifest
+from fxapk import cli
+from fxapk.core.recognition_training import load_split_manifest
 
 runner = CliRunner()
 
@@ -239,7 +239,7 @@ def test_split_group_reachable_from_main_app() -> None:
 
 
 def test_build_write_failure_leaves_no_partial_file(tmp_path: Path, monkeypatch) -> None:
-    from apkscan.commands import split_cli
+    from fxapk.commands import split_cli
 
     paths = _write_inputs(tmp_path, rows=[_catalog_row(SHA_A, "case-01")])
 

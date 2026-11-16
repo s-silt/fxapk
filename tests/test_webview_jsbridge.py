@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers import webview_jsbridge
-from apkscan.analyzers.webview_jsbridge import (
+from fxapk.analyzers import webview_jsbridge
+from fxapk.analyzers.webview_jsbridge import (
     WebViewJsBridgeAnalyzer,
     _is_h5_resource,
 )
-from apkscan.core.models import Confidence, LeadCategory, Severity
+from fxapk.core.models import Confidence, LeadCategory, Severity
 from tests.conftest import FakeContext
 
 
@@ -183,7 +183,7 @@ def test_read_file_error_does_not_crash() -> None:
 
 def test_resource_cumulative_budget_stops_reading(monkeypatch) -> None:
     """★codex C3：资源累计读入达上限即停止读剩余文件（防 500×4MB≈2GB 累计撑爆内存）。"""
-    import apkscan.analyzers.webview_jsbridge as wv
+    import fxapk.analyzers.webview_jsbridge as wv
     monkeypatch.setattr(wv, "_MAX_TOTAL_RESOURCE_BYTES", 10)  # 极小预算
     ctx = FakeContext(files={
         "assets/www/a.js": b"x" * 100,          # 100 字节 > 预算

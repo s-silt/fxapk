@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 
-from apkscan.core.dotenv import _parse_line, load_dotenv
+from fxapk.core.dotenv import _parse_line, load_dotenv
 
 
 def test_plain_key_value() -> None:
@@ -101,7 +101,7 @@ def test_fullwidth_space_and_nbsp_start_comment() -> None:
 
 def test_empty_placeholder_does_not_mask_lower_priority(tmp_path, monkeypatch) -> None:
     """★空占位不掩蔽：仓库根 .env 里同一键先有空占位行、再有真实值行，最终取真实值。"""
-    from apkscan.core import dotenv as dotenv_mod
+    from fxapk.core import dotenv as dotenv_mod
 
     monkeypatch.setattr(dotenv_mod, "_REPO_ROOT", tmp_path)
     monkeypatch.setattr(dotenv_mod, "_USER_ENV", tmp_path / "absent-user.env")
@@ -116,7 +116,7 @@ def test_injection_logs_source_file(tmp_path, monkeypatch, caplog) -> None:
     env = tmp_path / ".env"
     env.write_text("FXAPK_OTX_KEY=abc123\n", encoding="utf-8")
     monkeypatch.delenv("FXAPK_OTX_KEY", raising=False)
-    with caplog.at_level("DEBUG", logger="apkscan.core.dotenv"):
+    with caplog.at_level("DEBUG", logger="fxapk.core.dotenv"):
         assert load_dotenv(env) == 1
     hits = [r.message for r in caplog.records if "FXAPK_OTX_KEY" in r.message]
     assert hits and any(str(env) in m for m in hits)
@@ -148,7 +148,7 @@ def test_hostile_cwd_env_is_not_loaded(tmp_path, monkeypatch) -> None:
     for key in ("FXAPK_TOOLCHAIN_FILE", "FXAPK_ENABLE_REA", "FXAPK_VT_KEY"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(evidence)
-    from apkscan.core import dotenv as dotenv_mod
+    from fxapk.core import dotenv as dotenv_mod
 
     monkeypatch.setattr(dotenv_mod, "_REPO_ROOT", repo)
     monkeypatch.setattr(dotenv_mod, "_USER_ENV", tmp_path / "absent-user.env")
@@ -160,7 +160,7 @@ def test_hostile_cwd_env_is_not_loaded(tmp_path, monkeypatch) -> None:
 
 def test_user_env_is_second_trusted_location(tmp_path, monkeypatch) -> None:
     """仓库根没有 .env 时读用户级 ``~/.fxapk/.env``；cwd 与非白名单键都不注入。"""
-    from apkscan.core import dotenv as dotenv_mod
+    from fxapk.core import dotenv as dotenv_mod
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -215,7 +215,7 @@ def test_explicit_dotenv_rejects_execution_path_and_gate_keys(tmp_path, monkeypa
         "JAVA_HOME",
         "PATH",
     )
-    with caplog.at_level("WARNING", logger="apkscan.core.dotenv"):
+    with caplog.at_level("WARNING", logger="fxapk.core.dotenv"):
         assert load_dotenv(env) == 1
     assert os.environ["FXAPK_VT_KEY"] == "vt-key-body"
     for key in rejected:

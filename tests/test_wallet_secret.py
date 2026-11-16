@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.wallet_secret import WalletSecretAnalyzer
-from apkscan.core.models import Confidence, LeadCategory
+from fxapk.analyzers.wallet_secret import WalletSecretAnalyzer
+from fxapk.core.models import Confidence, LeadCategory
 
 # 标准 BIP-39 测试向量（合法 12 词，9 个互异词 → 过 2/3 互异度护栏）。
 # 不用全零熵向量（abandon×11+about，仅 2 互异词）——它会被互异度护栏当 FP 滤掉（真钱包从不用）。
@@ -92,7 +92,7 @@ def test_resource_scan_detects_mnemonic() -> None:
 
 def test_embedded_wordlist_asset_no_false_mnemonic() -> None:
     # APK 自带 BIP-39 词表（2048 连续词）→ run 护栏整段跳过，不产误报（亦防性能放大）。
-    from apkscan.core.walletsecret import load_wordlist
+    from fxapk.core.walletsecret import load_wordlist
 
     index, _wordset = load_wordlist()
     wordlist_text = " ".join(index)  # 2048 个连续 BIP-39 词

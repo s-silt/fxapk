@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from apkscan.dynamic.capture_adaptation import build_capture_adaptation, validate_assistance_selection
+from fxapk.dynamic.capture_adaptation import build_capture_adaptation, validate_assistance_selection
 
 
 def test_sample_instruction_text_never_enters_assistance_context():

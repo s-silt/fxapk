@@ -9,18 +9,18 @@ import math
 
 import pytest
 
-from apkscan.core.recognition_evaluation import (
+from fxapk.core.recognition_evaluation import (
     FamilyPrediction,
     PairRanking,
     RecognitionEvaluationError,
     evaluate_family,
     evaluate_pairs,
 )
-from apkscan.core.recognition_labels import (
+from fxapk.core.recognition_labels import (
     RecognitionLabelRecord,
     RecognitionLabelSet,
 )
-from apkscan.core.recognition_training import SplitConfig, build_split_manifest
+from fxapk.core.recognition_training import SplitConfig, build_split_manifest
 
 SHA_A = "aa" * 32
 SHA_B = "bb" * 32
@@ -375,7 +375,7 @@ def test_determinism_under_input_reordering() -> None:
 
 
 def test_promotion_derivation_rejects_empty_consumption_directly() -> None:
-    from apkscan.core.recognition_evaluation import derive_promotion_eligible
+    from fxapk.core.recognition_evaluation import derive_promotion_eligible
 
     base: dict = {
         "split_name": "test_temporal_seen",

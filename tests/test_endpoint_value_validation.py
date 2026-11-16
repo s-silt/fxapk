@@ -10,24 +10,24 @@ from urllib.parse import quote, urlsplit
 
 import pytest
 
-import apkscan.enrichers._ipinfo as ipinfo_mod
-import apkscan.enrichers.ip_rdap as ip_rdap_mod
-import apkscan.enrichers.rdap as rdap_mod
-import apkscan.enrichers.shodan as shodan_mod
-from apkscan.core.enrichment import _enrich_endpoints
-from apkscan.core.json_io import BoundedJsonError
-from apkscan.core.models import Endpoint, EnrichmentResult, endpoint_value_matches_kind
-from apkscan.core.registry import BaseEnricher
-from apkscan.core.report_io import load_report
-from apkscan.enrichers.ip_rdap import IpRdapEnricher
-from apkscan.enrichers.multisource import (
+import fxapk.enrichers._ipinfo as ipinfo_mod
+import fxapk.enrichers.ip_rdap as ip_rdap_mod
+import fxapk.enrichers.rdap as rdap_mod
+import fxapk.enrichers.shodan as shodan_mod
+from fxapk.core.enrichment import _enrich_endpoints
+from fxapk.core.json_io import BoundedJsonError
+from fxapk.core.models import Endpoint, EnrichmentResult, endpoint_value_matches_kind
+from fxapk.core.registry import BaseEnricher
+from fxapk.core.report_io import load_report
+from fxapk.enrichers.ip_rdap import IpRdapEnricher
+from fxapk.enrichers.multisource import (
     CensysPassiveEnricher,
     OtxPassiveEnricher,
     VirusTotalPassiveEnricher,
 )
-from apkscan.enrichers.rdap import RdapEnricher
-from apkscan.enrichers.resource_profile import FofaHostProfileEnricher
-from apkscan.enrichers.shodan import ShodanEnricher
+from fxapk.enrichers.rdap import RdapEnricher
+from fxapk.enrichers.resource_profile import FofaHostProfileEnricher
+from fxapk.enrichers.shodan import ShodanEnricher
 
 _EVIL_IP = "100.64.0.1/../x?y=1#z"
 _EVIL_DOMAIN = "a.example.com/../x?y=1#z"
@@ -56,7 +56,7 @@ def test_load_report_keeps_endpoint_value_that_does_not_match_kind(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, kind: str, value: str
 ) -> None:
     path = _write_report(tmp_path, [{"value": value, "kind": kind}])
-    with caplog.at_level(logging.WARNING, logger="apkscan.core.report_io"):
+    with caplog.at_level(logging.WARNING, logger="fxapk.core.report_io"):
         report = load_report(path)
     assert len(report.endpoints) == 1
     assert report.endpoints[0].value == value

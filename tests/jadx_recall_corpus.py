@@ -1,7 +1,7 @@
 """JADX 召回基线语料（纯数据，供 test_jadx_recall_baseline 与再生成脚本共用）。
 
-本模块**不得 import apkscan**：master 基线再生成脚本会在 master 工作树的
-sys.path 下加载它，任何 apkscan 依赖都会把语料钉死在单一 schema 版本上。
+本模块**不得 import fxapk**：master 基线再生成脚本会在 master 工作树的
+sys.path 下加载它，任何 fxapk 依赖都会把语料钉死在单一 schema 版本上。
 
 语料覆盖两类召回面：
 - 提取召回：调用点形态（普通/this/静态限定/链式/关键字后调用/比较后调用/

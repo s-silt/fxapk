@@ -7,10 +7,10 @@ infra.classify_domain（离线纯函数）：evilbroker.* → 建议调证、公
 
 from __future__ import annotations
 
-from apkscan.analyzers.self_hosted_im import SelfHostedImAnalyzer
-from apkscan.core import infra
-from apkscan.core.models import Confidence, LeadCategory
-from apkscan.report.letters import build_letters
+from fxapk.analyzers.self_hosted_im import SelfHostedImAnalyzer
+from fxapk.core import infra
+from fxapk.core.models import Confidence, LeadCategory
+from fxapk.report.letters import build_letters
 
 
 class _Ctx:

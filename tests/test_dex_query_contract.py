@@ -8,11 +8,11 @@ import pytest
 
 from typer.testing import CliRunner
 
-from apkscan.cli import app
+from fxapk.cli import app
 
 
 def test_dex_capabilities_reports_provider_unavailable_without_loading_asc(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("apkscan.core.dex_query.resolve_worker_argv", lambda: None)
+    monkeypatch.setattr("fxapk.core.dex_query.resolve_worker_argv", lambda: None)
     loaded = {name for name in sys.modules if name == "droidasc" or name.startswith("droidasc.")}
     result = CliRunner().invoke(app, ["dex", "capabilities"])
     payload = json.loads(result.stdout)

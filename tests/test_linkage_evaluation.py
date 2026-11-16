@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import linkage, linkage_evaluation
-from apkscan.core.linkage_evaluation import evaluate_linkage_rules
-from apkscan.core.linkage_labels import (
+from fxapk.core import linkage, linkage_evaluation
+from fxapk.core.linkage_evaluation import evaluate_linkage_rules
+from fxapk.core.linkage_labels import (
     LabelValidationError,
     build_linkage_ground_truth,
     load_linkage_labels,
@@ -606,7 +606,7 @@ def test_family_positive_conflicts_with_direct_negative_in_the_same_subtype() ->
 
 def test_ground_truth_pair_budget_fails_before_large_family_expansion(monkeypatch) -> None:
     monkeypatch.setattr(
-        "apkscan.core.linkage_labels._MAX_GROUND_TRUTH_PAIR_MATERIALIZATIONS", 3
+        "fxapk.core.linkage_labels._MAX_GROUND_TRUTH_PAIR_MATERIALIZATIONS", 3
     )
     labels = validate_linkage_label_records(
         [_family(_sha(char), "large-family") for char in "abcd"]

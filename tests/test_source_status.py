@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core.source_status import (
+from fxapk.core.source_status import (
     SOURCE_STATUS_FAILED,
     SOURCE_STATUS_HIT,
     SOURCE_STATUS_NO_RECORD,

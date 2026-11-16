@@ -7,10 +7,10 @@ infra.classify_domain（离线纯函数）。覆盖：强档（关键词 / 接�
 
 from __future__ import annotations
 
-from apkscan.analyzers.sms_forwarding import SmsForwardingAnalyzer
-from apkscan.core import infra
-from apkscan.core.models import Confidence, LeadCategory
-from apkscan.report.letters import build_letters
+from fxapk.analyzers.sms_forwarding import SmsForwardingAnalyzer
+from fxapk.core import infra
+from fxapk.core.models import Confidence, LeadCategory
+from fxapk.report.letters import build_letters
 
 
 class _Ctx:

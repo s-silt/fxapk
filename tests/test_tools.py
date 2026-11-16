@@ -1,4 +1,4 @@
-"""apkscan.core.tools 单测：frozen 判定 / adb 解析 / frida 调用前缀 / 可用性判定。
+"""fxapk.core.tools 单测：frozen 判定 / adb 解析 / frida 调用前缀 / 可用性判定。
 
 策略（无真打包、无真 PATH 工具，纯 monkeypatch）：
 - frozen()：monkeypatch tools.sys.frozen（PyInstaller 冻结标志）。
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import tools
+from fxapk.core import tools
 
 
 # ---------------------------------------------------------------------------

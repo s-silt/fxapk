@@ -1,7 +1,7 @@
-"""apkscan.dynamic.capture 的单测。
+"""fxapk.dynamic.capture 的单测。
 
 策略：全程不碰真机/真子进程/真流量。monkeypatch：
-- apkscan.core.device.has_device / has_frida / has_mitmproxy（控制前置）。
+- fxapk.core.device.has_device / has_frida / has_mitmproxy（控制前置）。
 - capture._start_mitmdump / _start_frida_unpinning / _adb* / _wait / _terminate
   （编排步骤替身，避免真起子进程）。
 - capture._parse_flows（注入假端点，断言运行时端点提取 + 报告写出）。
@@ -26,16 +26,16 @@ from typing import Any
 
 import pytest
 
-from apkscan.core import device
-from apkscan.core.models import Endpoint, Evidence
-from apkscan.dynamic import (
+from fxapk.core import device
+from fxapk.core.models import Endpoint, Evidence
+from fxapk.dynamic import (
     STATUS_DEGRADED,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_SKIPPED,
 )
-from apkscan.dynamic import capture, pcap_ingest
-from apkscan.dynamic.capture_plan import CaptureDecision
+from fxapk.dynamic import capture, pcap_ingest
+from fxapk.dynamic.capture_plan import CaptureDecision
 
 
 # ---------------------------------------------------------------------------
@@ -83,8 +83,8 @@ def _set_capabilities(
     # A1-3：capture.run 起手会探能力矩阵（capability_probe.probe_available 碰 adb / 设备侧 IO）——
     # 单测里替换成据上面 mock 的 flags 派生的纯逻辑能力集，既保持"不碰真机/真子进程"，又让
     # report.meta.capture_capabilities 如实反映被 mock 的环境（floor 底座随 has_device 一并给全）。
-    from apkscan.dynamic import capabilities as _caps
-    from apkscan.dynamic import capability_probe as _cp
+    from fxapk.dynamic import capabilities as _caps
+    from fxapk.dynamic import capability_probe as _cp
 
     def _fake_probe(serial: str | None = None) -> set[str]:
         avail: set[str] = set()
@@ -871,7 +871,7 @@ def test_capture_annotates_endpoints_after_attribution() -> None:
 def test_annotate_remote_endpoints_parseable_by_assemble(monkeypatch) -> None:  # noqa: ANN001
     """★Fable 复审 HIGH：_annotate 写回的 remote_endpoints 必须是 assemble 能解析的 "ip:port"（不带 proto
     前缀）——否则 assemble 的 tls_sni（域名→落地 IP，最强运行时真值边）会因解析失败而静默丢失。"""
-    from apkscan.attribution.assemble import _ip_from_hostport
+    from fxapk.attribution.assemble import _ip_from_hostport
 
     monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: value == "203.0.113.7")
     summary = pcap_ingest.PcapSummary(
@@ -901,7 +901,7 @@ def test_annotate_remote_endpoints_uses_the_shared_ipv6_format(monkeypatch) -> N
     ``remote_endpoints`` 字段就有了两套格式，assemble 把 ``[2606:...]`` 当地址解析不出来 →
     IPv6 的 tls_sni 真值边静默丢光（codex 二轮 P1，且当时全量测试仍绿）。
     """
-    from apkscan.attribution.assemble import _ip_from_hostport
+    from fxapk.attribution.assemble import _ip_from_hostport
 
     v6 = "2001:db8:9::2"
     monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: value == v6)
@@ -1033,7 +1033,7 @@ def _socket_line(state_hex: str) -> str:
 def test_socket_sampler_forms_interval_and_keeps_latest_state(monkeypatch, tmp_path):
     """连续存续的长连接跨轮采样形成 first_ts<last_ts 的观测区间，并保留最新 state（syn_sent→established
     记 established），而非只留首次观测的点/首态（P1-2：就地扩 last_ts + 更新最新 state）。"""
-    from apkscan.dynamic import socket_attr
+    from fxapk.dynamic import socket_attr
 
     st = {"hex": "02"}  # 首轮 syn_sent（02），后续 established（01）
 
@@ -1068,7 +1068,7 @@ def test_socket_sampler_forms_interval_and_keeps_latest_state(monkeypatch, tmp_p
 def test_socket_sampler_segments_on_gap_no_false_interval(monkeypatch, tmp_path):
     """同一五元组缺席超过一个采样周期后再现（临时端口被新连接复用）→ 就地起新段、不跨空窗延展，
     避免把空窗伪造成 socket 存续期让空窗内 pcap 流误过时间窗匹配（P1-2 B 面）。"""
-    from apkscan.dynamic import socket_attr
+    from fxapk.dynamic import socket_attr
 
     present = {"on": True}
 
@@ -1107,7 +1107,7 @@ def test_socket_sampler_segments_on_gap_no_false_interval(monkeypatch, tmp_path)
 def test_socket_sampler_slow_cycle_does_not_missegment_persistent_socket(monkeypatch, tmp_path):
     """单轮采样耗时远大于 interval（慢 adb / 调度抖动）但 socket 每轮都在 → 仍是一条连续区间，不因墙钟差被误切段
     （P1-2 加固：按采样轮次相邻判连续，而非墙钟差；Codex 复核指出的边界）。"""
-    from apkscan.dynamic import socket_attr
+    from fxapk.dynamic import socket_attr
 
     def fake_capture(extra, serial=None):
         procfs = extra[-1]
@@ -1220,7 +1220,7 @@ def test_capture_merges_timeline_and_snapshot_for_pcap_attribution(monkeypatch, 
 def test_capture_tls_keylog_decrypts_and_merges_endpoints(monkeypatch, tmp_path):
     """★P2：floor.pcap 旁存在 tls.keys（NSS Key Log）+ tshark 可用 → 解密还原的 HTTP/2 后端并入端点，
     标 is_cleartext=False、source=runtime-tls-decrypted。"""
-    from apkscan.dynamic import tshark_backend as tsb
+    from fxapk.dynamic import tshark_backend as tsb
 
     _set_capabilities(monkeypatch)
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
@@ -1272,7 +1272,7 @@ def test_capture_tls_keylog_decrypts_and_merges_endpoints(monkeypatch, tmp_path)
 
 def test_capture_tls_keylog_extracts_credentials_desensitized(monkeypatch, tmp_path):
     """★P2 续：解密 HTTP 的 Authorization/Cookie → credential_events，经 cryptohook 脱敏（明文 token 不落报告）。"""
-    from apkscan.dynamic import tshark_backend as tsb
+    from fxapk.dynamic import tshark_backend as tsb
 
     _set_capabilities(monkeypatch)
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
@@ -1539,8 +1539,8 @@ def test_capture_both_missing_mitm_records_degraded_plan(monkeypatch, tmp_path):
     ★注：本用例只验能力计划的**记录**；both 缺 mitmproxy 仍走既有 _detect_missing 判缺前置 → skipped，
     能力计划挂在 result 之外不写 runtime_report——故这里直接对 resolve 出的计划断言其记录正确。
     """
-    from apkscan.dynamic import capabilities as C
-    from apkscan.dynamic import capability_probe as cp
+    from fxapk.dynamic import capabilities as C
+    from fxapk.dynamic import capability_probe as cp
 
     # both 底座就绪 + 有 mitmproxy 但（capability_probe 保守）无 CA → plan 记等效 floor-only。
     monkeypatch.setattr(
@@ -1897,8 +1897,8 @@ def test_frida_event_context_stays_bound_to_each_spawned_attempt(monkeypatch, tm
     import sys
     import types
 
-    from apkscan.core.models import Report
-    from apkscan.dynamic import cryptohook, merge, probe_coverage
+    from fxapk.core.models import Report
+    from fxapk.dynamic import cryptohook, merge, probe_coverage
 
     scripts: list[Any] = []
     pids = iter((111, 222))
@@ -3584,7 +3584,7 @@ def test_parse_flows_filters_emulator_noise(monkeypatch, tmp_path):
 def test_load_noise_patterns_rule_override(monkeypatch):
     """rules/capture_noise.yaml 给了 noise_hosts 即整体覆盖内置兜底。"""
     monkeypatch.setattr(capture, "_NOISE_PATTERNS_CACHE", None)
-    from apkscan.core import registry
+    from fxapk.core import registry
 
     monkeypatch.setattr(registry, "load_rules", lambda name: {"noise_hosts": ["evil-noise.test"]})
     pats = capture._load_noise_patterns()
@@ -3594,7 +3594,7 @@ def test_load_noise_patterns_rule_override(monkeypatch):
 
 def test_load_noise_patterns_fallback_on_bad_rules(monkeypatch):
     monkeypatch.setattr(capture, "_NOISE_PATTERNS_CACHE", None)
-    from apkscan.core import registry
+    from fxapk.core import registry
 
     monkeypatch.setattr(registry, "load_rules", lambda name: "garbage")
     pats = capture._load_noise_patterns()
@@ -4347,7 +4347,7 @@ def test_floor_starts_before_proxy(monkeypatch, tmp_path):
 def test_floor_pcap_auto_ingested_into_endpoints(monkeypatch, tmp_path):
     """★ floor.pcap 接入节点自动并入 runtime endpoints（mitm 0 端点时兜底）；域名侧 GMS/连通性
     噪音按名单折叠，IP 侧交下游 asn/infra 分级（此处验并入 + 域名噪音折叠）。"""
-    from apkscan.core.models import Endpoint, Evidence
+    from fxapk.core.models import Endpoint, Evidence
 
     _set_capabilities(monkeypatch)
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
@@ -4475,7 +4475,7 @@ def test_ascii_staging_dir_falls_back_with_warning_when_no_short_path(monkeypatc
     non_ascii.mkdir()
     monkeypatch.setattr(capture.tempfile, "mkdtemp", lambda prefix="": str(non_ascii))
     monkeypatch.setattr(capture, "_short_path_if_ascii", lambda p: None)
-    with caplog.at_level(logging.WARNING, logger="apkscan.dynamic.capture"):
+    with caplog.at_level(logging.WARNING, logger="fxapk.dynamic.capture"):
         got = capture._ascii_staging_dir()
     assert got == non_ascii  # 优雅回落、不抛
     assert any("无 8.3 短路径" in r.getMessage() for r in caplog.records)
@@ -4940,7 +4940,7 @@ def test_body_text_gzip_bomb_stays_bounded() -> None:
     import gzip
     from types import SimpleNamespace
 
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
 
     bomb = gzip.compress(b'{"data":"x","timestamp":1}' + b"0" * (50 * 1024 * 1024))
     msg = SimpleNamespace(
@@ -4960,7 +4960,7 @@ def test_body_text_brotli_bomb_stays_bounded() -> None:
     brotli = pytest.importorskip("brotli")
     from types import SimpleNamespace
 
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
 
     bomb = brotli.compress(b'{"data":"x","timestamp":1}' + b"0" * (50 * 1024 * 1024))
     msg = SimpleNamespace(
@@ -4978,7 +4978,7 @@ def test_brotli_bounded_passes_output_buffer_limit(monkeypatch) -> None:
     """★brotli≥1.2 路径必须真的把 output_buffer_limit 传给 process——
     替身记录实参，防"探测支持却走旧调用"的静默回退。"""
     brotli = pytest.importorskip("brotli")
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
 
     calls: list[int | None] = []
 
@@ -5000,7 +5000,7 @@ def test_brotli_unsupported_cap_returns_none(monkeypatch) -> None:
     """★旧版 brotli 无 output_buffer_limit：单次 process 可吐出 GB 级——
     宁可不解码（退回原始字节）也不解压。"""
     pytest.importorskip("brotli")
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
 
     monkeypatch.setattr(capture, "_brotli_output_cap_supported", lambda: False)
     assert capture._brotli_body_bounded(b"x" * 100, 10) is None
@@ -5012,7 +5012,7 @@ def test_body_text_zstd_bomb_stays_bounded() -> None:
     zstd = pytest.importorskip("backports.zstd")
     from types import SimpleNamespace
 
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
 
     bomb = zstd.compress(b'{"data":"x","timestamp":1}' + b"0" * (50 * 1024 * 1024))
     msg = SimpleNamespace(
@@ -5029,7 +5029,7 @@ def test_body_text_zstd_bomb_stays_bounded() -> None:
 def test_body_text_unknown_encoding_treated_opaque() -> None:
     from types import SimpleNamespace
 
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
 
     msg = SimpleNamespace(
         raw_content=b"\x00\x01binary" * 100,

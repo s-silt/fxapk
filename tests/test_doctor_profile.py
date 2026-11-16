@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.dynamic import doctor
+from fxapk.dynamic import doctor
 
 
 def _stub_checks(

@@ -5,18 +5,18 @@ import json
 
 import pytest
 
-from apkscan.analyzers._common import EndpointCollector
-from apkscan.analyzers.endpoints import EndpointsAnalyzer
-from apkscan.analyzers.js_bundle import JsBundleAnalyzer
-from apkscan.core.context import iter_dex_records
-from apkscan.core.integrity import evidence_id
-from apkscan.core.models import Endpoint, Evidence, Lead, LeadCategory, Report
-from apkscan.core.observations import DexStringRecord, occurrence_id
-from apkscan.core.report_io import report_from_dict
-from apkscan.core.snapshot import SnapshotContext, build_snapshot
-from apkscan.core.stage_preservation import merge_carried_evidence
-from apkscan.core.web_supplement_report import _evidence_list
-from apkscan.report.json import to_dict
+from fxapk.analyzers._common import EndpointCollector
+from fxapk.analyzers.endpoints import EndpointsAnalyzer
+from fxapk.analyzers.js_bundle import JsBundleAnalyzer
+from fxapk.core.context import iter_dex_records
+from fxapk.core.integrity import evidence_id
+from fxapk.core.models import Endpoint, Evidence, Lead, LeadCategory, Report
+from fxapk.core.observations import DexStringRecord, occurrence_id
+from fxapk.core.report_io import report_from_dict
+from fxapk.core.snapshot import SnapshotContext, build_snapshot
+from fxapk.core.stage_preservation import merge_carried_evidence
+from fxapk.core.web_supplement_report import _evidence_list
+from fxapk.report.json import to_dict
 from tests.conftest import FakeContext
 
 
@@ -232,7 +232,7 @@ def test_fallback_record_has_no_claimed_coordinates() -> None:
 
 
 def test_js_producer_keeps_repeated_offsets_and_dedupes_chunk_overlap() -> None:
-    from apkscan.analyzers.js_bundle import _SCAN_CHUNK_BYTES, _SCAN_OVERLAP_CHARS
+    from fxapk.analyzers.js_bundle import _SCAN_CHUNK_BYTES, _SCAN_OVERLAP_CHARS
 
     url = "https://boundary-c2.example.test/path"
     first = f"var a='{url}';".encode()

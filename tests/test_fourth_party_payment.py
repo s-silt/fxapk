@@ -11,10 +11,10 @@ infra.classify_domain（离线纯函数）：自有灰产网关 → 建议调证
 
 from __future__ import annotations
 
-from apkscan.analyzers.fourth_party_payment import FourthPartyPaymentAnalyzer
-from apkscan.core import infra
-from apkscan.core.models import Confidence, LeadCategory
-from apkscan.report.letters import build_letters
+from fxapk.analyzers.fourth_party_payment import FourthPartyPaymentAnalyzer
+from fxapk.core import infra
+from fxapk.core.models import Confidence, LeadCategory
+from fxapk.report.letters import build_letters
 
 
 class _Ctx:

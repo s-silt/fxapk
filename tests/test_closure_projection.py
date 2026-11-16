@@ -7,15 +7,15 @@ import json
 
 import pytest
 
-from apkscan.core.case_package import (
+from fxapk.core.case_package import (
     CasePackageError,
     create_case_package,
     project_case_status,
     verify_case_package,
 )
-from apkscan.core.evidence_scope import project_serialized_closure
-from apkscan.core.report_io import report_from_dict
-from apkscan.report.digest import build_digest
+from fxapk.core.evidence_scope import project_serialized_closure
+from fxapk.core.report_io import report_from_dict
+from fxapk.report.digest import build_digest
 
 
 def _report(

@@ -6,13 +6,13 @@ import json
 import pytest
 import requests
 
-from apkscan.core.batch_enrich import Target, completed_from_records, enrich_targets, estimate_budget, budget_total
-from apkscan.core.enrichment_profiles import api_inventory, select_enrichers, configuration_issues
-from apkscan.core.models import Endpoint
-from apkscan.enrichers.infrastructure import (
+from fxapk.core.batch_enrich import Target, completed_from_records, enrich_targets, estimate_budget, budget_total
+from fxapk.core.enrichment_profiles import api_inventory, select_enrichers, configuration_issues
+from fxapk.core.models import Endpoint
+from fxapk.enrichers.infrastructure import (
     CymruEnricher, DayDayMapEnricher, DnsRecordsEnricher, InternetDbEnricher, ThreatBookEnricher, WhoisXmlEnricher,
 )
-from apkscan.enrichers.multisource import CensysPassiveEnricher, HunterPassiveEnricher, QuakePassiveEnricher, ZoomEyePassiveEnricher
+from fxapk.enrichers.multisource import CensysPassiveEnricher, HunterPassiveEnricher, QuakePassiveEnricher, ZoomEyePassiveEnricher
 
 
 @pytest.fixture(autouse=True)
@@ -291,7 +291,7 @@ def test_cymru_prefix_mismatch_is_failed():
 
 @pytest.mark.parametrize("category", ["authentication_failed", "permission_denied", "quota_insufficient"])
 def test_account_breaker_never_probes(category):
-    from apkscan.enrichers.multisource import _ServiceError
+    from fxapk.enrichers.multisource import _ServiceError
     class Broken(InternetDbEnricher):
         def _lookup(self, endpoint, credential):
             raise _ServiceError(category)
@@ -330,9 +330,9 @@ def test_dns_redirect_views_fail_without_following():
 
 def test_cli_reports_dns_truncation_as_gap(tmp_path, monkeypatch):
     from typer.testing import CliRunner
-    from apkscan import cli
+    from fxapk import cli
     adapter = DnsRecordsEnricher(session=Session({"Status": 0, "Answer": [{"type": 5, "data": "example.test"}] * 101}))
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [adapter])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [adapter])
     targets = tmp_path / "targets.txt"
     targets.write_text("example.test\n", encoding="utf-8")
     result = CliRunner().invoke(cli.app, ["enrich", "batch", "--targets", str(targets), "--out", str(tmp_path), "--no-dry-run"])

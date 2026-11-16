@@ -11,8 +11,8 @@ import json
 
 import pytest
 
-from apkscan.core.registry import discover_enrichers
-from apkscan.selfcheck import build_credential_components, run_selfcheck
+from fxapk.core.registry import discover_enrichers
+from fxapk.selfcheck import build_credential_components, run_selfcheck
 
 #: 不该出现在任何输出里的哨兵值。
 _SENTINEL = "sentinel-credential-value-must-never-be-echoed"
@@ -122,7 +122,7 @@ def test_credentials_do_not_flip_overall_ok(monkeypatch: pytest.MonkeyPatch) -> 
     # ★版本项要钉成 ok：这条测的是"凭据不翻转整体 ok"这一个语义，不能被本机恰好处于
     #   版本故障现场（如元数据滞后于源码树）连带判红。版本判据自有 test_version_shadowing.py 锁。
     monkeypatch.setattr(
-        "apkscan.selfcheck.build_version_component",
+        "fxapk.selfcheck.build_version_component",
         lambda: {"name": "version", "category": "core", "status": "ok", "detail": "", "fix": ""},
     )
 
@@ -136,6 +136,6 @@ def test_credential_components_survive_a_broken_registry(monkeypatch: pytest.Mon
     def _boom():
         raise RuntimeError("registry 坏了")
 
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", _boom)
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", _boom)
     assert build_credential_components() == []
     assert run_selfcheck(online=False, probe_network=False)["components"]

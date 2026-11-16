@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.analyzers import crypto_recipe as cr
-from apkscan.analyzers.crypto_recipe import CryptoRecipeAnalyzer
-from apkscan.core.models import LeadCategory
+from fxapk.analyzers import crypto_recipe as cr
+from fxapk.analyzers.crypto_recipe import CryptoRecipeAnalyzer
+from fxapk.core.models import LeadCategory
 from tests.conftest import FakeContext
 
 # 真样本 ground-truth 的期望 key 不写进仓库：由本地环境变量注入，未设则跳过该用例。
@@ -261,8 +261,8 @@ def test_iv_derive_unknown_when_no_md5_no_iv() -> None:
     reason="本地无样本、或未设 FXAPK_GROUNDTRUTH_KEY，跳过真值验证",
 )
 def test_groundtruth_key_extracted() -> None:
-    from apkscan.core.apk import ApkParseError, load_apk
-    from apkscan.core.models import AnalysisConfig
+    from fxapk.core.apk import ApkParseError, load_apk
+    from fxapk.core.models import AnalysisConfig
 
     # 遍历本地 ybku/ 下的样本，找出产出目标加密配方的那个（按 key 定位，不硬编码样本文件名）。
     loaded_any = False
@@ -322,7 +322,7 @@ def test_large_file_no_truncation_warning(caplog: pytest.LogCaptureFixture) -> N
     pad = b"z" * (9 * 1024 * 1024)
     js = pad + _SYNTHETIC_JS.encode("utf-8")
     ctx = FakeContext(files={"assets/apps/__UNI__X/www/app-service.js": js})
-    with caplog.at_level(logging.WARNING, logger="apkscan.analyzers.crypto_recipe"):
+    with caplog.at_level(logging.WARNING, logger="fxapk.analyzers.crypto_recipe"):
         CryptoRecipeAnalyzer().analyze(ctx)
     assert not any(
         "仅扫前段" in r.message or "文件超过上限" in r.message for r in caplog.records

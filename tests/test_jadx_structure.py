@@ -11,7 +11,7 @@ import hashlib
 from pathlib import Path
 from typing import Callable
 
-from apkscan.core.jadx_index import (
+from fxapk.core.jadx_index import (
     CacheMiss,
     DexInput,
     DexLineage,
@@ -27,7 +27,7 @@ from apkscan.core.jadx_index import (
     scan_java_sources,
     verify_dex_inputs,
 )
-from apkscan.core.recognition_codec import canonical_json_v1, parse_json_v1
+from fxapk.core.recognition_codec import canonical_json_v1, parse_json_v1
 
 _OPTS = "sha256:" + "a" * 64
 
@@ -674,7 +674,7 @@ def test_escaped_quotes_with_braces_do_not_break_spans(tmp_path: Path) -> None:
 
 def test_sanitizer_preserves_line_count() -> None:
     """★清理前后行数恒等是行号定位的地基契约——含跨行块注释与未闭合字符串。"""
-    from apkscan.core.jadx_index import _sanitize_java_source
+    from fxapk.core.jadx_index import _sanitize_java_source
 
     samples = [
         "a\n/* x\n y */\nint c = 1; // t\n",

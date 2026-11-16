@@ -1,6 +1,6 @@
 import hashlib
 
-from apkscan.dynamic.capture_safety import compare_rounds, round_safety
+from fxapk.dynamic.capture_safety import compare_rounds, round_safety
 
 
 def test_capture_and_ui_complete_or_zero_traffic_do_not_prove_business_outcomes(tmp_path):

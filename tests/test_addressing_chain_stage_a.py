@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.config import decode, fetch
-from apkscan.config.chain import build_control_chains
-from apkscan.core import config_probe_run as probe, pipeline
-from apkscan.core.appcrypto import CryptoRecipe
-from apkscan.report.digest import build_digest
+from fxapk.config import decode, fetch
+from fxapk.config.chain import build_control_chains
+from fxapk.core import config_probe_run as probe, pipeline
+from fxapk.core.appcrypto import CryptoRecipe
+from fxapk.report.digest import build_digest
 
 URL = "https://cfg.example.test/config"
 HOST = "api.example.test"
@@ -124,7 +124,7 @@ def test_two_producers_same_shape_and_provenance(monkeypatch, tmp_path):
     assert evidence.location == f"remote-config:{URL}"
     assert evidence.provenance == {"artifact_sha256": art["sha256"], "field_paths": ["$.api.hosts[0]", '$["other-key"]']}
     assert evidence.locator == {"stored_path": art["stored_path"]}
-    from apkscan.cli import _merge_config_probe_into_report
+    from fxapk.cli import _merge_config_probe_into_report
     path = tmp_path / "report.json"
     path.write_text('{"schema_version":"1.3"}', encoding="utf-8")
     _merge_config_probe_into_report(str(path), probe.ProbeRunResult([outcome], probe_sink))
@@ -133,7 +133,7 @@ def test_two_producers_same_shape_and_provenance(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("stored", [None, "/absolute/config.bin", "C:/absolute/config.bin", "C:\\absolute\\config.bin"])
 def test_unlocated_paths_do_not_gain_occurrence(monkeypatch, stored):
-    from apkscan.core.observations import occurrence_id
+    from fxapk.core.observations import occurrence_id
     monkeypatch.setattr(probe, "archive_blob", lambda *args: stored)
     monkeypatch.setattr(fetch, "fetch_config_object", lambda url: fetch.FetchResult(url, True, BLOB, 200, None))
     sink = []
@@ -144,9 +144,9 @@ def test_unlocated_paths_do_not_gain_occurrence(monkeypatch, stored):
 
 
 def test_admission_states_unchanged_and_report_roundtrip(monkeypatch, tmp_path):
-    from apkscan.core.admission import PURPOSES, evaluate_usage
-    from apkscan.core.report_io import report_from_dict
-    from apkscan.report.json import _to_jsonable
+    from fxapk.core.admission import PURPOSES, evaluate_usage
+    from fxapk.core.report_io import report_from_dict
+    from fxapk.report.json import _to_jsonable
     _, sink = produce(monkeypatch, archive=tmp_path / "remote_config")
     before = probe.config_endpoint(HOST, "domain", URL).evidences
     after = sink[0].evidences
@@ -165,8 +165,8 @@ def test_admission_states_unchanged_and_report_roundtrip(monkeypatch, tmp_path):
 
 
 def test_cli_appends_evidence_without_touching_existing_leads(tmp_path):
-    from apkscan.cli import _merge_config_probe_into_report
-    from apkscan.report.json import _to_jsonable
+    from fxapk.cli import _merge_config_probe_into_report
+    from fxapk.report.json import _to_jsonable
     path = tmp_path / "report.json"
     old = probe.config_endpoint(HOST, "domain", URL)
     leads = [{"category": "domain", "value": HOST, "notes": ["preserve"], "advice": "待核"}]

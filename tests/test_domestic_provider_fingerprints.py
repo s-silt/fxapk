@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from apkscan.core.attribution import build_ip_attribution, score_edge_provider
+from fxapk.core.attribution import build_ip_attribution, score_edge_provider
 
 
 @pytest.mark.parametrize(("suffix", "provider"), [

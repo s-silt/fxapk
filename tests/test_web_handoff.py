@@ -5,13 +5,13 @@ import json
 
 import pytest
 
-from apkscan.analyzers.web_evidence import WebInlineConfigAnalyzer
-from apkscan.analyzers.web_har import WebHarAnalyzer
-from apkscan.core.admission import evaluate_evidence
-from apkscan.core.models import AnalysisConfig, Evidence
-from apkscan.core.observations import occurrence_id
-from apkscan.core.web_handoff import SCHEMA, bind_evidence, bind_result, load_handoff
-from apkscan.core.webctx import WebContext, load_web_evidence
+from fxapk.analyzers.web_evidence import WebInlineConfigAnalyzer
+from fxapk.analyzers.web_har import WebHarAnalyzer
+from fxapk.core.admission import evaluate_evidence
+from fxapk.core.models import AnalysisConfig, Evidence
+from fxapk.core.observations import occurrence_id
+from fxapk.core.web_handoff import SCHEMA, bind_evidence, bind_result, load_handoff
+from fxapk.core.webctx import WebContext, load_web_evidence
 
 
 def fixture(tmp_path, raw=b'<script>var api="https://api.example.test/v1";</script>'):

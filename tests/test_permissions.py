@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.permissions import PermissionsAnalyzer
-from apkscan.core.models import AnalyzerResult, Finding, Severity
+from fxapk.analyzers.permissions import PermissionsAnalyzer
+from fxapk.core.models import AnalyzerResult, Finding, Severity
 from tests.conftest import FakeContext
 
 _P = "android.permission."

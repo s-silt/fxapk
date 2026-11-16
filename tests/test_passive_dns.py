@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core.leads import _passive_dns_note, _passive_dns_records, build_endpoint_leads
-from apkscan.core.models import Endpoint, Evidence
-from apkscan.enrichers.multisource import (
+from fxapk.core.leads import _passive_dns_note, _passive_dns_records, build_endpoint_leads
+from fxapk.core.models import Endpoint, Evidence
+from fxapk.enrichers.multisource import (
     OtxPassiveEnricher,
     VirusTotalPassiveEnricher,
     _epoch_to_date,

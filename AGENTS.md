@@ -1,6 +1,6 @@
 # AGENTS.md — fxapk 操作指南（给 AI agent）
 
-fxapk（命令别名 `apkscan`）是 APK 调证取证分析 CLI：按能力门控做静态/动态证据采集、被动基础设施归属，产出**仍需过证据门的线索（leads）**。本文件只讲怎么跑；项目背景见 `README.md`，命令细节见 `USAGE.md`。
+fxapk 是 APK 调证取证分析 CLI：按能力门控做静态/动态证据采集、被动基础设施归属，产出**仍需过证据门的线索（leads）**。本文件只讲怎么跑；项目背景见 `README.md`，命令细节见 `USAGE.md`。
 
 - 案件分析由一个 agent 在本次授权范围内独立完成并自检；资料要么在仓库内、要么由用户提供，不依赖隐含的仓库外资料。
 - 不打包 exe/GUI。密钥放项目根 `.env`（已 gitignore）。输出面向 agent：调证信息进 `evidence_to_obtain` / `notes` / `report.meta`，`digest` 压成低 token 摘要。
@@ -25,7 +25,7 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证分析 CLI：按能力门�
 
 设备排查默认先 `fxapk doctor --no-fix`；修复前核对该设备和操作类别的授权。专用测试机身份不等于清数据、替换样本或行为修改授权。
 
-**脱敏只管 `digest`。** 以下出口原样输出高敏值，运行时各自向 stderr 提醒一行：`jsonl` / `diff` / `lead show|restore|replay` / `corpus events|ls|seen|shared-config|shared-native|shared-build-env|link-candidates` / `probe-leads` / `pcap-leads`，以及 `export` CSV、HTML/PDF、文书、corpus 存证、`case_correlation.json`、`report.json` 本身。判断方法：它的 stdout 会不会出现线索值。`corpus link-discover|link-explain|link-groups` 默认 `--evidence-values omit`，显式 `raw` 即恢复原值；`link-labels-validate|link-evaluate|link-readiness|link-train` 只输出聚合结果。不要对用户说「已全部脱敏」。名单以 `apkscan.core.redact.UNREDACTED_AGENT_COMMANDS` 为准，接线与文档同步由 `tests/test_redact.py` 锁定。
+**脱敏只管 `digest`。** 以下出口原样输出高敏值，运行时各自向 stderr 提醒一行：`jsonl` / `diff` / `lead show|restore|replay` / `corpus events|ls|seen|shared-config|shared-native|shared-build-env|link-candidates` / `probe-leads` / `pcap-leads`，以及 `export` CSV、HTML/PDF、文书、corpus 存证、`case_correlation.json`、`report.json` 本身。判断方法：它的 stdout 会不会出现线索值。`corpus link-discover|link-explain|link-groups` 默认 `--evidence-values omit`，显式 `raw` 即恢复原值；`link-labels-validate|link-evaluate|link-readiness|link-train` 只输出聚合结果。不要对用户说「已全部脱敏」。名单以 `fxapk.core.redact.UNREDACTED_AGENT_COMMANDS` 为准，接线与文档同步由 `tests/test_redact.py` 锁定。
 
 ## 3. 行为铁律：先跑 fxapk，据产物决策
 
@@ -116,7 +116,7 @@ REA 插件默认关闭：即使已安装也不导入、不注册命令、不用�
 
 ## 7. Flutter AOT 插件（可选）
 
-- `fxapk-flutter` 是可选静态插件，要求核心 ≥1.23.0，经发行附件 wheel 或 `python -m pip install -e ./plugins/fxapk-flutter` 安装；只处理识别为 Flutter 的 APK（Android ARM64 `libapp.so` + `libflutter.so`）。
+- `fxapk-flutter` 是可选静态插件，要求核心 ≥2.0.0，经发行附件 wheel 或 `python -m pip install -e ./plugins/fxapk-flutter` 安装；只处理识别为 Flutter 的 APK（Android ARM64 `libapp.so` + `libflutter.so`）。
 - `analyze` 的 `--flutter auto`（默认）对识别样本自动跑该阶段，`--flutter off` 关闭，`--flutter required` 未成功时保留报告并退出 4；`--flutter-toolchain` 指定本地 toolchain.json（缺省 `FXAPK_FLUTTER_TOOLCHAIN` / `~/.fxapk/flutter/toolchain.json`），`--flutter-timeout`（1–1800，默认 300）只约束单次容器运行。`auto` 命令没有 Flutter 选项。
 - 只用事先准备的本地 Blutter 可执行文件、固定 Docker 镜像与 toolchain.json；容器禁网、只读挂载、限资源，不拉取镜像、不下载、不编译、不执行 APK；缺插件或工具链记覆盖缺口，不自动安装依赖。
 - `fxapk flutter capabilities|analyze|query|attach`：query 与证据包未脱敏；attach 要求 `meta.sample_sha256` 精确匹配并写新目录，不重算 lead 分级或闭环；产出端点为 `derived-native` 静态证据（`runtime_observed=false`、`reachability=unknown`），不是运行时传输证据，不单独晋级闭环。
@@ -131,7 +131,7 @@ fxapk selfcheck                        # 能力自检；不逐源检查 API key�
 git config core.hooksPath .githooks    # 提交前泄漏扫描，改代码必开
 ```
 
-未装时用 `python -m apkscan.cli <cmd>` 等价调用。
+未装时用 `python -m fxapk.cli <cmd>` 等价调用。
 
 **泄漏扫描**：hook 扫已 staged 新增行，默认阻断疑似真实地址/凭据、中文人名+案、QQ/微信/Telegram 联系方式、二开包名，finding 值自动脱敏。公开第三方库误判应登记到 `rules/`（`bank_packages`/`sdks`），不加行内豁免；豁免（行内注释 `leak-scan:` 后接 `allow` 与理由）只给判据要求真值字面的夹具，同一理由 ≥20 行触发 `bulk_exemption`。分支已有 commit 时用 `leak-scan --base origin/master --strict`（= CI），`--staged` 看不到已提交改动。文档里不要把豁免 token 连写成完整形态。夹具优先用保留地址和域名；必须具备公网语义时用 mock 或可审计合成夹具。
 
@@ -143,7 +143,7 @@ git config core.hooksPath .githooks    # 提交前泄漏扫描，改代码必开
 
 ## 10. 开发约定
 
-- 文档/指令变更只做格式、引用、契约与泄漏检查；代码行为变更必过本地三关：`python -m ruff check apkscan tests` + `python -m pyright apkscan` + `python -m pytest -q`。`-m "not slow"` 排除需要 `FXAPK_TEST_APK` 的真 spawn 等价测试。
+- 文档/指令变更只做格式、引用、契约与泄漏检查；代码行为变更必过本地三关：`python -m ruff check fxapk tests` + `python -m pyright fxapk` + `python -m pytest -q`。`-m "not slow"` 排除需要 `FXAPK_TEST_APK` 的真 spawn 等价测试。
 - Python type hints；pytest，不用 unittest。富化器继承 `BaseEnricher`，失败返回 `EnrichmentResult(ok=False)`，不裸 except、不吞 log（只含 pass/continue/break 的 except 由 `tests/contracts/test_silent_except_baseline.py` 按基线拦截新增）。
 - 分析器并行（`core/pipeline.py` + `snapshot.py`）守「串行 == 并行 逐字节一致」；set 派生顺序显式排序。逃生开关：`FXAPK_NO_PARALLEL=1`、`FXAPK_MAX_WORKERS=N`、`FXAPK_WORKER_BASE_MB`、`FXAPK_MEM_SAFETY`。
 - CI 装 `pip install -e "."`：可选依赖进 `pyproject` extra，需要它的 CI job 要装；依赖 extra 的测试 `pytest.importorskip`。可选插件默认发现不得让坏插件拖垮核心命令。

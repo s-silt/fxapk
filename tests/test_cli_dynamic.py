@@ -1,4 +1,4 @@
-"""apkscan.cli 集成单元的单测：doctor 命令 + analyze --dynamic 运行时端点并回。
+"""fxapk.cli 集成单元的单测：doctor 命令 + analyze --dynamic 运行时端点并回。
 
 策略：全程不碰真机/真子进程/真流量。
 - doctor 命令：用 typer.testing.CliRunner 调 ``app``，monkeypatch ``doctor.run``
@@ -21,16 +21,16 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.models import Report
-from apkscan.dynamic import STATUS_DEGRADED, STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
+from fxapk import cli
+from fxapk.core.models import Report
+from fxapk.dynamic import STATUS_DEGRADED, STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
 
 
 @pytest.fixture(autouse=True)
 def _isolate_adb(monkeypatch: pytest.MonkeyPatch) -> None:
     # P0-5：默认起手无 adb server（本次自起、归我们收）——让 cleanup 的 kill 断言不依赖跑测
     # 机器上是否恰好有 adb server 在 5037 监听；需测"外部已存在不杀"的用例在自身内覆写为 True。
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     monkeypatch.setattr(tools, "adb_server_running", lambda *a, **k: False)
 
@@ -100,7 +100,7 @@ def _make_report(package_name: str = "com.x") -> Report:
 
 def _patch_doctor_run(monkeypatch: pytest.MonkeyPatch, result: dict[str, Any]) -> dict[str, Any]:
     """monkeypatch doctor.run 返回固定结构化结果，返回调用记录。"""
-    from apkscan.dynamic import doctor
+    from fxapk.dynamic import doctor
 
     calls: dict[str, Any] = {"called": False, "kwargs": None}
 
@@ -181,7 +181,7 @@ def test_doctor_command_exit_0_when_ok(monkeypatch):
 
 def test_doctor_cleans_adb_on_exit(monkeypatch):
     """问题 1：doctor 命令退出时 finally 收掉自起的 adb server（含体检失败 rc=1 路径）。"""
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     calls = {"n": 0}
     monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
@@ -208,7 +208,7 @@ def test_raise_exit_degraded_is_code_3():
 
 def test_cleanup_adb_quiet_skips_kill_when_not_owned(monkeypatch):
     """★ P0-5：owned=False（起手时已有外部/先前 server）→ 收尾【绝不】调 kill_adb_server。"""
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     calls = {"n": 0}
     monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
@@ -221,7 +221,7 @@ def test_cleanup_adb_quiet_skips_kill_when_not_owned(monkeypatch):
 def test_command_does_not_kill_preexisting_external_adb(monkeypatch):
     """★ P0-5：命令起手时已有外部 adb server（adb_server_running=True）→ 退出收尾不杀，
     避免误杀外部或仍在 pull 落盘 floor.pcap 的 adb。"""
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     monkeypatch.setattr(tools, "adb_server_running", lambda *a, **k: True)  # 外部已在跑
     calls = {"n": 0}
@@ -241,7 +241,7 @@ def test_doctor_killserver_repair_cmd_unchanged(monkeypatch):
     cleanup 收的是程序自起的 server（kill_adb_server），不触碰 doctor 结构化结果里的
     fix_cmd 字符串——它仍是给用户复制的命令。这里断言该修复命令仍能原样打印。
     """
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     monkeypatch.setattr(tools, "kill_adb_server", lambda: True)
     _patch_doctor_run(
@@ -264,12 +264,12 @@ def test_doctor_killserver_repair_cmd_unchanged(monkeypatch):
 
 def test_analyze_cleans_adb_on_exit(monkeypatch):
     """问题 1：analyze（纯静态）退出时也无条件收 adb（device.has_device 每次都会起 server）。"""
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     calls = {"n": 0}
     monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
     monkeypatch.setattr(cli.device, "has_device", lambda: False)
-    monkeypatch.setattr("apkscan.core.pipeline.run", lambda ctx, config: _make_report("com.x"))
+    monkeypatch.setattr("fxapk.core.pipeline.run", lambda ctx, config: _make_report("com.x"))
     monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
     monkeypatch.setattr(cli, "_write_reports", lambda *a, **k: None)
 
@@ -290,11 +290,11 @@ def test_analyze_cleans_adb_on_exit(monkeypatch):
 
 def _stub_analyze_static(monkeypatch: pytest.MonkeyPatch, report: Report) -> None:
     """把 analyze 的设备/加载/流水线打桩成纯静态、无设备、不收 adb 真动作。"""
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
     monkeypatch.setattr(cli.device, "has_device", lambda: False)
-    monkeypatch.setattr("apkscan.core.pipeline.run", lambda ctx, config: report)
+    monkeypatch.setattr("fxapk.core.pipeline.run", lambda ctx, config: report)
     monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
 
 
@@ -363,10 +363,10 @@ def test_doctor_command_module_missing_graceful_exit(monkeypatch):
     import builtins
     import sys
 
-    # 让 `from apkscan.dynamic import doctor` 触发真正的 ImportError：
+    # 让 `from fxapk.dynamic import doctor` 触发真正的 ImportError：
     # 先把已缓存的 doctor 子模块逐出 sys.modules（含父包属性），再在 __import__ 层拦截。
-    monkeypatch.delitem(sys.modules, "apkscan.dynamic.doctor", raising=False)
-    import apkscan.dynamic as _dyn
+    monkeypatch.delitem(sys.modules, "fxapk.dynamic.doctor", raising=False)
+    import fxapk.dynamic as _dyn
 
     monkeypatch.delattr(_dyn, "doctor", raising=False)
 
@@ -374,8 +374,8 @@ def test_doctor_command_module_missing_graceful_exit(monkeypatch):
 
     def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
         fromlist = args[2] if len(args) >= 3 else kwargs.get("fromlist")
-        if name == "apkscan.dynamic.doctor" or (
-            name == "apkscan.dynamic" and fromlist and "doctor" in fromlist
+        if name == "fxapk.dynamic.doctor" or (
+            name == "fxapk.dynamic" and fromlist and "doctor" in fromlist
         ):
             raise ImportError("simulated missing doctor")
         return real_import(name, *args, **kwargs)
@@ -394,7 +394,7 @@ def test_doctor_command_module_missing_graceful_exit(monkeypatch):
 
 def _patch_unpack(monkeypatch: pytest.MonkeyPatch) -> None:
     """脱壳桩：返回 done，不做实事（让 _run_dynamic_after_static 走到 capture 段）。"""
-    from apkscan.dynamic import unpack
+    from fxapk.dynamic import unpack
 
     monkeypatch.setattr(
         unpack,
@@ -411,7 +411,7 @@ def _patch_unpack(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _patch_capture(monkeypatch: pytest.MonkeyPatch, result: dict[str, Any]) -> dict[str, Any]:
     """抓包桩：返回给定 DynamicResult，记录被调。"""
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
 
     calls: dict[str, Any] = {"called": False}
 
@@ -426,7 +426,7 @@ def _patch_capture(monkeypatch: pytest.MonkeyPatch, result: dict[str, Any]) -> d
 
 def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """merge 桩：记录 merge_and_rerender 的入参。"""
-    from apkscan.dynamic import merge
+    from fxapk.dynamic import merge
 
     calls: dict[str, Any] = {
         "rerender_called": False,
@@ -472,7 +472,7 @@ def _done_result(report_paths: list[str] | None = None) -> dict[str, Any]:
 
 def test_analyze_dynamic_no_device_skips(monkeypatch):
     """无设备时 analyze --dynamic 不进入动态段、不调 capture/merge。"""
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
 
     cap_calls = _patch_capture(monkeypatch, _done_result())
     merge_calls = _patch_merge(monkeypatch)
@@ -482,7 +482,7 @@ def test_analyze_dynamic_no_device_skips(monkeypatch):
     monkeypatch.setattr(cli.device, "has_device", lambda: False)
     # pipeline.run 用轻量桩，避免真跑分析器。
     monkeypatch.setattr(
-        "apkscan.core.pipeline.run", lambda ctx, config: _make_report("com.x")
+        "fxapk.core.pipeline.run", lambda ctx, config: _make_report("com.x")
     )
     monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
     monkeypatch.setattr(cli, "_write_reports", lambda *a, **k: None)
@@ -568,7 +568,7 @@ def test_analyze_dynamic_capture_skipped_does_not_call_merge(monkeypatch, status
 
 def test_analyze_dynamic_merge_exception_does_not_break_static_report(monkeypatch):
     """merge 抛异常时被 cli 兜住，不向上冒泡（已产出静态报告不受影响）。"""
-    from apkscan.dynamic import merge
+    from fxapk.dynamic import merge
 
     _patch_unpack(monkeypatch)
     _patch_capture(monkeypatch, _done_result())
@@ -584,7 +584,7 @@ def test_analyze_dynamic_merge_exception_does_not_break_static_report(monkeypatc
 
 def test_analyze_dynamic_capture_exception_does_not_call_merge(monkeypatch):
     """capture.run 抛异常时 cli 兜住并 return，不调 merge。"""
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
 
     _patch_unpack(monkeypatch)
     merge_calls = _patch_merge(monkeypatch)
@@ -710,8 +710,8 @@ class _FakeCtx:
 
 def _patch_capture_cmd(monkeypatch: pytest.MonkeyPatch, status: str) -> None:
     """给 `fxapk capture` 命令桩：capture.run 返回给定 status 的 DynamicResult。"""
-    from apkscan.core import tools
-    from apkscan.dynamic import capture
+    from fxapk.core import tools
+    from fxapk.dynamic import capture
 
     monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
     monkeypatch.setattr(
@@ -742,7 +742,7 @@ def test_capture_cmd_exit_code_by_status(monkeypatch, status, expected):
     [(STATUS_DONE, 0), (STATUS_ERROR, 1), (STATUS_SKIPPED, 2)],
 )
 def test_unpack_cmd_exit_code_by_status(monkeypatch, tmp_path, status, expected):
-    from apkscan.dynamic import unpack
+    from fxapk.dynamic import unpack
 
     monkeypatch.setattr(
         unpack,
@@ -766,7 +766,7 @@ def test_unpack_cmd_exit_code_by_status(monkeypatch, tmp_path, status, expected)
     [(STATUS_DONE, 0), (STATUS_ERROR, 1), (STATUS_SKIPPED, 2)],
 )
 def test_repackage_cmd_exit_code_by_status(monkeypatch, tmp_path, status, expected):
-    from apkscan.dynamic import repackage
+    from fxapk.dynamic import repackage
 
     monkeypatch.setattr(
         repackage,
@@ -787,8 +787,8 @@ def test_repackage_cmd_exit_code_by_status(monkeypatch, tmp_path, status, expect
 
 def test_capture_cmd_still_cleans_adb_on_nonzero(monkeypatch):
     """业务失败（skipped→rc=2）仍穿过 finally 收 adb server。"""
-    from apkscan.core import tools
-    from apkscan.dynamic import capture
+    from fxapk.core import tools
+    from fxapk.dynamic import capture
 
     calls = {"n": 0}
     monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
@@ -816,8 +816,8 @@ def test_capture_cmd_still_cleans_adb_on_nonzero(monkeypatch):
 def test_capture_out_default_resolves_absolute(monkeypatch):
     """不传 --out 时 capture 把 out 解析成绝对路径（与 analyze/unpack 的确定性口径一致），
     而非相对 cwd 的裸字符串 "out"。"""
-    from apkscan.core import tools
-    from apkscan.dynamic import capture
+    from fxapk.core import tools
+    from fxapk.dynamic import capture
 
     monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
     seen: dict[str, Any] = {}
@@ -835,7 +835,7 @@ def test_capture_out_default_resolves_absolute(monkeypatch):
 
 def test_cli_capture_rejects_native_antidetect(monkeypatch):
     """★CLI fail-closed：--antidetect native 在调用动态模块前以 exit 2 拒绝。"""
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
     res = runner.invoke(cli.app, ["capture", "com.x", "--antidetect", "native"])
@@ -847,8 +847,8 @@ def test_cli_capture_threads_behavior_flags(monkeypatch):
 
     _fake_run 用显式参数（非 **kw 吞掉）——CLI 不透传则默认 False/off，seen 不匹配即红。
     """
-    from apkscan.core import tools
-    from apkscan.dynamic import capture
+    from fxapk.core import tools
+    from fxapk.dynamic import capture
 
     monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
     seen: dict[str, Any] = {}
@@ -880,8 +880,8 @@ def test_resolve_out_cwd_absolutizes(tmp_path: Path, monkeypatch) -> None:
 
 def test_capture_duration_zero_rejected(monkeypatch):
     """--duration 0 → typer 参数校验拒绝（非零退出），不进入 capture.run。"""
-    from apkscan.core import tools
-    from apkscan.dynamic import capture
+    from fxapk.core import tools
+    from fxapk.dynamic import capture
 
     monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
     called = {"n": 0}
@@ -955,7 +955,7 @@ def test_pcap_leads_into_warns_before_mutating_old_report(
     """PCAP 解析可替换，报告合并保持真实，验证告警与写入能同时发生。"""
     import json as _json
 
-    from apkscan.dynamic import pcap_ingest
+    from fxapk.dynamic import pcap_ingest
 
     rp = tmp_path / "report.json"
     _write_min_report_json(rp, leads=[], meta={"tool_version": "0.0.0-old"})
@@ -973,7 +973,7 @@ def test_pcap_leads_into_warns_before_mutating_old_report(
 
 def _flow_pair(ip: str, port: int = 30110):
     """一条有双向载荷的 TCP 流，足以产出 IP Lead。"""
-    from apkscan.dynamic import pcap_ingest
+    from fxapk.dynamic import pcap_ingest
 
     return [
         pcap_ingest.Flow(
@@ -1000,7 +1000,7 @@ def test_pcap_leads_ledger_agrees_with_report_on_attribution(
     """
     import json as _json
 
-    from apkscan.dynamic import pcap_ingest, socket_attr
+    from fxapk.dynamic import pcap_ingest, socket_attr
 
     ip = "100.64.9.30"
     rp, pcap = tmp_path / "report.json", tmp_path / "cap.pcap"
@@ -1054,7 +1054,7 @@ def test_pcap_leads_ledger_marks_unattributed_run(monkeypatch, tmp_path: Path) -
     """没做 UID 归因时，台账要明说"未归因"，不得让人误读成"已确认属本样本"。"""
     import json as _json
 
-    from apkscan.dynamic import pcap_ingest
+    from fxapk.dynamic import pcap_ingest
 
     ip = "100.64.9.31"
     pcap, md, js = tmp_path / "cap.pcap", tmp_path / "ledger.md", tmp_path / "ledger.json"
@@ -1077,7 +1077,7 @@ def test_pcap_leads_ledger_marks_unattributed_run(monkeypatch, tmp_path: Path) -
 
 def _fake_socket_table(monkeypatch, attr: dict) -> None:
     """把 UID 归因替换成给定结果，免去构造真实 socket 快照。"""
-    from apkscan.dynamic import socket_attr
+    from fxapk.dynamic import socket_attr
 
     monkeypatch.setattr(
         socket_attr, "load_socket_tables",
@@ -1097,7 +1097,7 @@ def test_pcap_leads_dns_only_domain_is_not_counted_as_denied(
     若哪天 DNS 域名 lead 的来源标签变了（比如改钉一个非 observed-contact 来源），
     终端与台账会立刻开始把"查过这个名字"报成"归因判否"，本用例会在那时变红。
     """
-    from apkscan.dynamic import pcap_ingest
+    from fxapk.dynamic import pcap_ingest
 
     ip = "100.64.9.32"
     pcap, md, snap = tmp_path / "cap.pcap", tmp_path / "l.md", tmp_path / "uid_sockets.txt"
@@ -1132,7 +1132,7 @@ def test_pcap_leads_empty_attribution_is_not_reported_as_unattributed_run(
     """
     import json as _json
 
-    from apkscan.dynamic import pcap_ingest
+    from fxapk.dynamic import pcap_ingest
 
     pcap, md, js = tmp_path / "cap.pcap", tmp_path / "l.md", tmp_path / "l.json"
     snap = tmp_path / "uid_sockets.txt"
@@ -1198,7 +1198,7 @@ def test_rerender_html_noop_when_no_html(tmp_path: Path) -> None:
 
 def test_probe_leads_into_rerenders_html(monkeypatch, tmp_path: Path):
     """probe-leads --into 改了 report.json 后，若同目录有 report.html 则重渲（内容随之更新）。"""
-    from apkscan.dynamic import probe_ingest
+    from fxapk.dynamic import probe_ingest
 
     rp = tmp_path / "report.json"
     # 身份门要求 --into 目标先存在且带 sample_sha256；_fake_merge 随后会整体覆写它。
@@ -1248,7 +1248,7 @@ def test_probe_leads_into_rerenders_html(monkeypatch, tmp_path: Path):
 
 def test_pcap_leads_into_rerenders_html(monkeypatch, tmp_path: Path):
     """pcap-leads --into 改了 report.json 后，若同目录有 report.html 则重渲（内容随之更新）。"""
-    from apkscan.dynamic import pcap_ingest
+    from fxapk.dynamic import pcap_ingest
 
     rp = tmp_path / "report.json"
     hp = tmp_path / "report.html"

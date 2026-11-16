@@ -11,12 +11,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.cli import app
-from apkscan.core.evidence_archive import (
+from fxapk.cli import app
+from fxapk.core.evidence_archive import (
     INDEX, SCHEMA, ArchiveError, EvidenceArchive, Limits, materialize, pack,
     read_reference, resolve_reference,
 )
-from apkscan.core.evidence_output import EvidenceOutput
+from fxapk.core.evidence_output import EvidenceOutput
 
 
 def source_tree(tmp_path):
@@ -260,7 +260,7 @@ def test_new_output_archive_preserves_original_absolute_reference_resolution(tmp
 
 
 def test_failed_new_output_retains_staging_and_failure_receipt(tmp_path, monkeypatch):
-    from apkscan.core import evidence_output
+    from fxapk.core import evidence_output
     def fail(*args, **kwargs):
         raise ArchiveError("archive_source_changed")
     monkeypatch.setattr(evidence_output, "pack", fail)
@@ -306,8 +306,8 @@ def test_review_archive_round_trip_and_bad_member_reaches_all_projections(tmp_pa
 
 
 def test_archived_pcap_and_runtime_readers_match_original_bytes(tmp_path):
-    from apkscan.dynamic.pcap_ingest import parse_pcap
-    from apkscan.dynamic.runtime_input import read_runtime_input, RuntimeReadFailure
+    from fxapk.dynamic.pcap_ingest import parse_pcap
+    from fxapk.dynamic.runtime_input import read_runtime_input, RuntimeReadFailure
     root = tmp_path / "capture"
     root.mkdir()
     pcap = struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
@@ -326,8 +326,8 @@ def test_archived_pcap_and_runtime_readers_match_original_bytes(tmp_path):
 
 @pytest.mark.parametrize("compression", ["zstd", "deflate"])
 def test_capture_to_archive_keeps_partial_state_and_can_read_pcap(tmp_path, monkeypatch, compression):
-    from apkscan.dynamic import capture
-    from apkscan.dynamic.pcap_ingest import parse_pcap
+    from fxapk.dynamic import capture
+    from fxapk.dynamic.pcap_ingest import parse_pcap
     def captured(package, *, out, **kwargs):
         folder = Path(out)
         folder.mkdir(parents=True)
@@ -346,9 +346,9 @@ def test_capture_to_archive_keeps_partial_state_and_can_read_pcap(tmp_path, monk
 
 
 def test_archived_case_verification_runs_original_gate_and_preserves_package_id(tmp_path):
-    from apkscan.core.case_package import create_case_package, verify_case_package
-    from apkscan.core.models import Report
-    from apkscan.core.report_io import write_report
+    from fxapk.core.case_package import create_case_package, verify_case_package
+    from fxapk.core.models import Report
+    from fxapk.core.report_io import write_report
     root = tmp_path / "case"
     root.mkdir()
     report = Report(package_name="com.example.synthetic", meta={"sample_sha256": "a" * 64,
@@ -389,8 +389,8 @@ def test_archive_corruption_reaches_review_report_without_hiding_other_tasks(tmp
 
 
 def test_review_archive_out_accepts_report_above_review_member_budget(tmp_path):
-    from apkscan.core.models import Report
-    from apkscan.core.report_io import write_report
+    from fxapk.core.models import Report
+    from fxapk.core.report_io import write_report
     report_path = tmp_path / "report.json"
     report = Report(package_name="com.example.synthetic",
                     meta={"sample_sha256": "a" * 64, "padding": "x" * (32 * 1024**2 + 4096)},
@@ -410,7 +410,7 @@ def test_review_archive_out_accepts_report_above_review_member_budget(tmp_path):
 
 
 def test_archive_analysis_failure_keeps_process_reason(tmp_path, monkeypatch):
-    from apkscan.core import fetch_intake
+    from fxapk.core import fetch_intake
     root = tmp_path / "source"
     root.mkdir()
     (root / "sample.apk").write_bytes(b"synthetic invalid apk")
@@ -473,7 +473,7 @@ def test_zip64_directory_and_member_count_budget(tmp_path):
 
 
 def test_atomic_publish_race_does_not_replace_other_writer(tmp_path, monkeypatch):
-    from apkscan.core import evidence_archive
+    from fxapk.core import evidence_archive
     root = source_tree(tmp_path)
     out = tmp_path / "archive.zip"
     real_publish = evidence_archive._publish
@@ -487,7 +487,7 @@ def test_atomic_publish_race_does_not_replace_other_writer(tmp_path, monkeypatch
 
 
 def test_cleanup_gap_does_not_downgrade_failed_analysis_to_partial(tmp_path, monkeypatch):
-    from apkscan.core import evidence_output
+    from fxapk.core import evidence_output
     def cleanup_failure(*args):
         raise OSError("synthetic")
     monkeypatch.setattr(evidence_output, "remove_owned_staging", cleanup_failure)
@@ -504,8 +504,8 @@ def test_cleanup_gap_does_not_downgrade_failed_analysis_to_partial(tmp_path, mon
 
 
 def test_archived_socket_discovery_stays_in_same_capture_directory(tmp_path):
-    from apkscan.core.evidence_archive import archived_siblings
-    from apkscan.dynamic.socket_attr import load_socket_tables
+    from fxapk.core.evidence_archive import archived_siblings
+    from fxapk.dynamic.socket_attr import load_socket_tables
     root = tmp_path / "source"
     (root / "capture-one").mkdir(parents=True)
     (root / "capture-two").mkdir()
@@ -522,7 +522,7 @@ def test_archived_socket_discovery_stays_in_same_capture_directory(tmp_path):
 
 
 def test_unreadable_subtree_never_becomes_successful_incomplete_archive(tmp_path, monkeypatch):
-    from apkscan.core import evidence_archive
+    from fxapk.core import evidence_archive
     root = source_tree(tmp_path)
     def blocked_walk(*args, onerror, **kwargs):
         onerror(PermissionError("synthetic"))
@@ -577,8 +577,8 @@ def test_nested_fetch_input_through_intake_to_verified_archive(tmp_path, monkeyp
 
 
 def test_frozen_report_version_survives_reader_migration_without_rewriting(tmp_path):
-    from apkscan.core.case_package import create_case_package, verify_case_package
-    from apkscan.core.report_io import load_report
+    from fxapk.core.case_package import create_case_package, verify_case_package
+    from fxapk.core.report_io import load_report
     from tests.test_case_package import _write_report
     report = _write_report(tmp_path, closure="partial")
     raw = json.loads(report.read_bytes())
@@ -615,8 +615,8 @@ def test_frozen_report_version_survives_reader_migration_without_rewriting(tmp_p
 
 @pytest.mark.parametrize("tamper", [False, True])
 def test_archive_corpus_entry_preserves_report_or_refuses_bad_package(tmp_path, tamper):
-    from apkscan.core.case_package import create_case_package
-    from apkscan.core.corpus import load_manifest_strict
+    from fxapk.core.case_package import create_case_package
+    from fxapk.core.corpus import load_manifest_strict
     from tests.test_case_package import _write_report
     source = tmp_path / "source"
     source.mkdir()
@@ -670,7 +670,7 @@ def test_review_generated_files_cannot_be_overwritten_by_task_ids(tmp_path, iden
 
 
 def test_false_directory_count_is_bounded_before_zipinfo_allocation(tmp_path, monkeypatch):
-    from apkscan.core import evidence_archive as module
+    from fxapk.core import evidence_archive as module
     archive = forged(tmp_path / "false-count.zip", [(str(i), b"x") for i in range(4)])
     raw = bytearray(archive.read_bytes())
     offset = raw.rfind(b"PK\x05\x06")
@@ -694,13 +694,13 @@ def test_output_selection_errors_are_cli_parameter_errors(tmp_path, command):
 
 
 @pytest.mark.parametrize("command,module_name", [
-    ("evidence-review", "apkscan.core.offline_review.runner"),
-    ("intake-fetch", "apkscan.core.fetch_intake"),
-    ("recover-runtime", "apkscan.dynamic.recovery"),
+    ("evidence-review", "fxapk.core.offline_review.runner"),
+    ("intake-fetch", "fxapk.core.fetch_intake"),
+    ("recover-runtime", "fxapk.dynamic.recovery"),
 ])
 def test_output_storage_failure_is_not_a_parameter_error(tmp_path, monkeypatch, command, module_name):
     import importlib
-    from apkscan.core import evidence_output
+    from fxapk.core import evidence_output
 
     def generate(*args, **kwargs):
         path = Path(args[1])

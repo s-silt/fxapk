@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
+from fxapk import cli
 from tests.test_web_supplement import _bundle, _install_plugin
 
 MARKER = "only-supplement"
@@ -219,7 +219,7 @@ def test_off_skipped_no_plugin_and_failure(
     assert MARKER not in json.dumps(_written(off_out)["endpoints"])
 
     monkeypatch.setattr(
-        "apkscan.core.web_supplement.discover_plugins",
+        "fxapk.core.web_supplement.discover_plugins",
         lambda: ([], [{"name": "rea", "status": "unavailable", "reason": "plugin_unavailable"}]),
     )
     missing = _config(tmp_path / "missing.json", {
@@ -350,7 +350,7 @@ def test_rea_json_and_mocked_live_dispatch(
 
     monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("net")))
     monkeypatch.setattr(
-        "apkscan.core.web_supplement.discover_plugins",
+        "fxapk.core.web_supplement.discover_plugins",
         lambda: ([_Plugin()], []),
     )
     live = _config(tmp_path / "live.json", {
@@ -438,7 +438,7 @@ def test_malformed_json_refused_before_plugin_or_output(
             return {"status": "failed", "reason": "should-not-run"}
 
     monkeypatch.setattr(
-        "apkscan.core.web_supplement.discover_plugins",
+        "fxapk.core.web_supplement.discover_plugins",
         lambda: ([_Plugin()], []),
     )
     config = _config(tmp_path / "off.json", {
@@ -487,7 +487,7 @@ def test_repeat_snapshot_chain_and_byte_identical_publish(tmp_path: Path) -> Non
     assert before["leads"][0]["notes"] == "original-note"
     assert _written(second)["leads"][0]["case_note"] == "keep-lead"
 
-    from apkscan.core.web_supplement_report import SupplementRefusal, _place_trees
+    from fxapk.core.web_supplement_report import SupplementRefusal, _place_trees
 
     sha = "ab" * 32
     root = tmp_path / "publish"
@@ -758,7 +758,7 @@ def test_duplicate_observation_entries_read_tree_once(
 ) -> None:
     """★sfind-d6777611：web_observations 同 sha 重复条目只触发一次整树读取，
     逐条目声明仍各自核对。"""
-    import apkscan.core.web_supplement_report as wsr
+    import fxapk.core.web_supplement_report as wsr
 
     calls = {"n": 0}
     real_bounded = wsr._bounded_files

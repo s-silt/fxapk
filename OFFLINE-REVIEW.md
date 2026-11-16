@@ -41,7 +41,7 @@ macOS cannot enforce the requested address-space limit: these bounded stages are
 with no usable result is `failed`, including when every stage is unsupported.
 
 By default the fxfetch handoff uses the console entry point belonging to the current
-Python interpreter, while original-APK analysis uses that interpreter with `-m apkscan.cli`.
+Python interpreter, while original-APK analysis uses that interpreter with `-m fxapk.cli`.
 Source-only installations without that console entry point must supply `--fxapk`. An
 explicit override is trusted configuration. Offline children set `FXAPK_NO_DEVICE_PROBE=1`
 to suppress incidental adb probing and cleanup; the parent environment is unchanged.

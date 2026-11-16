@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from apkscan.dynamic import probe_coverage
+from fxapk.dynamic import probe_coverage
 
 
 def test_config_body_status_round_trip_without_changing_default_profile():
@@ -35,7 +35,7 @@ def test_response_observer_compatibility_and_truthful_coverage(variant, expected
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js unavailable")
-    scripts = Path(__file__).parents[1] / "apkscan/dynamic/frida_js"
+    scripts = Path(__file__).parents[1] / "fxapk/dynamic/frida_js"
     source = (scripts / "probe_coverage.js").read_text(encoding="utf-8") + "\n" + (
         scripts / "config_body_hook.js").read_text(encoding="utf-8")
     program = r'''

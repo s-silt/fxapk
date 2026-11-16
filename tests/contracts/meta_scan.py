@@ -600,8 +600,8 @@ def _import_map(src: str, symbols: dict[str, dict[str, str]]) -> tuple[dict[str,
         return from_consts, alias_map
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            # ★按**完整模块路径**查表，不用短名：本仓已有 apkscan.commands.corpus 与
-            #   apkscan.core.corpus 同名，短名做键会把两张常量表合并、无声取到错的那张。
+            # ★按**完整模块路径**查表，不用短名：本仓已有 fxapk.commands.corpus 与
+            #   fxapk.core.corpus 同名，短名做键会把两张常量表合并、无声取到错的那张。
             #   相对导入（level>0）不解析——解析它要还原当前 package，超出「不猜」的边界。
             table = symbols.get(node.module, {})
             for a in node.names:
@@ -609,7 +609,7 @@ def _import_map(src: str, symbols: dict[str, dict[str, str]]) -> tuple[dict[str,
                     continue  # 星号导入不解析
                 if a.name in table:
                     from_consts[a.asname or a.name] = table[a.name]
-                else:  # from apkscan.core import runtime_inventory as _inv
+                else:  # from fxapk.core import runtime_inventory as _inv
                     full = f"{node.module}.{a.name}"
                     if full in symbols:
                         alias_map[a.asname or a.name] = symbols[full]
@@ -711,14 +711,14 @@ def scan_source(src: str, path: str = "<mem>",
     return _run()
 
 
-def scan_repository(root: Path, *, prod_dir: str = "apkscan",
+def scan_repository(root: Path, *, prod_dir: str = "fxapk",
                     test_dir: str = "tests") -> ScanResult:
     """扫全仓，按生产/测试分开归集。"""
     res = ScanResult()
     # ★先建全仓符号表：常量键（meta[DEX_TRUNCATED_META_KEY]）要靠它解析成真实键名。
     #   这是「解析而非豁免」的实现基础——豁免会不断增长成动态访问的逃生口。
-    #   ★键是**完整模块路径**（apkscan.core.runtime_inventory），不是文件名短名：
-    #     本仓已有 apkscan.commands.corpus 与 apkscan.core.corpus 同名，
+    #   ★键是**完整模块路径**（fxapk.core.runtime_inventory），不是文件名短名：
+    #     本仓已有 fxapk.commands.corpus 与 fxapk.core.corpus 同名，
     #     用短名会把两张常量表合并、后扫描者无声覆盖前者。
     symbols: dict[str, dict[str, str]] = {}
     for sub in (prod_dir, test_dir):

@@ -2,7 +2,7 @@
 
 [项目首页](README.md) · [命令手册](USAGE.md) · [English](ANDROID-UI.en.md)
 
-本指南对应核心 `fxapk 1.22.0` 与可选插件 `fxapk-android-ui 0.1.2`。插件通过 Google Android CLI 保存截图与布局，并通过 adb 执行有界固定动作。UI 观察补充 PCAP、探针和静态证据；截图成功不证明业务连接、运营者归属或案件闭环。
+本指南适用于核心 `fxapk`（插件要求 `>=2.0.0`）与可选插件 `fxapk-android-ui`；具体版本以发布页附件为准。插件通过 Google Android CLI 保存截图与布局，并通过 adb 执行有界固定动作。UI 观察补充 PCAP、探针和静态证据；截图成功不证明业务连接、运营者归属或案件闭环。
 
 ## 安装与前置条件
 
@@ -13,8 +13,8 @@
 从发布页下载并核对 `SHA256SUMS.txt` 后，可安装核心与独立插件 wheel：
 
 ```bash
-python -m pip install "fxapk==1.25.0"
-python -m pip install ./fxapk_android_ui-0.1.2-py3-none-any.whl
+python -m pip install fxapk
+python -m pip install ./fxapk_android_ui-*-py3-none-any.whl
 fxapk --version
 fxapk ui --help
 ```
@@ -91,7 +91,7 @@ fxapk ui run-plan --serial TEST_SERIAL --package com.example.synthetic --plan in
 
 ## 与三轮采集及阶段二的关系
 
-安装插件后可运行独立 `fxapk ui ...` 命令。当前 `auto`/`capture` CLI 没有 UI 开关，不会自动执行 UI 计划。程序化 `apkscan.dynamic.auto.run` 只有显式传入 `android_ui_plugin` 且开启 `three_rounds=True` 时才接入轮内观察；还必须有已锁定的设备序列号和目标包，否则标记跳过。轮内 `CaptureRoundContext` 绑定样本 SHA、轮次、运行时变体、目录和共享截止时间，UI 观察不额外延长采集预算。
+安装插件后可运行独立 `fxapk ui ...` 命令。当前 `auto`/`capture` CLI 没有 UI 开关，不会自动执行 UI 计划。程序化 `fxapk.dynamic.auto.run` 只有显式传入 `android_ui_plugin` 且开启 `three_rounds=True` 时才接入轮内观察；还必须有已锁定的设备序列号和目标包，否则标记跳过。轮内 `CaptureRoundContext` 绑定样本 SHA、轮次、运行时变体、目录和共享截止时间，UI 观察不额外延长采集预算。
 
 保留 UI 与 PCAP/探针各自的原始材料、时间和来源，在报告前按 [材料工作流](PRE-REPORT-WORKFLOW.md) 核对。UI 不替代 Survey 的包、样本与抓包绑定，也不能清除缺失的连接或双向载荷证据。
 

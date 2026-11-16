@@ -1,7 +1,7 @@
 """P1-D ownership projection：无 baseline 恒 UNKNOWN、匹配才 INHERITED_OFFICIAL、
 改动绝不标 suspect、ledger 只对匹配产观察。
 
-先于实现编写（红态契约；导入 apkscan.core.jadx_ownership 在实现落地前收集即失败）。
+先于实现编写（红态契约；导入 fxapk.core.jadx_ownership 在实现落地前收集即失败）。
 设计见本地 docs/superpowers/specs/2026-08-16-p1d-ownership-projection-design.md（不入 git）。
 """
 
@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import judgment_ledger as jl
-from apkscan.core import recognition_contract as rc
-from apkscan.core.jadx_index import (
+from fxapk.core import judgment_ledger as jl
+from fxapk.core import recognition_contract as rc
+from fxapk.core.jadx_index import (
     DexInput,
     DexRole,
     IndexBuildResult,
@@ -29,13 +29,13 @@ from apkscan.core.jadx_index import (
     scan_java_sources,
     verify_dex_inputs,
 )
-from apkscan.core.jadx_index_ledger import (
+from fxapk.core.jadx_index_ledger import (
     IndexQueryState,
     OwnershipQueryResult,
     append_jadx_ownership_projection,
     append_jadx_query_projection,
 )
-from apkscan.core.jadx_ownership import (
+from fxapk.core.jadx_ownership import (
     OwnershipProjection,
     RegionOwnership,
     project_ownership,
@@ -383,7 +383,7 @@ def test_ownership_wrong_action_type_both_directions(tmp_path: Path) -> None:
     assert exc.value.code == "wrong_action_type"
 
     own_events, own_action = _authorized_ledger("jadx-ownership-projection")
-    from apkscan.core.jadx_index_ledger import IndexQueryResult
+    from fxapk.core.jadx_index_ledger import IndexQueryResult
 
     with pytest.raises(JadxIndexError) as exc:
         append_jadx_query_projection(

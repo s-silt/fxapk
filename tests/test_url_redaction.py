@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from apkscan.core.redact import (
+from fxapk.core.redact import (
     redact_url,
     safe_exception_text,
     scrub_urls,

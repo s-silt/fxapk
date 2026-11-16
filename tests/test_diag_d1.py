@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from apkscan.core.models import Report
-from apkscan.core.runtime_diagnostics import explain_coverage, observation_from_capture
-from apkscan.dynamic import capture, merge
-from apkscan.report.digest import build_digest
+from fxapk.core.models import Report
+from fxapk.core.runtime_diagnostics import explain_coverage, observation_from_capture
+from fxapk.dynamic import capture, merge
+from fxapk.report.digest import build_digest
 from tests.test_capture import _FakeProc, _set_capabilities, _stub_orchestration
 
 _SAMPLE = "ab" * 32

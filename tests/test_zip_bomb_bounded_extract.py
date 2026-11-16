@@ -31,9 +31,9 @@ from typing import Any, cast
 
 import pytest
 
-from apkscan.core import apk as apk_mod
-from apkscan.core.apk import ApkContext
-from apkscan.core.models import AnalysisConfig
+from fxapk.core import apk as apk_mod
+from fxapk.core.apk import ApkContext
+from fxapk.core.models import AnalysisConfig
 
 # ---------------------------------------------------------------------------
 # 夹具：写 zip 后直接改写 local header 与中央目录里的「声明解压后大小」/「压缩方法」
@@ -246,8 +246,8 @@ def test_read_file_turns_too_large_into_warning_and_none(
 def test_snapshot_lazy_read_turns_too_large_into_warning_and_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from apkscan.core.file_read import FileReadLedger
-    from apkscan.core.snapshot import SnapshotContext
+    from fxapk.core.file_read import FileReadLedger
+    from fxapk.core.snapshot import SnapshotContext
 
     p = _make_lying_apk(tmp_path)
     apk_mod._install_bounded_zip_extract_shim()
@@ -288,7 +288,7 @@ def test_worker_reopen_installs_shim_before_androguard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """接线锁：并行 worker 惰性重开 APK 前也安装 shim（worker 是独立进程，不能指望主进程装过）。"""
-    from apkscan.core.snapshot import SnapshotContext
+    from fxapk.core.snapshot import SnapshotContext
 
     calls: list[str] = []
     monkeypatch.setattr(apk_mod, "_install_bounded_zip_extract_shim", lambda: calls.append("shim"))

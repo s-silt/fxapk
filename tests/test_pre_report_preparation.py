@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.cli import app
-from apkscan.core.phase2.inventory import build_coverage_skeleton, build_inventory
-from apkscan.core.phase2.preparation import PreparationError, build_run_review, prepare_case_materials
+from fxapk.cli import app
+from fxapk.core.phase2.inventory import build_coverage_skeleton, build_inventory
+from fxapk.core.phase2.preparation import PreparationError, build_run_review, prepare_case_materials
 from tests.phase2_fixtures import write_verified_package
 
 
@@ -109,8 +109,8 @@ def test_prepare_materials_cli_stops_before_rendering_and_preserves_output(tmp_p
 
 
 def test_capture_quality_reuses_same_endpoint_gate_and_modified_ceiling():
-    from apkscan.core.models import Report
-    from apkscan.core.phase2.preparation import _stage_observations
+    from fxapk.core.models import Report
+    from fxapk.core.phase2.preparation import _stage_observations
 
     report = Report(package_name="synthetic", leads=[], endpoints=[], findings=[], analyzer_status=[], meta={"capture_quality": {
         "target_attributed_count": 1, "business_candidate_count": 2,

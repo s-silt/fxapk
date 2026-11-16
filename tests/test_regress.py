@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from apkscan.core import corpus, regress
+from fxapk.core import corpus, regress
 
 
 def _report(sha: str, version: str, *, status="complete", hardened=False,
@@ -183,7 +183,7 @@ def test_available_versions_uses_catalog_sequence_after_reindex(tmp_path):
 def test_cli_regress_legacy_order_requires_both_explicit_revisions(tmp_path):
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = tmp_path / "legacy-corpus"
     entries: list[dict] = []
@@ -445,7 +445,7 @@ def test_cli_regress_requires_two_versions(tmp_path):
     """★库内只有一版时明确拒跑（exit 2），不静默给空对比。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _seed(tmp_path, [_report("s1", "1.0.0")])
     r = CliRunner().invoke(cli.app, ["corpus", "regress", "--corpus", str(root)])
@@ -456,7 +456,7 @@ def test_cli_regress_requires_two_versions(tmp_path):
 def test_cli_regress_json_output(tmp_path):
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _seed(tmp_path, [
         _report("s1", "1.0.0", status="failed"),
@@ -472,7 +472,7 @@ def test_cli_regress_json_output(tmp_path):
 def test_regress_preserves_all_case_bindings_in_core_json_and_text(tmp_path):
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     reports = [
         _report("s1", "1.0.0", status="failed"),
@@ -698,7 +698,7 @@ def test_cli_regress_renders_visibility(tmp_path):
     """★CLI 接线锁：--json 与文本两路都要把可见性变化渲染到人眼前。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _seed(tmp_path, [
         _report("s1", "1.0.0", visibility=_vis()),

@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from apkscan.core.models import Report
-from apkscan.core.runtime_diagnostics import (
+from fxapk.core.models import Report
+from fxapk.core.runtime_diagnostics import (
     explain_coverage,
     merge_process_observations,
     observation_from_capture,
 )
-from apkscan.dynamic import merge
-from apkscan.report.digest import build_digest
+from fxapk.dynamic import merge
+from fxapk.report.digest import build_digest
 from tests.conftest import FakeContext
 
 
@@ -167,7 +167,7 @@ def test_merge_appends_diagnostics_without_new_endpoints(tmp_path: Path) -> None
 
 
 def test_static_manifest_emits_only_explicit_attributes() -> None:
-    from apkscan.analyzers.runtime_diagnostics import RuntimeDiagnosticsAnalyzer
+    from fxapk.analyzers.runtime_diagnostics import RuntimeDiagnosticsAnalyzer
 
     analyzer = RuntimeDiagnosticsAnalyzer()
     plain = analyzer.analyze(FakeContext(manifest_xml="<manifest package='example.invalid'/>"))

@@ -7,7 +7,7 @@ import zlib
 
 import pytest
 
-from apkscan.core.dex_query import DexQueryError, DexQueryLimits, inventory_dex_members
+from fxapk.core.dex_query import DexQueryError, DexQueryLimits, inventory_dex_members
 from tests.fixtures.dex_query.dexgen import (
     build_dex,
     declared_bomb,

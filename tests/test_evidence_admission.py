@@ -2,11 +2,11 @@ from dataclasses import replace
 
 import pytest
 
-from apkscan.core.admission import PURPOSES, admitted_refs, evaluate_usage
-from apkscan.core.evidence_scope import project_serialized_lead
-from apkscan.core.models import Evidence, EvidenceScope, merge_runtime_into_lead_dict
-from apkscan.core.observations import occurrence_id
-from apkscan.core.report_io import _evidence_from_dict
+from fxapk.core.admission import PURPOSES, admitted_refs, evaluate_usage
+from fxapk.core.evidence_scope import project_serialized_lead
+from fxapk.core.models import Evidence, EvidenceScope, merge_runtime_into_lead_dict
+from fxapk.core.observations import occurrence_id
+from fxapk.core.report_io import _evidence_from_dict
 
 
 @pytest.mark.parametrize("purpose", sorted(PURPOSES))
@@ -253,8 +253,8 @@ def test_runtime_merge_lifts_stale_admission_only_with_eligible_refs():
 
 
 def test_enrichment_replaces_malformed_admission_container():
-    from apkscan.core.enrichment import _enrichment_targets
-    from apkscan.core.models import Endpoint
+    from fxapk.core.enrichment import _enrichment_targets
+    from fxapk.core.models import Endpoint
 
     endpoint = Endpoint(
         kind="domain",

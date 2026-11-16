@@ -1,4 +1,4 @@
-"""apkscan.dynamic.merge.resolve_dead_drop_c2 的单测（Dead-Drop 二级 C2 浮出）。
+"""fxapk.dynamic.merge.resolve_dead_drop_c2 的单测（Dead-Drop 二级 C2 浮出）。
 
 二段式 dead-drop：app 先打伪装的「命令域名」，回包**明文 JSON 配置**里才带真实交易/后台域名
 （rest.apizza.net→acedealex.xyz 模式）。本测聚焦回包关系分析的纯逻辑（真机抓包不可测）：
@@ -15,8 +15,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from apkscan.core import infra
-from apkscan.core.models import (
+from fxapk.core import infra
+from fxapk.core.models import (
     Confidence,
     Endpoint,
     Evidence,
@@ -25,7 +25,7 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
 )
-from apkscan.dynamic import merge
+from fxapk.dynamic import merge
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +273,7 @@ def test_dead_drop_derived_endpoint_source_not_observed_contact(tmp_path):
     attribution 视作"运行时真接触了该 peer"的域名端点——与 assemble 的 observed-contact allowlist
     注释"内容推导 body 值不授 observed-contact"自相矛盾。无修复即失败（旧钉 source="runtime"）。
     """
-    from apkscan.attribution import assemble
+    from fxapk.attribution import assemble
 
     rr = _write_runtime_report(
         tmp_path,

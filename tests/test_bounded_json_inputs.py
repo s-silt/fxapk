@@ -7,11 +7,11 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.commands.evaluate_cli import _read_json
-from apkscan.core import case_package
-from apkscan.core.case_package import CasePackageError, CasePackageErrorCode
-from apkscan.core.json_io import (
+from fxapk import cli
+from fxapk.commands.evaluate_cli import _read_json
+from fxapk.core import case_package
+from fxapk.core.case_package import CasePackageError, CasePackageErrorCode
+from fxapk.core.json_io import (
     JSON_MAX_DEPTH,
     BoundedJsonError,
     json_depth,
@@ -123,7 +123,7 @@ def test_cli_digest_rejects_deep_report_without_traceback(tmp_path: Path) -> Non
 def test_cli_digest_oversize_reports_read_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import apkscan.core.json_io as json_io
+    import fxapk.core.json_io as json_io
 
     monkeypatch.setattr(json_io, "REPORT_JSON_MAX_BYTES", 1024)
     path = tmp_path / "report.json"
@@ -146,7 +146,7 @@ def _assert_typer_exit_2_without_traceback(callback, capsys: pytest.CaptureFixtu
 
 
 def _invoke_split_reader(target: str, path: Path) -> None:
-    import apkscan.commands.split_cli as split_cli
+    import fxapk.commands.split_cli as split_cli
 
     if target == "read_json":
         split_cli._read_json(path, "time_table_invalid")
@@ -163,7 +163,7 @@ def test_split_cli_rejects_oversize_without_traceback(
     capsys: pytest.CaptureFixture[str],
     target: str,
 ) -> None:
-    import apkscan.commands.split_cli as split_cli
+    import fxapk.commands.split_cli as split_cli
 
     monkeypatch.setattr(split_cli, "SMALL_JSON_MAX_BYTES", 8)
     path = tmp_path / f"{target}.json"
@@ -181,7 +181,7 @@ def test_split_cli_rejects_deep_json_without_traceback(
 
 
 def test_recognition_labels_deep_line_is_jsonl_invalid(tmp_path: Path) -> None:
-    from apkscan.core.recognition_labels import (
+    from fxapk.core.recognition_labels import (
         RecognitionLabelValidationError,
         load_recognition_labels,
     )
@@ -198,9 +198,9 @@ def test_recognition_labels_deep_line_is_jsonl_invalid(tmp_path: Path) -> None:
 def test_package_binding_uses_report_json_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import apkscan.commands.corpus as corpus_cmd
-    import apkscan.core.json_io as json_io
-    from apkscan.core import case_package
+    import fxapk.commands.corpus as corpus_cmd
+    import fxapk.core.json_io as json_io
+    from fxapk.core import case_package
     from tests.phase2_fixtures import write_verified_package
 
     # 把小文件上限压到 1 后仍能读过验包：绑定必须跟 _load_object 用同一档。
@@ -226,7 +226,7 @@ def test_package_binding_uses_report_json_limit(
 
 
 def test_enrich_batch_deep_scope_matches_bad_json_exit(tmp_path: Path) -> None:
-    from apkscan.commands.enrich import enrich_app
+    from fxapk.commands.enrich import enrich_app
 
     targets = tmp_path / "targets.txt"
     targets.write_text("192.0.2.1\n", encoding="utf-8")
@@ -277,7 +277,7 @@ def test_origin_check_deep_report_matches_bad_json_exit(tmp_path: Path) -> None:
 def test_lead_load_report_deep_json_matches_bad_json_exit(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from apkscan.commands.lead import _load_report_payload
+    from fxapk.commands.lead import _load_report_payload
 
     def run(name: str, text: str) -> int:
         path = tmp_path / name
@@ -296,7 +296,7 @@ def test_lead_load_report_deep_json_matches_bad_json_exit(
 
 
 def test_jadx_selection_deep_map_matches_bad_json(tmp_path: Path) -> None:
-    from apkscan.commands.jadx_query import _selection
+    from fxapk.commands.jadx_query import _selection
 
     cache = tmp_path / "cache"
     cache.mkdir()
@@ -315,7 +315,7 @@ def test_jadx_selection_deep_map_matches_bad_json(tmp_path: Path) -> None:
 
 
 def test_phase2_inventory_match_deep_json_matches_bad_json(tmp_path: Path) -> None:
-    import apkscan.commands.phase2 as phase2
+    import fxapk.commands.phase2 as phase2
 
     bad = tmp_path / "bad.json"
     deep = tmp_path / "deep.json"
@@ -326,7 +326,7 @@ def test_phase2_inventory_match_deep_json_matches_bad_json(tmp_path: Path) -> No
 
 
 def test_load_clue_records_deep_line_is_value_error(tmp_path: Path) -> None:
-    from apkscan.core.phase2.inventory import load_clue_records
+    from fxapk.core.phase2.inventory import load_clue_records
 
     path = tmp_path / "clues.jsonl"
     path.write_text(_nested_arrays(200_000), encoding="utf-8")
@@ -336,7 +336,7 @@ def test_load_clue_records_deep_line_is_value_error(tmp_path: Path) -> None:
 
 
 def test_inventory_match_limit_is_four_times_report_max() -> None:
-    import apkscan.commands.phase2 as phase2
-    from apkscan.core.json_io import REPORT_JSON_MAX_BYTES
+    import fxapk.commands.phase2 as phase2
+    from fxapk.core.json_io import REPORT_JSON_MAX_BYTES
 
     assert phase2._INVENTORY_MAX_BYTES == 4 * REPORT_JSON_MAX_BYTES

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 
-from apkscan.dynamic.fingerprint import favicon_hash, mmh3_x86_32
+from fxapk.dynamic.fingerprint import favicon_hash, mmh3_x86_32
 
 
 # ---------------------------------------------------------------------------

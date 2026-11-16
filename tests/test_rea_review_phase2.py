@@ -292,12 +292,12 @@ def test_b4_windows_junction_rejected(native, tmp_path) -> None:  # noqa: ANN001
 def test_b1_native_budget_accepts_40mib_and_preflights_cumulative(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from apkscan.core.web_supplement_report import (
+    from fxapk.core.web_supplement_report import (
         SupplementRefusal,
         _prepare_native_history,
         supplement_report,
     )
-    import apkscan.core.web_supplement_report as web
+    import fxapk.core.web_supplement_report as web
 
     digest = "ab" * 32
     root = tmp_path / "case" / "native_recovery" / digest

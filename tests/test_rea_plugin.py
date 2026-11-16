@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.plugins import registry
+from fxapk.plugins import registry
 
 
 def test_optional_distribution_declares_entry_point():
@@ -265,7 +265,7 @@ def test_inspect_after_claim_failure_keeps_marker_without_success(rea, tmp_path,
     assert failure["reason"] == "rea_execution_failed"
     assert (out / "fxapk-rea-bundle.json").is_file()
     assert not (out / "observation.json").exists()
-    from apkscan.core.rea_intake import ReaDirectIntakeError, refuse_unverified_rea_directory
+    from fxapk.core.rea_intake import ReaDirectIntakeError, refuse_unverified_rea_directory
 
     with pytest.raises(ReaDirectIntakeError):
         refuse_unverified_rea_directory(out)
@@ -297,7 +297,7 @@ def test_import_publication_failure_keeps_original_and_marker(
     assert (out / "rea-original.json").read_bytes() == raw
     assert (out / "fxapk-rea-bundle.json").is_file()
     assert not (out / "observation.json").exists()
-    from apkscan.core.rea_intake import ReaDirectIntakeError, refuse_unverified_rea_directory
+    from fxapk.core.rea_intake import ReaDirectIntakeError, refuse_unverified_rea_directory
 
     with pytest.raises(ReaDirectIntakeError):
         refuse_unverified_rea_directory(out)

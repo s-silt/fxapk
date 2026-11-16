@@ -19,9 +19,9 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.enrichers.asn as asn_mod
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.enrichers.asn import AsnEnricher
+import fxapk.enrichers.asn as asn_mod
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.enrichers.asn import AsnEnricher
 
 
 # --- 通用打桩 -------------------------------------------------------------
@@ -276,7 +276,7 @@ def test_expired_cache_triggers_requery(
     cache["8.8.8.8"]["_cached_at"] = 0.0
     _isolated_cache.write_text(json.dumps(cache), encoding="utf-8")
     # 清 _ipinfo 内层内存缓存，让 asn 磁盘缓存过期后的重查真正触网（否则被内层命中掩盖）
-    from apkscan.enrichers import _ipinfo
+    from fxapk.enrichers import _ipinfo
     _ipinfo._cache.clear()
     fake_requests.response = _FakeResponse(_success_payload())
     enr.enrich(_ep("8.8.8.8"))

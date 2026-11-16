@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from apkscan.network import NetworkEntity, NetworkEntityType, Observation
+from fxapk.network import NetworkEntity, NetworkEntityType, Observation
 
 
 def _entity(value: str = "1.2.3.4") -> NetworkEntity:

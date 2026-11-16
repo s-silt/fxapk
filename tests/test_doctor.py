@@ -1,4 +1,4 @@
-"""apkscan.dynamic.doctor 单测：device / provision 全 mock，无真机锁行为。
+"""fxapk.dynamic.doctor 单测：device / provision 全 mock，无真机锁行为。
 
 策略（无真机/无外网）：
 - monkeypatch device.adb_devices / has_device / has_mitmproxy / frida_server_running。
@@ -16,8 +16,8 @@ from typing import Any
 
 import pytest
 
-from apkscan.core import device
-from apkscan.dynamic import doctor, provision
+from fxapk.core import device
+from fxapk.dynamic import doctor, provision
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +95,8 @@ def _all_present(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     # floor pcap 底座（设备 root + tcpdump）也 present——doctor 新增的 _check_device_tcpdump 走
     # capability_probe，这里打桩成全可用，避免它真探 adb（无真机 → 假 WARNING）。
-    from apkscan.dynamic import capabilities as _caps
-    from apkscan.dynamic import capability_probe
+    from fxapk.dynamic import capabilities as _caps
+    from fxapk.dynamic import capability_probe
 
     monkeypatch.setattr(
         capability_probe,

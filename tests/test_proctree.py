@@ -15,7 +15,7 @@ from pathlib import Path
 import psutil
 import pytest
 
-from apkscan.core import proctree
+from fxapk.core import proctree
 
 #: 「java 等价物」孙进程：长睡眠、输出全部 DEVNULL（不占父的 stdout 管道，
 #: 免得 communicate 等孙进程 EOF——真实 jadx 的这类挂起由 timeout 兜底，与本测无关）。
@@ -62,7 +62,7 @@ def test_outer_timeout_kills_nested_owned_session_but_not_unrelated_process(tmp_
     pid_file = tmp_path / "nested.pid"
     leaf = ("import os,time;from pathlib import Path;"
             f"Path({str(pid_file)!r}).write_text(str(os.getpid()));time.sleep(120)")
-    middle = ("import sys;from apkscan.core.proctree import run_owned;"
+    middle = ("import sys;from fxapk.core.proctree import run_owned;"
               f"run_owned([sys.executable,'-c',{leaf!r}],timeout=60)")
     unrelated = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(120)"])
     try:

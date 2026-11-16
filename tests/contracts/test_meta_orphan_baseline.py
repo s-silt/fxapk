@@ -69,7 +69,7 @@ def test_baseline_file_is_wellformed_and_nonvacuous() -> None:
             assert key, f"{category} 基线里有空键"
             assert files, f"{key!r} 没有记录写入文件（owner 缺失）"
             for f in files:
-                assert f.startswith("apkscan/"), f"{key!r} 的写入点 {f!r} 不在生产代码里"
+                assert f.startswith("fxapk/"), f"{key!r} 的写入点 {f!r} 不在生产代码里"
 
 
 # --- 计算原语的边界（每条对应 compute_orphans 文档里的一条判断） -------------
@@ -81,14 +81,14 @@ def _write_repo(
     tests: dict[str, str] | None = None,
     templates: dict[str, str] | None = None,
 ) -> Path:
-    (tmp_path / "apkscan").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "fxapk").mkdir(parents=True, exist_ok=True)
     (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
     for name, src in prod.items():
-        (tmp_path / "apkscan" / name).write_text(src, encoding="utf-8")
+        (tmp_path / "fxapk" / name).write_text(src, encoding="utf-8")
     for name, src in (tests or {}).items():
         (tmp_path / "tests" / name).write_text(src, encoding="utf-8")
     for name, src in (templates or {}).items():
-        (tmp_path / "apkscan" / name).write_text(src, encoding="utf-8")
+        (tmp_path / "fxapk" / name).write_text(src, encoding="utf-8")
     return tmp_path
 
 
@@ -144,7 +144,7 @@ def test_orphan_records_its_writers_as_owner_info(tmp_path: Path) -> None:
         },
     )
     orphans, _ = meta_orphans.compute_orphans(root)
-    assert orphans["dual"] == ["apkscan/a.py", "apkscan/b.py"]
+    assert orphans["dual"] == ["fxapk/a.py", "fxapk/b.py"]
 
 
 _FAMILY_WRITE = ('def f(result, analyzer):\n'
@@ -161,7 +161,7 @@ def test_family_write_expands_to_per_analyzer_concrete_keys(tmp_path: Path) -> N
                 "web_request_recipe_read_failed"):
         assert key in orphans, f"展开键 {key!r} 缺席"
         assert key in written
-        assert orphans[key] == ["apkscan/w.py"], "展开键必须保留写入文件（owner）"
+        assert orphans[key] == ["fxapk/w.py"], "展开键必须保留写入文件（owner）"
 
 
 def test_literal_read_rescues_only_that_analyzers_key(tmp_path: Path) -> None:
@@ -223,18 +223,18 @@ def test_family_read_in_tests_does_not_rescue_expanded_keys(tmp_path: Path) -> N
 
 def test_new_orphan_is_reported_as_regression() -> None:
     problems = meta_orphans.diff_against_baseline(
-        current={"fresh": ["apkscan/x.py"]}, baseline={}, written_keys={"fresh"},
+        current={"fresh": ["fxapk/x.py"]}, baseline={}, written_keys={"fresh"},
     )
     assert len(problems) == 1
     assert "新增孤儿" in problems[0]
     assert "fresh" in problems[0]
-    assert "apkscan/x.py" in problems[0], "报错必须带 owner，不能只丢键名"
+    assert "fxapk/x.py" in problems[0], "报错必须带 owner，不能只丢键名"
 
 
 def test_resolved_orphan_demands_baseline_removal() -> None:
     """孤儿获得消费方是好消息，但**也要红**：单向检查会让改善无声流失。"""
     problems = meta_orphans.diff_against_baseline(
-        current={}, baseline={"healed": ["apkscan/x.py"]}, written_keys={"healed"},
+        current={}, baseline={"healed": ["fxapk/x.py"]}, written_keys={"healed"},
     )
     assert len(problems) == 1
     assert "已解决" in problems[0]
@@ -244,7 +244,7 @@ def test_resolved_orphan_demands_baseline_removal() -> None:
 def test_deleted_key_is_distinguished_from_resolved() -> None:
     """键被删除与孤儿被解决对下一轮意义完全不同，报错必须分开说。"""
     problems = meta_orphans.diff_against_baseline(
-        current={}, baseline={"gone": ["apkscan/x.py"]}, written_keys=set(),
+        current={}, baseline={"gone": ["fxapk/x.py"]}, written_keys=set(),
     )
     assert len(problems) == 1
     assert "键已删除" in problems[0]
@@ -254,8 +254,8 @@ def test_deleted_key_is_distinguished_from_resolved() -> None:
 def test_writer_drift_is_reported() -> None:
     """owner 信息也要诚实：写入点搬家了，基线要跟着更新。"""
     problems = meta_orphans.diff_against_baseline(
-        current={"moved": ["apkscan/new.py"]},
-        baseline={"moved": ["apkscan/old.py"]},
+        current={"moved": ["fxapk/new.py"]},
+        baseline={"moved": ["fxapk/old.py"]},
         written_keys={"moved"},
     )
     assert len(problems) == 1
@@ -263,15 +263,15 @@ def test_writer_drift_is_reported() -> None:
 
 
 def test_identical_state_yields_no_problems() -> None:
-    same = {"k": ["apkscan/x.py"]}
+    same = {"k": ["fxapk/x.py"]}
     assert meta_orphans.diff_against_baseline(same, dict(same), {"k"}) == []
 
 
 def test_new_signal_orphan_is_a_regression_but_new_record_is_not() -> None:
     baseline = {"signal": {}, "record": {}, "coverage": {}}
     current = {
-        "signal": {"decision": ["apkscan/x.py"]},
-        "record": {"stat": ["apkscan/x.py"]},
+        "signal": {"decision": ["fxapk/x.py"]},
+        "record": {"stat": ["fxapk/x.py"]},
         "coverage": {},
     }
     problems = meta_orphans.diff_categories_against_baseline(
@@ -284,7 +284,7 @@ def test_new_signal_orphan_is_a_regression_but_new_record_is_not() -> None:
 
 def test_signal_comparison_remains_strictly_bidirectional() -> None:
     baseline = {
-        "signal": {"healed": ["apkscan/x.py"]},
+        "signal": {"healed": ["fxapk/x.py"]},
         "record": {},
         "coverage": {},
     }

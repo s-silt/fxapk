@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.corpus import add_report
-from apkscan.core.linkage import collapse_manifest_entries, rank_link_candidates
-from apkscan.core.phase2.provenance import (
+from fxapk.core.corpus import add_report
+from fxapk.core.linkage import collapse_manifest_entries, rank_link_candidates
+from fxapk.core.phase2.provenance import (
     HANDOFF_ROOT_ENV,
     Phase1Provenance,
     ProvenanceError,
@@ -121,7 +121,7 @@ def test_corpus_add_cites_package_without_manual_case(tmp_path: Path) -> None:
     assert result["case_id"] == "CASE-SYN"
     assert result["package_ids"] == [manifest["package_id"]]
 
-    from apkscan.core.corpus import load_materialized_manifest
+    from fxapk.core.corpus import load_materialized_manifest
 
     rows = load_materialized_manifest(corpus)
     assert rows[0]["case_id"] == "CASE-SYN"
@@ -153,7 +153,7 @@ def test_second_ingest_merges_package_id_instead_of_replacing(tmp_path: Path) ->
     assert added["added"] is True
     assert again["added"] is False
     assert again["package_ids"] == sorted({first, second})
-    from apkscan.core.corpus import load_materialized_manifest, reindex
+    from fxapk.core.corpus import load_materialized_manifest, reindex
 
     assert load_materialized_manifest(corpus)[0]["package_ids"] == sorted({first, second})
     assert reindex(corpus)[0]["package_ids"] == sorted({first, second})
@@ -172,7 +172,7 @@ def test_second_ingest_drops_illegal_historical_package_ids(tmp_path: Path) -> N
     legal = "a" * 64
     add_report(corpus, report, raw, case_id="CASE-SYN", package_id=legal)
 
-    from apkscan.core.corpus import load_materialized_manifest
+    from fxapk.core.corpus import load_materialized_manifest
 
     rows = load_materialized_manifest(corpus)
     rows[0]["package_ids"] = ["NOT-A-SHA", "AB" * 32, "abc", legal]
@@ -186,7 +186,7 @@ def test_second_ingest_drops_illegal_historical_package_ids(tmp_path: Path) -> N
 
 
 def test_inventory_uses_manifest_report_even_with_unregistered_legacy_file(tmp_path: Path) -> None:
-    from apkscan.core.phase2.inventory import build_inventory
+    from fxapk.core.phase2.inventory import build_inventory
     case_dir = tmp_path / "case"
     package = write_verified_package(
         case_dir, "pkg", case_id="CASE-SYN", report_name="named-report.json",
@@ -203,7 +203,7 @@ def test_inventory_uses_manifest_report_even_with_unregistered_legacy_file(tmp_p
 
 
 def test_inventory_binds_loaded_report_bytes_to_verified_manifest(tmp_path: Path, monkeypatch) -> None:
-    from apkscan.core.phase2 import inventory as module
+    from fxapk.core.phase2 import inventory as module
     case_dir = tmp_path / "case"
     write_verified_package(case_dir, "pkg", case_id="CASE-SYN", leads=[
         {"category": "DOMAIN", "value": "registered.example.test",

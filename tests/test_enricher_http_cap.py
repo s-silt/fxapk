@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.enrichers import _http
+from fxapk.enrichers import _http
 
 
 class _FakeResp:
@@ -72,7 +72,7 @@ def test_capped_requests_shim_routes_get_and_post_through_cap() -> None:
 
 def test_enricher_modules_bind_capped_requests() -> None:
     """★asn/dns/rdap/icp/_ipinfo 的模块级 requests 符号 = 有界 shim（生产联网即限体）。"""
-    from apkscan.enrichers import _ipinfo, asn, dns, icp, rdap
+    from fxapk.enrichers import _ipinfo, asn, dns, icp, rdap
 
     for mod in (asn, dns, icp, rdap, _ipinfo):
         assert mod.requests is _http.capped_requests, f"{mod.__name__} 未绑有界 shim"
@@ -149,14 +149,14 @@ def test_host_is_public_rejects_private_and_metadata() -> None:
 
 def test_multisource_default_session_is_capped() -> None:
     """默认（未注入 session）用有界 CappedSession，生产富化走响应体硬帽。"""
-    from apkscan.enrichers.multisource import RipeStatBgpEnricher
+    from fxapk.enrichers.multisource import RipeStatBgpEnricher
 
     assert isinstance(RipeStatBgpEnricher()._http, _http.CappedSession)
 
 
 def test_injected_session_is_not_overridden() -> None:
     """注入的假 session 不被换成 CappedSession（测试可控响应，不受帽影响）。"""
-    from apkscan.enrichers.multisource import RipeStatBgpEnricher
+    from fxapk.enrichers.multisource import RipeStatBgpEnricher
 
     sentinel = object()
     assert RipeStatBgpEnricher(session=sentinel)._http is sentinel

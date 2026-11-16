@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from apkscan.config.port_norm import (
+from fxapk.config.port_norm import (
     PortPair,
     build_pairs,
     infer_port_transform,
@@ -213,7 +213,7 @@ def test_end_to_end_report_to_transform() -> None:
 def test_cli_port_normalize(tmp_path) -> None:
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     specs = [("203.0.113.7", 5000), ("203.0.113.42", 6100), ("203.0.113.99", 7200),
              ("203.0.113.150", 8300)]
@@ -237,7 +237,7 @@ def test_cli_port_normalize(tmp_path) -> None:
 def test_cli_rejects_missing_observed_source(tmp_path) -> None:
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     dpath = tmp_path / "declared.json"
     dpath.write_text(json.dumps({"203.0.113.7": 5000}), encoding="utf-8")

@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.core.phase2.inventory as coverage
-from apkscan.core.json_contract import JsonContractError
+import fxapk.core.phase2.inventory as coverage
+from fxapk.core.json_contract import JsonContractError
 from tests.phase2_fixtures import write_verified_package
 
 

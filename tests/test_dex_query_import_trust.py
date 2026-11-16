@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.dex_query import (
+from fxapk.core.dex_query import (
     DexQueryError,
     DexQueryLimits,
     _canonical_text,
@@ -238,7 +238,7 @@ def test_tampered_receipts_without_apk_stay_unverified(tmp_path: Path) -> None:
 
 
 def test_absolute_compiler_paths_are_not_relative_attachment_claims():
-    from apkscan.core.dex_query import _reject_unknown_claims
+    from fxapk.core.dex_query import _reject_unknown_claims
 
     _reject_unknown_claims({"meta": {"build_paths": [{"path": "/app/compiler/source.go"}]}}, set())
     with pytest.raises(DexQueryError, match="path_escape"):
@@ -393,14 +393,14 @@ def test_malformed_method_stays_unverified_while_other_method_matches(
 def test_instruction_width_ignores_operand_and_payload_lookalikes(
     insns: bytes, width: int, wanted: set[int], found: dict[int, int],
 ) -> None:
-    from apkscan.core.dex_query import _const_string_indexes, _instruction_width
+    from fxapk.core.dex_query import _const_string_indexes, _instruction_width
 
     assert _instruction_width(insns, 0) == width
     assert _const_string_indexes(insns, wanted) == found
 
 
 def test_unknown_and_truncated_payloads_are_not_guessed_as_one_unit() -> None:
-    from apkscan.core.dex_query import _DexParseError, _instruction_width
+    from fxapk.core.dex_query import _DexParseError, _instruction_width
 
     with pytest.raises(_DexParseError):
         _instruction_width(struct.pack("<H", 0x0073), 0)
@@ -503,7 +503,7 @@ def _descriptor_bomb_dex(count: int, text_len: int) -> bytes:
 
 
 def test_shared_string_offsets_and_descriptor_fanout_stay_bounded(tmp_path: Path) -> None:
-    from apkscan.core.dex_query import _DexParseError, _parse_dex, _verify_xref_hits
+    from fxapk.core.dex_query import _DexParseError, _parse_dex, _verify_xref_hits
 
     data = _shared_string_dex(2000, 64 * 1024)
     with pytest.raises(_DexParseError):
@@ -640,7 +640,7 @@ def _shared_code_dex(method_count: int, insns_len: int) -> bytes:
 
 
 def _parse_peak(data: bytes) -> tuple[object, int]:
-    from apkscan.core.dex_query import _DexParseError, _parse_dex
+    from fxapk.core.dex_query import _DexParseError, _parse_dex
 
     tracemalloc.start()
     try:
@@ -656,7 +656,7 @@ def _parse_peak(data: bytes) -> tuple[object, int]:
 
 def test_descriptor_budget_blocks_fanout_before_allocating() -> None:
     """4096 个参数全部指向一个 ~4KiB 类型名：descriptor 展开 ~16 MiB，必须在 join 前拒。"""
-    from apkscan.core.dex_query import _DexParseError, _parse_dex
+    from fxapk.core.dex_query import _DexParseError, _parse_dex
 
     data = _param_fanout_dex(proto_count=1, param_count=4096, text_len=4096, method_count=1)
     tracemalloc.start()
@@ -691,7 +691,7 @@ def test_methods_sharing_one_code_item_share_insns_bytes() -> None:
 
 def test_empty_type_descriptor_is_rejected() -> None:
     """类型表项指向空字符串：合法 DEX 不存在，直接拒。"""
-    from apkscan.core.dex_query import _DexParseError, _parse_dex
+    from fxapk.core.dex_query import _DexParseError, _parse_dex
 
     data = _param_fanout_dex(1, 4000, 8, 4000, param_string=b"")
     with pytest.raises(_DexParseError):
@@ -704,8 +704,8 @@ def test_shared_proto_params_join_once_within_time_budget(
     """4000 个方法共享一份 4000 参数 proto：params 文本只 join 一次。"""
     import time
 
-    import apkscan.core.dex_query as dex_query
-    from apkscan.core.dex_query import _parse_dex
+    import fxapk.core.dex_query as dex_query
+    from fxapk.core.dex_query import _parse_dex
 
     joins: list[int] = []
     real_join = getattr(dex_query, "_join_params", None)
@@ -806,7 +806,7 @@ def test_class_defs_sharing_one_class_data_parse_once() -> None:
     """1000 个 class_def 指向同一 class_data：seen 去重后只解析一次。"""
     import time
 
-    from apkscan.core.dex_query import _parse_dex
+    from fxapk.core.dex_query import _parse_dex
 
     data = _shared_classdata_dex(1000, 1000)
     start = time.perf_counter()
@@ -817,7 +817,7 @@ def test_class_defs_sharing_one_class_data_parse_once() -> None:
 
 def test_overlapping_class_data_entries_hit_cumulative_budget() -> None:
     """重叠 class_data 起点让累计 field 数超过 2*limit：fail closed。"""
-    from apkscan.core.dex_query import _DexParseError, _parse_dex
+    from fxapk.core.dex_query import _DexParseError, _parse_dex
 
     data = _overlapping_classdata_dex(64)
     with pytest.raises(_DexParseError):
@@ -879,7 +879,7 @@ def _shared_method_defs_dex(classdef_count: int) -> bytes:
 
 def test_duplicate_method_ids_descriptors_are_rejected() -> None:
     """两个 method_ids 展开出同一 descriptor：合法 DEX method_ids 唯一，直接拒。"""
-    from apkscan.core.dex_query import _DexParseError, _parse_dex
+    from fxapk.core.dex_query import _DexParseError, _parse_dex
 
     data = _param_fanout_dex(1, 8, 8, 2, same_name=True)
     with pytest.raises(_DexParseError):
@@ -890,7 +890,7 @@ def test_distinct_class_data_reusing_unique_descriptor_stays_fast() -> None:
     """2000 份独立 class_data 都声明 method 0：descriptor 同对象，dict 走身份快路径。"""
     import time
 
-    from apkscan.core.dex_query import _parse_dex
+    from fxapk.core.dex_query import _parse_dex
 
     data = _shared_method_defs_dex(2000)
     start = time.perf_counter()
@@ -937,7 +937,7 @@ def _receipt_dir(root: Path, count: int, payload: bytes) -> dict[str, object]:
 
 
 def test_collect_receipt_files_refuses_more_than_64(tmp_path: Path) -> None:
-    from apkscan.core.dex_query import collect_receipt_files
+    from fxapk.core.dex_query import collect_receipt_files
 
     meta = _receipt_dir(tmp_path, 65, b'{"ok":true}')
     with pytest.raises(DexQueryError) as excinfo:
@@ -948,8 +948,8 @@ def test_collect_receipt_files_refuses_more_than_64(tmp_path: Path) -> None:
 def test_collect_receipt_files_byte_budget_is_cumulative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import apkscan.core.dex_query as dex_query
-    from apkscan.core.dex_query import collect_receipt_files
+    import fxapk.core.dex_query as dex_query
+    from fxapk.core.dex_query import collect_receipt_files
 
     monkeypatch.setattr(
         dex_query, "DexQueryLimits", lambda: DexQueryLimits(input_bytes=20)
@@ -963,7 +963,7 @@ def test_collect_receipt_files_byte_budget_is_cumulative(
 def test_read_relative_uses_bounded_stream_and_stats_before_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import apkscan.core.dex_query as dex_query
+    import fxapk.core.dex_query as dex_query
 
     dex_dir = tmp_path / "dex-query"
     dex_dir.mkdir()
@@ -996,8 +996,8 @@ def test_collect_receipt_files_stat_size_lie_still_hits_byte_budget(
     """stat 报 5B 但实际读 15B（竞态/虚报）：按剩余预算读，越界仍 dex_receipt_oversize。"""
     import os
 
-    import apkscan.core.dex_query as dex_query
-    from apkscan.core.dex_query import collect_receipt_files
+    import fxapk.core.dex_query as dex_query
+    from fxapk.core.dex_query import collect_receipt_files
 
     monkeypatch.setattr(
         dex_query, "DexQueryLimits", lambda: DexQueryLimits(input_bytes=20)
@@ -1023,7 +1023,7 @@ def _shared_code_item_fixture(monkeypatch, hit_count: int):
     """构造「多 descriptor 共享同一 code item」的最小 _verify_xref_hits 场景。"""
     from types import SimpleNamespace
 
-    from apkscan.core import dex_query as dq
+    from fxapk.core import dex_query as dq
 
     value = "evil.example"
     value_sha = hashlib.sha256(value.encode()).hexdigest()

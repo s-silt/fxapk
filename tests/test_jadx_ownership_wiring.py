@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.analyzers import jadx
-from apkscan.analyzers.jadx import JadxAnalyzer
+from fxapk.analyzers import jadx
+from fxapk.analyzers.jadx import JadxAnalyzer
 from tests.conftest import FakeContext
 from tests.test_jadx_index_wiring import _ctx, _owned, _patch  # 复用 P2-A 夹具
 
@@ -186,7 +186,7 @@ def test_meta_key_registered() -> None:
 
 def test_digest_comparison_subsection(tmp_path: Path) -> None:
     """digest 透出：摘要嵌在 jadx_index.comparison 小节下并带非鉴真 caveat。"""
-    from apkscan.report.digest import build_digest
+    from fxapk.report.digest import build_digest
 
     key = "a1" * 32
     report = {
@@ -261,7 +261,7 @@ def test_projection_exception_fails_open(
 def test_digest_comparison_unattributed_and_strict_gate(tmp_path: Path) -> None:
     """★digest 四桶完整（含 unattributed/total_regions）；状态门只认 compared；
     bool 计数拒收。"""
-    from apkscan.report.digest import build_digest
+    from fxapk.report.digest import build_digest
 
     key = "a1" * 32
     base_meta = {

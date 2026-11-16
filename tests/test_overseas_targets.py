@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import forensic
-from apkscan.core.leads import _overseas_target_coverage
-from apkscan.core.models import Evidence, Endpoint, Lead, LeadCategory, Report
-from apkscan.core.pipeline import _build_overseas_targets
-from apkscan.report import html as report_html
-from apkscan.report.digest import build_digest
+from fxapk.core import forensic
+from fxapk.core.leads import _overseas_target_coverage
+from fxapk.core.models import Evidence, Endpoint, Lead, LeadCategory, Report
+from fxapk.core.pipeline import _build_overseas_targets
+from fxapk.report import html as report_html
+from fxapk.report.digest import build_digest
 
 # 纯合成的 Cloudflare 承载富化夹具，只用于锁定 CDN 候选边界。
 _CF_DNS = {

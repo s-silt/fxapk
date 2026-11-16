@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from apkscan.core import device
-from apkscan.dynamic import doctor
+from fxapk.core import device
+from fxapk.dynamic import doctor
 
 _HEALTHY = device.DeviceNetworkState(
     connected=True, validated=True, assignment=device.NET_ASSIGN_DHCP,

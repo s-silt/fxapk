@@ -1,4 +1,4 @@
-"""AXML nsmap 净化 shim 的单测（对应 apkscan/core/apk.py 的 _sanitize_nsmap + shim）。
+"""AXML nsmap 净化 shim 的单测（对应 fxapk/core/apk.py 的 _sanitize_nsmap + shim）。
 
 背景：加固壳在二进制 AndroidManifest(AXML) 里注入【非法 namespace URI】（含空格/控制符/
 NUL 等反分析投毒）。androguard 在 APK() 构造期把 manifest 转 lxml，etree.Element(tag,
@@ -19,7 +19,7 @@ import copy
 import pytest
 from lxml import etree
 
-from apkscan.core.apk import _install_axml_nsmap_shim, _sanitize_nsmap
+from fxapk.core.apk import _install_axml_nsmap_shim, _sanitize_nsmap
 
 _ANDROID_URI = "http://schemas.android.com/apk/res/android"
 
@@ -189,7 +189,7 @@ def _inject_raw_nsmap_and_install(
 
     返回 AXMLParser 类，调用方读 instance.nsmap 验证净化生效。
     """
-    import apkscan.core.apk as apk_mod
+    import fxapk.core.apk as apk_mod
     from androguard.core.axml import AXMLParser
 
     # 1) 注入「底层」property（替身），模拟被加固壳投毒的原始 nsmap。
@@ -238,7 +238,7 @@ def test_shim_preserves_clean_nsmap(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_shim_drops_bad_tag_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     """坏 URI 出现在 START_TAG/attribute 的 namespace 字段时，也不能拼进 ``{uri}name``。"""
-    import apkscan.core.apk as apk_mod
+    import fxapk.core.apk as apk_mod
     from androguard.core.axml import AXMLPrinter
 
     monkeypatch.setattr(apk_mod, "_AXML_NSMAP_PATCHED", False, raising=True)
@@ -267,7 +267,7 @@ def test_loadapk_path_no_longer_raises_on_bad_uri_nsmap(
       APK() 构造崩、整体 fail-fast 的根因复现。
     - 装 shim 后：nsmap 被净化（坏 URI 剔除），不再抛，解析出 root（对齐 apktool 宽容降级）。
     """
-    import apkscan.core.apk as apk_mod
+    import fxapk.core.apk as apk_mod
     from androguard.core.axml import AXMLParser, AXMLPrinter
 
     raw_axml = _minimal_axml_or_skip()

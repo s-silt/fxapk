@@ -4,9 +4,9 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.core.observations import occurrence_id
-from apkscan.core.models import Confidence
-from apkscan.dynamic import probe_ingest
+from fxapk.core.observations import occurrence_id
+from fxapk.core.models import Confidence
+from fxapk.dynamic import probe_ingest
 
 
 def test_raw_bytes_and_decoded_text_have_distinct_hashes_and_line_locations(tmp_path):
@@ -58,7 +58,7 @@ def test_budget_refuses_partial_log_instead_of_silently_dropping(monkeypatch, tm
 
 
 def test_cli_budget_failure_does_not_write_partial_ledger(monkeypatch, tmp_path):
-    from apkscan.cli import app
+    from fxapk.cli import app
 
     monkeypatch.setattr(probe_ingest, "MAX_PROBE_LOG_BYTES", 16)
     log = tmp_path / "probe.log"

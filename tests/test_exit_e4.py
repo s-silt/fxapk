@@ -6,12 +6,12 @@ import copy
 
 import pytest
 
-from apkscan.core.enrichment import enrich_selected_targets
-from apkscan.core.enrichment_budget import EnrichmentBudget
-from apkscan.core.models import Endpoint, EnrichmentResult, Report
-from apkscan.core.report_io import load_report
-from apkscan.core.source_status import canonicalize_report_source_status, provider_payload_if_hit
-from apkscan.report.json import dump
+from fxapk.core.enrichment import enrich_selected_targets
+from fxapk.core.enrichment_budget import EnrichmentBudget
+from fxapk.core.models import Endpoint, EnrichmentResult, Report
+from fxapk.core.report_io import load_report
+from fxapk.core.source_status import canonicalize_report_source_status, provider_payload_if_hit
+from fxapk.report.json import dump
 
 
 class _Synthetic:

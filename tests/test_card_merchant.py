@@ -7,10 +7,10 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.card_merchant import CardMerchantAnalyzer
-from apkscan.core import infra
-from apkscan.core.models import Confidence, LeadCategory
-from apkscan.report.letters import build_letters
+from fxapk.analyzers.card_merchant import CardMerchantAnalyzer
+from fxapk.core import infra
+from fxapk.core.models import Confidence, LeadCategory
+from fxapk.report.letters import build_letters
 
 
 class _Ctx:

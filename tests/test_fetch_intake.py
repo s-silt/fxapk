@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import fetch_intake
-from apkscan.core.offline_review.runner import write_json
+from fxapk.core import fetch_intake
+from fxapk.core.offline_review.runner import write_json
 
 
 def fake_fetch(tmp_path, monkeypatch, *, web_state="completed", invalid=False, packages=None, report_health="complete"):
@@ -59,7 +59,7 @@ def test_verified_web_and_apk_route_to_distinct_reports(tmp_path, monkeypatch):
     result = fetch_intake.run(archive, tmp_path / "out")
     assert result["state"] == "ok"
     assert commands[0][1] == "analyze-data"
-    assert commands[1][1:4] == ["-m", "apkscan.cli", "analyze"]
+    assert commands[1][1:4] == ["-m", "fxapk.cli", "analyze"]
     assert result["stages"][3]["report_path"] == "package-001/report/original.html"
     assert result["stages"][2]["state"] == "not_run"
     assert "explicit_review_manifest_required" in (tmp_path / "out/index.html").read_text(encoding="utf-8")
@@ -153,8 +153,8 @@ def test_later_malformed_package_preserves_earlier_skip_reason(tmp_path, monkeyp
 def test_offline_process_disables_device_probes_only_in_child(tmp_path, monkeypatch):
     import os
     import time
-    from apkscan.core import tools
-    from apkscan.core.proctree import OwnedRun
+    from fxapk.core import tools
+    from fxapk.core.proctree import OwnedRun
 
     monkeypatch.delenv("FXAPK_NO_DEVICE_PROBE", raising=False)
     observed = []

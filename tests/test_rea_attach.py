@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.core.rea_intake import (
+from fxapk.core.rea_intake import (
     ReaDirectIntakeError,
     refuse_unverified_rea_direct_intake,
 )
-from apkscan.core.report_io import report_from_dict
+from fxapk.core.report_io import report_from_dict
 
 _ORIGIN = "http://127.0.0.1:8080"
 _PAGE = f"{_ORIGIN}/"

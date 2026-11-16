@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from apkscan.core.atomic import atomic_create_bytes
+from fxapk.core.atomic import atomic_create_bytes
 
 from .evidence import EvidenceError, origin_of
 from .trace_limits import MAX_COMMANDS, MAX_RAW_BYTES

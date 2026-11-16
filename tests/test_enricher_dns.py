@@ -23,9 +23,9 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.enrichers.dns as dns_mod
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.enrichers.dns import DnsEnricher
+import fxapk.enrichers.dns as dns_mod
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.enrichers.dns import DnsEnricher
 
 
 @pytest.fixture(autouse=True)
@@ -512,7 +512,7 @@ def test_enrich_populates_cname_from_doh(
     assert result.ok is True
     assert result.data["cname"] == ["cdn.x"]  # _doh_payload 掺的 CNAME "cdn.x." 被捞进来
     # 端到端：这样的 dns dict 现在真能触发 forensic 的 CNAME CDN 判定（曾因永无 cname 而是死代码）。
-    from apkscan.core import forensic
+    from fxapk.core import forensic
 
     assert forensic._cname_cdn_marker({"cname": ["x.w.kunlungr.com"]}) is not None
 
@@ -556,7 +556,7 @@ def test_enrich_captures_canonical_name_from_socket(
     result = DnsEnricher().enrich(_ep())
     assert result.ok is True
     assert result.data["cname"] == ["pay.fraud-gw.com.w.kunlungr.com"]
-    from apkscan.core import forensic
+    from fxapk.core import forensic
 
     assert forensic._cname_cdn_marker({"cname": result.data["cname"]}) is not None
 

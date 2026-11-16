@@ -23,9 +23,9 @@ from pathlib import Path
 import pytest
 from urllib.parse import urlsplit
 
-import apkscan.enrichers.rdap as rdap_mod
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.enrichers.rdap import RdapEnricher
+import fxapk.enrichers.rdap as rdap_mod
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.enrichers.rdap import RdapEnricher
 
 
 # --- 缓存隔离 -------------------------------------------------------------

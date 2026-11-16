@@ -9,9 +9,9 @@ import logging
 
 import pytest
 
-from apkscan.core import registry
-from apkscan.core.models import AnalyzerResult
-from apkscan.core.registry import BaseAnalyzer, _dedup_and_validate, detect_capabilities
+from fxapk.core import registry
+from fxapk.core.models import AnalyzerResult
+from fxapk.core.registry import BaseAnalyzer, _dedup_and_validate, detect_capabilities
 
 
 # ---------------------------------------------------------------------------

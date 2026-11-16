@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from apkscan.core.atomic import atomic_create_bytes
-from apkscan.core.rea_intake import write_rea_bundle_marker
+from fxapk.core.atomic import atomic_create_bytes
+from fxapk.core.rea_intake import write_rea_bundle_marker
 
 MAX_INPUT_BYTES = 16 * 1024 * 1024
 MAX_ITEMS = 4096

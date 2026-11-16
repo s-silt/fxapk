@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core.parser_limits import ParserConfigurationError, ParserLimits
+from fxapk.core.parser_limits import ParserConfigurationError, ParserLimits
 
 
 def test_parser_limits_require_explicit_time_and_memory():

@@ -10,7 +10,7 @@
 
 ## 为什么
 
-检出受 `apkscan/rules/*.yaml`、解析引擎和输入可见性共同影响。组件测试之外，
+检出受 `fxapk/rules/*.yaml`、解析引擎和输入可见性共同影响。组件测试之外，
 本目录用固定合成输入锁定检出类别和报告语义，使规则或引擎引起的变化在审阅时可见。
 它不测量真实案件检出率，也不能证明不存在漏报或误报。
 
@@ -38,8 +38,8 @@ python -m pytest tests/test_synthetic_regression.py -q
    ```bash
    python - <<'PY'
    import json, pathlib, sys; sys.path.insert(0, ".")
-   from apkscan.core import pipeline
-   from apkscan.core.models import AnalysisConfig
+   from fxapk.core import pipeline
+   from fxapk.core.models import AnalysisConfig
    from tests.synthetic.samples import SAMPLES
    from tests.synthetic.snapshot import build_context
    b = {}

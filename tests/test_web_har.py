@@ -2,9 +2,9 @@
 import base64
 import json
 
-from apkscan.analyzers.web_har import WebHarAnalyzer
-from apkscan.core.models import AnalysisConfig
-from apkscan.core.webctx import WebContext
+from fxapk.analyzers.web_har import WebHarAnalyzer
+from fxapk.core.models import AnalysisConfig
+from fxapk.core.webctx import WebContext
 
 
 def context(entries):
@@ -54,7 +54,7 @@ def test_har_missing_and_malformed_data_never_claims_complete():
 
 
 def test_har_bounds_include_invalid_entries(monkeypatch):
-    import apkscan.analyzers.web_har as module
+    import fxapk.analyzers.web_har as module
     monkeypatch.setattr(module, "MAX_ENTRIES", 2)
     result = WebHarAnalyzer().analyze(context([None, None, entry()]))
     summary = result.meta["web_har_summary"]
@@ -63,7 +63,7 @@ def test_har_bounds_include_invalid_entries(monkeypatch):
 
 
 def test_har_body_limit_is_explicit(monkeypatch):
-    import apkscan.analyzers.web_har as module
+    import fxapk.analyzers.web_har as module
     monkeypatch.setattr(module, "MAX_BODY_BYTES", 4)
     result = WebHarAnalyzer().analyze(context([entry(body="x" * 100)]))
     assert result.meta["web_har_records"][0]["body_state"] == "over_limit"
@@ -71,8 +71,8 @@ def test_har_body_limit_is_explicit(monkeypatch):
 
 
 def test_truncated_har_coverage_survives_real_pipeline_contract(monkeypatch):
-    from apkscan.core import pipeline
-    import apkscan.analyzers.web_har as module
+    from fxapk.core import pipeline
+    import fxapk.analyzers.web_har as module
     monkeypatch.setattr(module,'MAX_BODY_BYTES',4)
     monkeypatch.setattr(pipeline,'discover_analyzers',lambda:[WebHarAnalyzer()])
     monkeypatch.setenv('FXAPK_NO_PARALLEL','1')

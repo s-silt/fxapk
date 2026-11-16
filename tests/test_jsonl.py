@@ -7,8 +7,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.jsonl import report_to_events
+from fxapk import cli
+from fxapk.core.jsonl import report_to_events
 
 _REPORT = {
     "schema_version": "1.0",

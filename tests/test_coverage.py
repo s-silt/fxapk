@@ -1,4 +1,4 @@
-"""覆盖度协议（``apkscan/core/coverage.py``）的契约测试。
+"""覆盖度协议（``fxapk/core/coverage.py``）的契约测试。
 
 这层协议存在的意义是让下游能区分「没有」与「没扫全」，故测试盯的是两件事：
 键名拼装不许出错（拼错=痕迹静默丢失），以及收集时不许把「没发生」当成缺口。
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core.coverage import (
+from fxapk.core.coverage import (
     COVERAGE_SUFFIXES,
     collect_coverage,
     coverage_meta_key,

@@ -8,13 +8,13 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.cli import app
-from apkscan.core import origin_check as oc
-from apkscan.core import origin_enrichment as oe
-from apkscan.core.models import Endpoint, Report
-from apkscan.core.origin_projection import integrate_check, publish_projection
-from apkscan.core.report_io import report_from_dict
-from apkscan.report.json import to_dict
+from fxapk.cli import app
+from fxapk.core import origin_check as oc
+from fxapk.core import origin_enrichment as oe
+from fxapk.core.models import Endpoint, Report
+from fxapk.core.origin_projection import integrate_check, publish_projection
+from fxapk.core.report_io import report_from_dict
+from fxapk.report.json import to_dict
 
 
 def base_report() -> dict:
@@ -137,8 +137,8 @@ def test_body_cap_retains_partial_and_no_redirect_follow(tmp_path, monkeypatch) 
 
 
 def test_projection_survives_all_existing_public_consumers(tmp_path, monkeypatch) -> None:
-    from apkscan.report import html, pdf, ioc
-    from apkscan.report.digest import build_digest
+    from fxapk.report import html, pdf, ioc
+    from fxapk.report.digest import build_digest
     check, path = receipt(tmp_path)
     original = base_report()
     merged = integrate_check(original, check, path)
@@ -179,7 +179,7 @@ def test_plan_does_not_resolve_fetch_or_enrich(tmp_path, monkeypatch) -> None:
 
 
 def test_existing_batch_disabled_status_reaches_report_and_summary(tmp_path, monkeypatch) -> None:
-    from apkscan.core import registry
+    from fxapk.core import registry
     monkeypatch.setattr(registry, 'discover_enrichers', lambda: [SimpleNamespace(
         name='fofa', active=False, applies_to=['domain', 'ip'], required_env=('ORIGIN_TEST_UNSET',))])
     monkeypatch.delenv('ORIGIN_TEST_UNSET', raising=False)
@@ -227,8 +227,8 @@ def test_captured_edge_headers_reach_report_without_cross_ip_contamination(tmp_p
 
 
 def test_response_archive_gap_survives_batch_and_projection(tmp_path, monkeypatch) -> None:
-    from apkscan.core import registry
-    from apkscan.core.models import EnrichmentResult
+    from fxapk.core import registry
+    from fxapk.core.models import EnrichmentResult
 
     class SyntheticProvider:
         name = "synthetic"
@@ -250,7 +250,7 @@ def test_response_archive_gap_survives_batch_and_projection(tmp_path, monkeypatc
     projected = integrate_check(base_report(), check, path)
     assert projected["meta"]["origin_checks"][0]["enrichment_status"] == "partial"
     import importlib
-    command = importlib.import_module("apkscan.commands.origin_check")
+    command = importlib.import_module("fxapk.commands.origin_check")
     monkeypatch.setattr(command, "run_check", lambda *a: path)
     monkeypatch.setattr(command, "enrich_origin_candidates", lambda *a: enrichment)
     monkeypatch.setattr(command, "publish_projection", lambda *a: {"pdf": "written"})
@@ -269,7 +269,7 @@ def test_chained_projection_rejected_before_any_network(tmp_path, monkeypatch):
     baseline = tmp_path / "derived.json"
     baseline.write_text(json.dumps(merged), encoding="utf-8")
     import importlib
-    command = importlib.import_module("apkscan.commands.origin_check")
+    command = importlib.import_module("fxapk.commands.origin_check")
     monkeypatch.setattr(command, "run_check", lambda *a: pytest.fail("must reject before network"))
     result = CliRunner().invoke(app, ["origin-check", "--reference-url", "https://cdn.example.test/a",
         "--candidate-url", "https://other.test/a", "--case-id", "fixture", "--source-note", "fixture",
@@ -312,7 +312,7 @@ def test_slow_response_headers_obey_total_deadline(tmp_path, monkeypatch):
 
 
 def test_pinned_https_enforces_tls12_floor(monkeypatch):
-    from apkscan.core import pinned_transport as pt
+    from fxapk.core import pinned_transport as pt
     context = SimpleNamespace(minimum_version=None)
     sock = SimpleNamespace(close=lambda: None, getpeername=lambda: ("192.0.2.1", 443))
     def wrap_socket(value, *, server_hostname):

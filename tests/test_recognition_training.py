@@ -10,11 +10,11 @@ import json
 
 import pytest
 
-from apkscan.core.recognition_labels import (
+from fxapk.core.recognition_labels import (
     RecognitionLabelRecord,
     RecognitionLabelSet,
 )
-from apkscan.core.recognition_training import (
+from fxapk.core.recognition_training import (
     SplitConfig,
     SplitManifestError,
     build_split_manifest,

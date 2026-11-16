@@ -1,4 +1,4 @@
-"""apkscan.dynamic.cryptohook 的单测（P0 运行时密钥 hook 纯逻辑层）。
+"""fxapk.dynamic.cryptohook 的单测（P0 运行时密钥 hook 纯逻辑层）。
 
 策略：全程无设备/无 Frida，只测 on_message handler 规范化、活体配方反推、冒充品牌抽取、
 transformation 拆分、Frida JS 常量完整性。Frida JS 本身的真机行为由用户在 MuMu 复验。
@@ -10,7 +10,7 @@ import base64
 import json
 from typing import Any
 
-from apkscan.dynamic import cryptohook
+from fxapk.dynamic import cryptohook
 
 # 合成 key（32 个 ASCII 字符，按 UTF-8 当 key —— CryptoJS enc.Utf8.parse 口径）。
 _KEY = "0123456789abcdef0123456789abcdef"
@@ -318,7 +318,7 @@ def test_frida_constants_match_js_resource_files_verbatim() -> None:
     import importlib.resources
 
     for attr, fname in _FRIDA_JS_FILES.items():
-        res = importlib.resources.files("apkscan.dynamic") / "frida_js" / fname
+        res = importlib.resources.files("fxapk.dynamic") / "frida_js" / fname
         disk = res.read_bytes().decode("utf-8")
         assert getattr(cryptohook, attr) == disk, f"{attr} 与 {fname} 内容不一致（迁移应逐字搬运）"
 
@@ -328,7 +328,7 @@ def test_frida_js_resources_are_readable_and_lf_only() -> None:
     import importlib.resources
 
     for fname in _FRIDA_JS_FILES.values():
-        res = importlib.resources.files("apkscan.dynamic") / "frida_js" / fname
+        res = importlib.resources.files("fxapk.dynamic") / "frida_js" / fname
         raw = res.read_bytes()
         assert raw, f"{fname} 不应为空"
         assert b"\r" not in raw, f"{fname} 不应含 CR（保持源文件 LF 一致）"
@@ -459,7 +459,7 @@ def test_brand_hints_survive_deeply_nested_json() -> None:
     """★RecursionError 回归（sfind-3f138d1e）：超深嵌套明文不得中断品牌线索抽取。"""
     import base64
 
-    from apkscan.dynamic import cryptohook
+    from fxapk.dynamic import cryptohook
 
     deep = b"[" * 5000 + b"]" * 5000
     event = {"plaintext_b64": base64.b64encode(deep).decode()}

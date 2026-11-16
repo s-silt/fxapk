@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.dex_query import (
+from fxapk.core.dex_query import (
     DexQueryLimits,
     import_receipt,
     project_dex_handoff,
     project_dex_query,
     query_apk,
 )
-from apkscan.core.jsonl import report_to_events
+from fxapk.core.jsonl import report_to_events
 from tests.fixtures.dex_query.dexgen import build_dex, sample_classes, zip_bytes
 
 _WORKER = [sys.executable, "tests/fixtures/dex_query/fake_worker.py"]

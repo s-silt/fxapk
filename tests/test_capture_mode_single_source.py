@@ -12,11 +12,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.dynamic import capabilities, capture
+from fxapk import cli
+from fxapk.dynamic import capabilities, capture
 
 _ROOT = Path(__file__).resolve().parents[1]
-_GUARDED_FILES = ("apkscan/cli.py", "apkscan/dynamic/capture.py")
+_GUARDED_FILES = ("fxapk/cli.py", "fxapk/dynamic/capture.py")
 _GUARDED_SETS = (
     frozenset(capabilities.CAPTURE_MODES),
     frozenset(capabilities.ANTIDETECT_MODES),
@@ -48,7 +48,7 @@ def test_no_hardcoded_copy_of_mode_sets(rel_path: str) -> None:
         if values in _GUARDED_SETS
     ]
     assert not copies, (
-        f"{rel_path} 手写了取值集合 {copies}；改用 apkscan.dynamic.capabilities "
+        f"{rel_path} 手写了取值集合 {copies}；改用 fxapk.dynamic.capabilities "
         "的 CAPTURE_MODES / ANTIDETECT_MODES"
     )
 

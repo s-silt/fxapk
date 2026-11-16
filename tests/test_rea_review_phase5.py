@@ -6,14 +6,14 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from apkscan.core import infra
-from apkscan.core.leads import build_endpoint_leads
-from apkscan.core.models import Endpoint, Evidence, Report
-from apkscan.core.native_handoff import project_native_handoff
-from apkscan.core.web_observation_plan import build_plan
-from apkscan.dynamic import auto, capture
-from apkscan.report.digest import build_digest
-from apkscan.report.json import _to_jsonable
+from fxapk.core import infra
+from fxapk.core.leads import build_endpoint_leads
+from fxapk.core.models import Endpoint, Evidence, Report
+from fxapk.core.native_handoff import project_native_handoff
+from fxapk.core.web_observation_plan import build_plan
+from fxapk.dynamic import auto, capture
+from fxapk.report.digest import build_digest
+from fxapk.report.json import _to_jsonable
 from tests.test_web_supplement_routing import _body
 
 

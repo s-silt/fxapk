@@ -9,7 +9,7 @@ import uuid
 
 import typer
 
-from apkscan.plugins.contracts import PLUGIN_API_VERSION
+from fxapk.plugins.contracts import PLUGIN_API_VERSION
 
 from .evidence import FlutterError, validate_bundle
 from .index import query

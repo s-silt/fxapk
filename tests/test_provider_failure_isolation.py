@@ -1,8 +1,8 @@
 """Malformed provider control fields must not abort independent sources."""
 import pytest
-from apkscan.core.enrichment import enrich_selected_targets
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.core.registry import BaseEnricher
+from fxapk.core.enrichment import enrich_selected_targets
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.core.registry import BaseEnricher
 
 
 class Source(BaseEnricher):
@@ -42,7 +42,7 @@ def test_denied_refresh_does_not_reuse_old_hit_status(close):
 
 
 def test_authentication_failure_worklist_requires_access_resolution():
-    from apkscan.core.provider_review import _source_action
+    from fxapk.core.provider_review import _source_action
     assert _source_action({'status':'failed','error_type':'authentication_failed'}) == 'resolve_access_or_quota_do_not_retry_automatically'
 
 

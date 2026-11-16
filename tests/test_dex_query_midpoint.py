@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.dex_query import (
+from fxapk.core.dex_query import (
     DexQueryError,
     DexQueryLimits,
     _clean_hits,
@@ -47,7 +47,7 @@ def test_import_rejects_unexecuted_forged_receipt(tmp_path: Path) -> None:
     apk.write_bytes(zip_bytes([("classes.dex", blob)]))
     member_sha = hashlib.sha256(blob).hexdigest()
     values = ["api.example.invalid"]
-    from apkscan.core import dex_query as dq
+    from fxapk.core import dex_query as dq
 
     actual, _skipped, _truncated = dq.inventory_dex_bytes(apk.read_bytes())
     forged = dq._receipt_from_worker(
@@ -129,7 +129,7 @@ def test_query_does_not_hash_and_inventory_separately(tmp_path: Path, monkeypatc
     def boom(path: Path, limit: int) -> str:
         raise AssertionError("hash and inventory must share one snapshot")
 
-    monkeypatch.setattr("apkscan.core.dex_query._sha256_file", boom)
+    monkeypatch.setattr("fxapk.core.dex_query._sha256_file", boom)
     receipt = query_apk(
         apk,
         ["api.example.invalid"],

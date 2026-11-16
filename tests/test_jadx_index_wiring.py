@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.analyzers import jadx
-from apkscan.analyzers.jadx import JadxAnalyzer
-from apkscan.core import proctree
-from apkscan.core.jadx_index import (
+from fxapk.analyzers import jadx
+from fxapk.analyzers.jadx import JadxAnalyzer
+from fxapk.core import proctree
+from fxapk.core.jadx_index import (
     DexRole,
     IndexBuildResult,
     IndexBuildState,
@@ -251,7 +251,7 @@ def test_cache_unavailable_is_terminal_not_miss(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """★CacheUnavailable 绝不当 miss：不重建、不覆盖，status=unavailable。"""
-    from apkscan.core.jadx_index import CacheUnavailable
+    from fxapk.core.jadx_index import CacheUnavailable
 
     _patch(monkeypatch)
     monkeypatch.setattr(
@@ -448,7 +448,7 @@ def test_forged_unavailable_reason_not_leaked_into_receipt(
 ) -> None:
     """★reason 卫生闸：伪造 CacheUnavailable 带 Windows 路径 → 绝不进 receipt，
     折叠为稳定码。"""
-    from apkscan.core.jadx_index import CacheUnavailable
+    from fxapk.core.jadx_index import CacheUnavailable
 
     _patch(monkeypatch)
     forged = CacheUnavailable(r"C:\evil\path with spaces\x.json")
@@ -465,7 +465,7 @@ def test_cache_unavailable_never_reaches_build(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """CacheUnavailable 终态锁的直接形态：build_index 一次都不许被调（spy 即炸）。"""
-    from apkscan.core.jadx_index import CacheUnavailable
+    from fxapk.core.jadx_index import CacheUnavailable
 
     _patch(monkeypatch)
     monkeypatch.setattr(

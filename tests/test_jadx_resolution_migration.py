@@ -26,9 +26,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.jadx_callpath import trace_callpath
-from apkscan.core.jadx_index import (
+from fxapk import cli
+from fxapk.core.jadx_callpath import trace_callpath
+from fxapk.core.jadx_index import (
     INDEX_SCHEMA_VERSION,
     CacheMiss,
     DexInput,
@@ -47,7 +47,7 @@ from apkscan.core.jadx_index import (
     scan_java_sources,
     verify_dex_inputs,
 )
-from apkscan.core.recognition_codec import canonical_json_v1, parse_json_v1
+from fxapk.core.recognition_codec import canonical_json_v1, parse_json_v1
 
 runner = CliRunner()
 
@@ -295,7 +295,7 @@ def test_index_schema_version_bumped_to_1_6() -> None:
 
     ★bump 检查单（1.4→1.5、1.5→1.6 两轮都漏过分散钉点，故收敛于此）——
     全仓库需要同步的版本字面量只有三处：
-      1) 生产 apkscan/core/jadx_index.py 的 INDEX_SCHEMA_VERSION；
+      1) 生产 fxapk/core/jadx_index.py 的 INDEX_SCHEMA_VERSION；
       2) 本锁的期望字面量（连同函数名后缀，并在上方演进史补一行理由）；
       3) test_jadx_index.py::test_key_fixed_vector 的固定向量——必须独立复算
          （手工构造 key material 复算 sha256，并用旧 schema 值逐字节复现前代
@@ -720,8 +720,8 @@ import os
 import sys
 from pathlib import Path
 
-from apkscan.core.jadx_callpath import trace_callpath
-from apkscan.core.jadx_index import (
+from fxapk.core.jadx_callpath import trace_callpath
+from fxapk.core.jadx_index import (
     DexInput,
     DexRole,
     IndexBuildResult,

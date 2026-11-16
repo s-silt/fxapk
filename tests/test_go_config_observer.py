@@ -33,7 +33,7 @@ def fixture():
 
 
 def test_profile_compiles_only_regular_uprobes_and_bounded_words():
-    from apkscan.dynamic.go_config_observer import compile_profile
+    from fxapk.dynamic.go_config_observer import compile_profile
 
     blob, profile = fixture()
     lines = compile_profile(
@@ -46,7 +46,7 @@ def test_profile_compiles_only_regular_uprobes_and_bounded_words():
 
 
 def test_android_install_paths_with_literal_tilde_are_supported():
-    from apkscan.dynamic.go_config_observer import compile_profile
+    from fxapk.dynamic.go_config_observer import compile_profile
 
     blob, profile = fixture()
     assert compile_profile(
@@ -58,7 +58,7 @@ def test_android_install_paths_with_literal_tilde_are_supported():
 
 
 def test_register_only_stage_does_not_claim_truncated_material():
-    from apkscan.dynamic.go_config_observer import project_trace
+    from fxapk.dynamic.go_config_observer import project_trace
 
     _, profile = fixture()
     profile["sites"][0].update(role="stage_enter", max_bytes=0)
@@ -84,7 +84,7 @@ def test_register_only_stage_does_not_claim_truncated_material():
     ],
 )
 def test_profiles_fail_closed_before_device_writes(change):
-    from apkscan.dynamic.go_config_observer import compile_profile
+    from fxapk.dynamic.go_config_observer import compile_profile
 
     blob, profile = fixture()
     path, group = "/data/local/tmp/fixture.so", "fxapk_go_test"
@@ -132,7 +132,7 @@ def event(body=b'{"h":"api.example.test"}', **extra):
 
 
 def test_snapshot_keeps_exact_length_and_does_not_claim_consumption():
-    from apkscan.dynamic.go_config_observer import project_trace
+    from fxapk.dynamic.go_config_observer import project_trace
 
     _, profile = fixture()
     result = project_trace(profile, event(), lost_events=0)
@@ -155,7 +155,7 @@ def test_snapshot_keeps_exact_length_and_does_not_claim_consumption():
     ],
 )
 def test_bad_snapshots_cannot_be_used_as_complete_material(change, gap):
-    from apkscan.dynamic.go_config_observer import project_trace
+    from fxapk.dynamic.go_config_observer import project_trace
 
     _, profile = fixture()
     trace, lost = event(), 0
@@ -175,7 +175,7 @@ def test_bad_snapshots_cannot_be_used_as_complete_material(change, gap):
 
 
 def test_zero_words_have_unknown_read_status_and_unknown_process_is_not_attributed():
-    from apkscan.dynamic.go_config_observer import project_trace
+    from fxapk.dynamic.go_config_observer import project_trace
 
     _, profile = fixture()
     result = project_trace(profile, event(b"\0" * 24).replace("( 11)", "(-----)"), lost_events=0)

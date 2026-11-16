@@ -23,8 +23,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.jadx_index import (
+from fxapk import cli
+from fxapk.core.jadx_index import (
     DexInput,
     DexRole,
     IndexBuildResult,
@@ -255,7 +255,7 @@ def test_detail_caps_truncate_with_full_counts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """★明细上限留痕：emitted<total、truncated=True，counts 仍是截断前全量。"""
-    import apkscan.core.structure_diff_report as sdr
+    import fxapk.core.structure_diff_report as sdr
 
     monkeypatch.setattr(sdr, "_MAX_DETAIL_ITEMS", 1)
     old_java = {"com/x/A.java": "class A {\n    void m() {\n    }\n}\n"}
@@ -324,7 +324,7 @@ def test_bad_key_never_touches_store(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """★证伪加强：key 语法非法时 JadxIndexStore 构造一次都不许发生。"""
-    import apkscan.core.jadx_index as ji
+    import fxapk.core.jadx_index as ji
 
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("语法关之前绝不允许触碰 store")
@@ -344,8 +344,8 @@ def test_diff_engine_exception_folds_to_stable_reason(
 ) -> None:
     """★fail-open 加强：diff_index_structure 抛带路径的 JadxIndexError →
     reason 折叠为稳定码，JSON 不含路径/异常文本。"""
-    import apkscan.core.jadx_structure_diff as jsd
-    from apkscan.core.jadx_index import JadxIndexError
+    import fxapk.core.jadx_structure_diff as jsd
+    from fxapk.core.jadx_index import JadxIndexError
 
     cache_root, key = _build_real_index(tmp_path, "boom", _OLD_JAVA)
 

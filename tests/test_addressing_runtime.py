@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.config import runtime_chain
+from fxapk.config import runtime_chain
 
 SAMPLE = "a" * 64
 BODY = b'{"host":"api.example.test"}'
@@ -90,7 +90,7 @@ def test_absence_requires_original_attributed_business_round():
 
 @pytest.mark.parametrize("complete,declared,scope", [(True, len(BODY), "full"), (True, 1, "prefix"), (False, len(BODY), "prefix"), (True, None, "prefix")])
 def test_body_collector_archives_exact_bytes(tmp_path, complete, declared, scope):
-    from apkscan.dynamic.config_artifacts import ConfigBodyCollector
+    from fxapk.dynamic.config_artifacts import ConfigBodyCollector
     collector = ConfigBodyCollector(tmp_path, CONTEXT)
     payload = {"type": "fxapk-config-body-v1", "source_url": "https://cfg.example.test/config", "method": "GET", "observed_at": "2026-11-09T00:00:00Z",
                "response_headers": {"Content-Type": "application/json"}, "declared_length": declared, "body_complete": complete}
@@ -109,7 +109,7 @@ def test_different_full_bodies_are_only_content_differs():
 
 
 def test_body_collector_does_not_trust_payload_context_or_exceed_budget(tmp_path, monkeypatch):
-    from apkscan.dynamic import config_artifacts
+    from fxapk.dynamic import config_artifacts
     monkeypatch.setattr(config_artifacts, "MAX_BODY_BYTES", 4)
     collector = config_artifacts.ConfigBodyCollector(tmp_path, CONTEXT)
     collector.on_message({"type": "send", "payload": {"type": "fxapk-config-body-v1", "sample_sha256": "b" * 64}}, BODY)
@@ -122,7 +122,7 @@ def test_body_collector_does_not_trust_payload_context_or_exceed_budget(tmp_path
 
 def test_body_observer_is_opt_in_and_report_retains_records(tmp_path):
     import json
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
     source = capture._build_injection_source(selected_hooks=("config_body",), enable_tls_unpinning=False)
     assert "fxapk-config-body-v1" in source
     assert "fxapk-config-body-v1" not in capture._build_injection_source(enable_tls_unpinning=False)
@@ -139,15 +139,15 @@ def test_malformed_event_identity_cannot_crash_or_verify(key):
 
 def test_merge_rechecks_body_and_scopes_rounds_without_changing_evidence(tmp_path):
     import json
-    from apkscan.core.models import Endpoint, Report
-    from apkscan.dynamic import merge
-    from apkscan.report.digest import build_digest
+    from fxapk.core.models import Endpoint, Report
+    from fxapk.dynamic import merge
+    from fxapk.report.digest import build_digest
     body = tmp_path / "config_artifacts" / f"{SHA}.bin"
     body.parent.mkdir()
     body.write_bytes(BODY)
     record = {**CONTEXT, "sha256": SHA, "hash_scope": "full", "verified": True,
               "source_url": "https://cfg.example.test/config", "stored_path": f"config_artifacts/{SHA}.bin", "received_bytes": len(BODY), "declared_length": len(BODY)}
-    from apkscan.dynamic.addressing_events import AddressingEventCollector
+    from fxapk.dynamic.addressing_events import AddressingEventCollector
     collector = AddressingEventCollector(tmp_path, CONTEXT)
     for event in events():
         collector.on_message({"type": "send", "payload": {**event, "type": "fxapk-addressing-event-v1"}}, None)
@@ -186,8 +186,8 @@ def test_merge_rechecks_body_and_scopes_rounds_without_changing_evidence(tmp_pat
     body.write_bytes(BODY)
     payload["config_body_artifacts"][0]["capture_ref"] = "round-2"
     path.write_text(json.dumps(payload), encoding="utf-8")
-    from apkscan.dynamic.event_origin import RuntimePayload
-    from apkscan.dynamic.addressing import project_addressing
+    from fxapk.dynamic.event_origin import RuntimePayload
+    from fxapk.dynamic.addressing import project_addressing
     changed = path.read_bytes()
     report.meta["runtime_observations"][0]["capture_ref"] = "capture:" + hashlib.sha256(changed).hexdigest()
     project_addressing(report, RuntimePayload(payload, changed, str(path)))
@@ -195,7 +195,7 @@ def test_merge_rechecks_body_and_scopes_rounds_without_changing_evidence(tmp_pat
 
 
 def test_body_archive_rejects_ancestor_links(tmp_path):
-    from apkscan.dynamic.config_artifacts import ConfigBodyCollector
+    from fxapk.dynamic.config_artifacts import ConfigBodyCollector
     # The archive must inspect all path components; an output ancestor can redirect writes.
     import os
     link, outside = tmp_path / "link", tmp_path / "outside"
@@ -218,7 +218,7 @@ def test_manual_probe_emits_binary_body_contract_without_second_read(name):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js unavailable")
-    source = (Path(__file__).parents[1] / "apkscan/dynamic/frida_probes" / name).read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "fxapk/dynamic/frida_probes" / name).read_text(encoding="utf-8")
     program = """
 const vm = require('vm'), assert = require('assert');
 const messages = [];
@@ -263,7 +263,7 @@ def test_body_observer_preserves_original_result_exception_and_call_count():
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js unavailable")
-    source = (Path(__file__).parents[1] / "apkscan/dynamic/frida_js/config_body_hook.js").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "fxapk/dynamic/frida_js/config_body_hook.js").read_text(encoding="utf-8")
     program = """
 const vm = require('vm'), assert = require('assert');
 let reads=0, responses=0, fail=false, messages=[];
@@ -302,7 +302,7 @@ def test_manual_probe_unreadable_body_retains_an_incomparable_observation(name):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js unavailable")
-    source = (Path(__file__).parents[1] / "apkscan/dynamic/frida_probes" / name).read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "fxapk/dynamic/frida_probes" / name).read_text(encoding="utf-8")
     program = """
 const vm=require('vm'), assert=require('assert');
 const method={}, callClass={execute:{overload:()=>method}}, messages=[];

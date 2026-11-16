@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from apkscan.dynamic import capture
+from fxapk.dynamic import capture
 
 
 def _fake_adb_capture(route: str | None, wifi: str | None):

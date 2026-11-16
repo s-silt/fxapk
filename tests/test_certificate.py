@@ -14,8 +14,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.certificate import CertificateAnalyzer
-from apkscan.core.models import (
+from fxapk.analyzers.certificate import CertificateAnalyzer
+from fxapk.core.models import (
     AnalyzerResult,
     CertInfo,
     Confidence,

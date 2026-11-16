@@ -11,16 +11,16 @@
 
 from __future__ import annotations
 
-from apkscan.core import infra
-from apkscan.core.models import (
+from fxapk.core import infra
+from fxapk.core.models import (
     Confidence,
     Endpoint,
     Lead,
     LeadCategory,
     Report,
 )
-from apkscan.report import html as report_html
-from apkscan.report import letters
+from fxapk.report import html as report_html
+from fxapk.report import letters
 
 # 两个落地 IP：第一个五层齐全（且 org 里埋了 HTML 注入载荷），第二个只有 deferred。
 _ATTRIBUTION = {

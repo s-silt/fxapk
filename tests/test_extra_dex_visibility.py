@@ -12,8 +12,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from apkscan.core import apk as apk_mod
-from apkscan.core.apk import _load_extra_dex, build_extra_dex_report
+from fxapk.core import apk as apk_mod
+from fxapk.core.apk import _load_extra_dex, build_extra_dex_report
 
 
 def test_load_extra_dex_reports_failures_with_digest(tmp_path: Path) -> None:
@@ -100,8 +100,8 @@ def test_pipeline_writes_extra_dex_visibility_into_meta() -> None:
     """
     from types import SimpleNamespace
 
-    from apkscan.core.models import AnalysisConfig
-    from apkscan.core.pipeline import _PipelineState, _stage_degradation_flags
+    from fxapk.core.models import AnalysisConfig
+    from fxapk.core.pipeline import _PipelineState, _stage_degradation_flags
 
     state = _PipelineState(
         ctx=SimpleNamespace(  # type: ignore[arg-type]  # 本 stage 只 getattr 这几项
@@ -124,7 +124,7 @@ def test_pipeline_writes_extra_dex_visibility_into_meta() -> None:
 
 def test_cli_reports_after_loading_not_before(capsys: Any) -> None:
     """★不能在加载前宣布"N 个并入"——那是替结果打包票。"""
-    from apkscan.cli import _echo_extra_dex_result
+    from fxapk.cli import _echo_extra_dex_result
 
     _echo_extra_dex_result({
         "requested": 33, "loaded": 10, "failed": 23,

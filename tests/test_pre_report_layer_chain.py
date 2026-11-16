@@ -5,19 +5,19 @@ import hashlib
 import json
 from pathlib import Path
 
-from apkscan.analyzers.endpoints import EndpointsAnalyzer
-from apkscan.core.case_package import create_case_package
-from apkscan.core.enrichment import _run_enrichment
-from apkscan.core.models import (
+from fxapk.analyzers.endpoints import EndpointsAnalyzer
+from fxapk.core.case_package import create_case_package
+from fxapk.core.enrichment import _run_enrichment
+from fxapk.core.models import (
     AnalysisConfig, Confidence, Endpoint, EnrichmentResult, Evidence, EvidenceScope,
     Lead, LeadCategory, Report,
 )
-from apkscan.core.phase2.inventory import build_coverage_skeleton, build_inventory
-from apkscan.core.phase2.preparation import prepare_case_materials
-from apkscan.core.registry import BaseEnricher
-from apkscan.core.report_io import write_report
-from apkscan.core.webctx import load_web_evidence
-from apkscan.dynamic.merge import merge_runtime_endpoints
+from fxapk.core.phase2.inventory import build_coverage_skeleton, build_inventory
+from fxapk.core.phase2.preparation import prepare_case_materials
+from fxapk.core.registry import BaseEnricher
+from fxapk.core.report_io import write_report
+from fxapk.core.webctx import load_web_evidence
+from fxapk.dynamic.merge import merge_runtime_endpoints
 
 
 class SyntheticSource(BaseEnricher):
@@ -74,7 +74,7 @@ def make_chain_case(root: Path, *, samples: int = 2, targets: int = 3) -> Path:
             Evidence(source="runtime", location="synthetic/flow", observed_at=1700000000.0)])
                    for host in hosts]
         merge_runtime_endpoints(report, runtime)
-        from apkscan.core.pipeline import _dedup_endpoints
+        from fxapk.core.pipeline import _dedup_endpoints
         report.endpoints = _dedup_endpoints(report.endpoints + web_domains)
         for ep in report.endpoints:
             report.leads.append(Lead(category=LeadCategory.DOMAIN, value=ep.value,

@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from apkscan.core.models import ADVICE_INVESTIGATE
-from apkscan.core.redact import mask, redact_value
-from apkscan.report.digest import build_digest
+from fxapk.core.models import ADVICE_INVESTIGATE
+from fxapk.core.redact import mask, redact_value
+from fxapk.report.digest import build_digest
 
 
 def test_mask_short_and_long() -> None:
@@ -72,7 +72,7 @@ def test_jsonl_warns_that_it_does_not_redact(tmp_path) -> None:
 
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     rep = tmp_path / "report.json"
     rep.write_text(json.dumps({
@@ -97,7 +97,7 @@ def test_diff_warns_that_it_does_not_redact(tmp_path) -> None:
 
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     old = tmp_path / "old.json"
     new = tmp_path / "new.json"
@@ -126,8 +126,8 @@ def test_every_listed_unredacted_command_actually_warns(tmp_path) -> None:
 
     from typer.testing import CliRunner
 
-    from apkscan import cli
-    from apkscan.core.redact import UNREDACTED_AGENT_COMMANDS
+    from fxapk import cli
+    from fxapk.core.redact import UNREDACTED_AGENT_COMMANDS
 
     rep = tmp_path / "r.json"
     rep.write_text(json.dumps({
@@ -204,7 +204,7 @@ def test_cli_digest_redacts_without_any_flag(tmp_path) -> None:
 
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     rep = tmp_path / "report.json"
     rep.write_text(json.dumps({
@@ -227,7 +227,7 @@ def test_cli_digest_redacts_without_any_flag(tmp_path) -> None:
 
 def test_unredacted_command_docs_stay_in_sync() -> None:
     """Keep raw-output inventories in agent/usage docs and link concise READMEs to them."""
-    import apkscan.core.redact as redact_mod
+    import fxapk.core.redact as redact_mod
 
     root = Path(__file__).resolve().parents[1]
     agents = (root / "AGENTS.md").read_text(encoding="utf-8")

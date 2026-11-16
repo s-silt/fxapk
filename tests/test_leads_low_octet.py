@@ -13,15 +13,15 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import corpus
-from apkscan.core.attribution import classify_network
-from apkscan.core.closure.targets import _select_targets_with_stats
-from apkscan.core.infra import ADVICE_INVESTIGATE, ADVICE_REVIEW
-from apkscan.core.leads import _is_tenant_hosting_asn, build_endpoint_leads
-from apkscan.core.models import Confidence, Endpoint, Evidence, Report
-from apkscan.network.categories import CAT_CLOUD, CAT_TELECOM
-from apkscan.report.json import _to_jsonable
-from apkscan.report.letters import build_letters
+from fxapk.core import corpus
+from fxapk.core.attribution import classify_network
+from fxapk.core.closure.targets import _select_targets_with_stats
+from fxapk.core.infra import ADVICE_INVESTIGATE, ADVICE_REVIEW
+from fxapk.core.leads import _is_tenant_hosting_asn, build_endpoint_leads
+from fxapk.core.models import Confidence, Endpoint, Evidence, Report
+from fxapk.network.categories import CAT_CLOUD, CAT_TELECOM
+from fxapk.report.json import _to_jsonable
+from fxapk.report.letters import build_letters
 
 #: 裸字面证据：值本身出现在字符串表里，既无端口也无 URL 语境——降级判据的触发前提。
 _BARE = "23.21.5.12"  # leak-scan: allow 低段位降级判据的形态夹具：本测试测的就是「四段≤32、与版本号同形」，换文档段即失去被测形态
@@ -234,8 +234,8 @@ def test_reservation_survives_report_round_trip() -> None:
     读侧不还原这个字段，保留意见就在落盘那一刻蒸发——分析时标了、发函时没了，
     与"写进 notes 但出口不读 notes"是同一种断裂，只是断在另一处。
     """
-    from apkscan.core.report_io import report_from_dict
-    from apkscan.report.json import to_dict
+    from fxapk.core.report_io import report_from_dict
+    from fxapk.report.json import to_dict
 
     ep = _ip_ep(_BARE, _CLOUD_ASN)
     rep = Report(

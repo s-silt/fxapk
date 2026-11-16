@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from apkscan.enrichers import _rate_limit as rates
+from fxapk.enrichers import _rate_limit as rates
 
 
 class Clock:
@@ -99,7 +99,7 @@ def test_unconfigured_transport_preserves_legacy_behavior(monkeypatch):
 
 @pytest.mark.parametrize("kind", ["session_get", "session_post", "module_get", "module_post"])
 def test_real_http_wrappers_admit_before_request_and_share_429_feedback(monkeypatch, kind):
-    from apkscan.enrichers import _http
+    from fxapk.enrichers import _http
     gate, _ = controller(requests=10, period_seconds=1, max_wait_seconds=1)
     monkeypatch.setattr(rates, "controller_for", lambda _: gate)
     calls = []
@@ -137,5 +137,5 @@ def test_shared_group_conflicting_limits_fail_closed(monkeypatch):
 
 
 def test_local_throttle_is_not_reported_as_remote_provider_failure_type():
-    from apkscan.core.enrichment import safe_error_type
+    from fxapk.core.enrichment import safe_error_type
     assert safe_error_type(rates.RequestThrottled("local_rate_limit_wait_exceeded")) == "local_rate_limit"

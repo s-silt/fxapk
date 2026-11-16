@@ -11,8 +11,8 @@
 
 from __future__ import annotations
 
-from apkscan.core import leakscan
-from apkscan.core.leakscan import _BULK_EXEMPTION_THRESHOLD as LIMIT
+from fxapk.core import leakscan
+from fxapk.core.leakscan import _BULK_EXEMPTION_THRESHOLD as LIMIT
 
 
 def _diff(lines: list[str], path: str = "tests/test_x.py") -> str:

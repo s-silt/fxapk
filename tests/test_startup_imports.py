@@ -1,4 +1,4 @@
-"""启动提速回归锁：``import apkscan.cli`` 不得在导入期拉起重模块。
+"""启动提速回归锁：``import fxapk.cli`` 不得在导入期拉起重模块。
 
 背景：apk.py 曾在模块导入期调 ``_silence_androguard_logging()`` → import loguru（连带 asyncio）
 ~114ms，cli.py 又顶层 import pipeline（连带 registry）；非分析命令（--version/doctor/gui 子进程）
@@ -33,14 +33,14 @@ def _modules_after_import(import_stmt: str) -> set[str]:
 
 
 def test_import_cli_does_not_pull_heavy_modules() -> None:
-    mods = _modules_after_import("import apkscan.cli")
+    mods = _modules_after_import("import fxapk.cli")
     # 这些只应在真正分析时才加载，不该在 import cli 时就拉起。
     for heavy in ("androguard", "loguru", "asyncio"):
         assert heavy not in mods, f"启动期不应加载 {heavy}（启动提速回归）"
 
 
 def test_import_apk_does_not_pull_loguru() -> None:
-    """import apkscan.core.apk 不应在导入期 import loguru（androguard 日志静默已延迟）。"""
-    mods = _modules_after_import("import apkscan.core.apk")
+    """import fxapk.core.apk 不应在导入期 import loguru（androguard 日志静默已延迟）。"""
+    mods = _modules_after_import("import fxapk.core.apk")
     assert "loguru" not in mods
     assert "androguard" not in mods

@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import infra
-from apkscan.core.leads import _vendor_sdk_constant, _vendor_sdk_libraries, build_endpoint_leads
-from apkscan.core.models import Endpoint, Evidence
+from fxapk.core import infra
+from fxapk.core.leads import _vendor_sdk_constant, _vendor_sdk_libraries, build_endpoint_leads
+from fxapk.core.models import Endpoint, Evidence
 
 _INV = infra.ADVICE_INVESTIGATE
 _SKIP = infra.ADVICE_SKIP

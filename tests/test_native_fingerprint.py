@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import hashlib
 
-from apkscan.analyzers.native_fingerprint import NativeFingerprintAnalyzer
-from apkscan.core import corpus
+from fxapk.analyzers.native_fingerprint import NativeFingerprintAnalyzer
+from fxapk.core import corpus
 from tests.conftest import FakeContext
 
 _SO_A = b"\x7fELF" + b"family-core-bytes" * 100      # 合成"核心业务 .so"
@@ -220,7 +220,7 @@ def test_app_so_paths_keeps_business_code_containers() -> None:
 
     ★变异验证：删掉 app_so_paths 里的 is_app_own_code 豁免，本测试必红。
     """
-    from apkscan.analyzers._common import app_so_paths
+    from fxapk.analyzers._common import app_so_paths
 
     class _Ctx:
         def native_libs(self):
@@ -287,7 +287,7 @@ def test_shared_native_libs_degrades_when_rules_unavailable(monkeypatch) -> None
     def _boom(*_a, **_k):
         raise OSError("boom")
 
-    monkeypatch.setattr("apkscan.core.registry.load_rules", _boom)
+    monkeypatch.setattr("fxapk.core.registry.load_rules", _boom)
     try:
         assert corpus.native_anchor_weakness(_PACKER_SO) is None
         assert corpus.native_anchor_policy_snapshot()["status"] == "partial"
@@ -363,7 +363,7 @@ def test_corpus_cli_help_marks_shared_values_as_candidates() -> None:
     """用户可见 help 必须阻止把共享证书、配置或 native 命中直接升级为归属结论。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     runner = CliRunner()
     seen = runner.invoke(cli.app, ["corpus", "seen", "--help"])
@@ -389,7 +389,7 @@ def test_cli_seen_by_so_sha256(tmp_path) -> None:
 
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     def _report(sample: str, so_bytes: bytes) -> dict:
         return {
@@ -438,7 +438,7 @@ def test_cli_shared_native_surfaces_weak_anchor(tmp_path) -> None:
 
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     packer_blob = b"\x7fELF" + b"packer-runtime" * 30
 

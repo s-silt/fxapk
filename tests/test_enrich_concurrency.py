@@ -24,12 +24,12 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.enrichers._ipinfo as ipinfo_mod
-import apkscan.enrichers.asn as asn_mod
-from apkscan.core import enrichment, pipeline
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.core.registry import BaseEnricher
-from apkscan.enrichers.asn import AsnEnricher
+import fxapk.enrichers._ipinfo as ipinfo_mod
+import fxapk.enrichers.asn as asn_mod
+from fxapk.core import enrichment, pipeline
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.core.registry import BaseEnricher
+from fxapk.enrichers.asn import AsnEnricher
 
 
 # --- 假富化器 --------------------------------------------------------------

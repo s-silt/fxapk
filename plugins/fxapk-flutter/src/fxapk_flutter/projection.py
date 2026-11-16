@@ -7,9 +7,9 @@ import json
 from pathlib import Path
 import shutil
 
-from apkscan.core.models import Endpoint, Evidence
-from apkscan.core.report_schema import report_schema_info
-from apkscan.report.json import _to_jsonable
+from fxapk.core.models import Endpoint, Evidence
+from fxapk.core.report_schema import report_schema_info
+from fxapk.report.json import _to_jsonable
 
 from .evidence import FlutterError, contained, digest, read, reject_overlapping_paths, save, validate_bundle
 from .index import url_candidates

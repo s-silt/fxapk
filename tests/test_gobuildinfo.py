@@ -11,7 +11,7 @@ import base64
 import hashlib
 import json
 
-from apkscan.core.gobuildinfo import (
+from fxapk.core.gobuildinfo import (
     _INFO_END,
     _INFO_START,
     fingerprint_embedded_secret,
