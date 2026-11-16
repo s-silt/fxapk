@@ -5,6 +5,10 @@
 
 ## 待发布
 
+- `capture --mode` 非法取值的报错文案补上 `no-proxy`；capture 模式与 `--antidetect` 档位改由 `apkscan.dynamic.capabilities` 单一定义，测试拦截手写副本。
+- 静默 except 基线契约（`tests/contracts/test_silent_except_baseline.py`）：存量逐条登记理由，新增即失败；归因时序预扫、socket 快照解析、指纹规则正则、phase2 报告重读、corpus 校验路径解析、富化子进程清理等处的失败改为写日志，避免工具失败被读成阴性。
+- pytest 默认只收集 `tests/`。
+
 ## 1.27.0 — 2026-11-09
 
 - 远程配置制品与证据绑定：远程配置制品新增字段路径（`fields`，JSONPath 或 `$text[偏移]`）、变换序列（`transforms`，不记录 key/IV 字节）、材料完整性（`material`，`Content-Encoding` 非 `identity` 时为 `unknown`）与缺口（`gaps`）；端点证据带 `provenance`（`artifact_sha256`、`field_paths`）与 `locator`（仅相对 `stored_path`）；`config-probe` 合并时向已有端点追加去重证据，不再丢弃。
