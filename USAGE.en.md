@@ -6,6 +6,8 @@ Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `pytho
 
 ## Command table
 
+This reference lists public core top-level commands and groups. Use each entry’s `--help` for subcommands and flags. Optional plugin entries require separate installation; hidden compatibility entries need not be listed.
+
 | Goal | Command |
 |---|---|
 | Analyse an APK (**online by default** for attribution) | `fxapk analyze app.apk --out out`; add `--offline` for no network |
@@ -37,6 +39,23 @@ Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `pytho
 | DEX string-reference query and import (optional fxapk-asc isolated worker) | `fxapk dex query` / `fxapk dex import`, see [plugins/fxapk-asc/README.md](plugins/fxapk-asc/README.md) |
 | Flutter AOT static analysis (optional plugin, offline container) | `fxapk flutter capabilities` / `analyze` / `query` / `attach`, see [plugins/fxapk-flutter/README.md](plugins/fxapk-flutter/README.md) |
 | Recognition line (read-only/offline; exit 4 when the promotion gate fails) | `fxapk recognize reanalysis` / `labels validate` / `split build\|validate` / `evaluate` |
+| Evidence-request letter drafts (raw values; require human review) | `fxapk letters out/app.json --out out` |
+| Derive a capture plan from a static report; does not capture traffic | `fxapk capture-plan --help` |
+| Inspect, restore and replay lead decisions | `fxapk lead --help` |
+| Lossless evidence archives and offline verification | `fxapk evidence --help` |
+| Scan changes for sensitive literal values | `fxapk leak-scan --help` |
+| Compare a resource with a candidate; plan by default, never confirm origin | `fxapk origin-check --help` |
+| Build a ledger from existing probe logs (raw output) | `fxapk probe-leads --help` |
+| Extract a ledger from an existing PCAP (raw output) | `fxapk pcap-leads --help` |
+| Enumerate date-derived configuration-channel candidates offline | `fxapk config-channel --help` |
+| Retrieve configuration objects; execution requires explicit authorization flags | `fxapk config-probe --help` |
+| Compare declared and observed port normalization | `fxapk port-normalize --help` |
+| Merge verified web observations into a new derived report | `fxapk supplement-web --help` |
+| Compatibility entry point; prefer `fxapk case phase2` | `fxapk phase2 --help` |
+| Device unpacking; authorized devices only, help does not execute | `fxapk unpack --help` |
+| Repackage/reinstall on an authorized device; help does not execute | `fxapk repackage --help` |
+| Bounded explicitly authorized checks (plan only by default) | `fxapk probe-target out/app.json --target <IP-or-domain> --business-host <domain> --allow <IP-or-domain>`; execution additionally requires `--execute --mode authorized-active`, at most six requests, raw archives |
+| Read-only offline addressing-chain evaluation | `fxapk addressing-evaluate <manifest.json> --out <result.json>`; verifies supplied hashes, missing independent labels remain unknown |
 
 ## Privacy and output
 

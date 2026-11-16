@@ -6,6 +6,8 @@
 
 ## 命令表
 
+核心公开顶层命令及命令组在此列出；完整子命令和参数以各项 `--help` 为准。可选插件条目需另行安装，隐藏兼容入口不要求列出。
+
 | 想干什么 | 命令 |
 |---|---|
 | 分析一个 APK（**默认联网**查归属） | `fxapk analyze app.apk --out out`；不联网加 `--offline` |
@@ -39,6 +41,21 @@
 | DEX 字符串引用查询与导入（可选 fxapk-asc 隔离 worker） | `fxapk dex query` / `fxapk dex import`，见 [plugins/fxapk-asc/README.md](plugins/fxapk-asc/README.md) |
 | Flutter AOT 静态分析（可选插件，离线容器） | `fxapk flutter capabilities` / `analyze` / `query` / `attach`，见 [plugins/fxapk-flutter/README.md](plugins/fxapk-flutter/README.md) |
 | 识别线（只读/离线；晋级门未过退出码 4） | `fxapk recognize reanalysis` / `labels validate` / `split build\|validate` / `evaluate` |
+| 调证/协查文书草稿（原值输出，需人工复核） | `fxapk letters out/app.json --out out` |
+| 静态报告生成抓包计划；不执行抓包 | `fxapk capture-plan --help` |
+| 线索查看、人工恢复与重放 | `fxapk lead --help` |
+| 无损证据归档与离线校验 | `fxapk evidence --help` |
+| 检查改动中的敏感字面值 | `fxapk leak-scan --help` |
+| 资源与候选地址比较；默认只计划，不确认 Origin | `fxapk origin-check --help` |
+| 从已有探针日志生成台账（原值输出） | `fxapk probe-leads --help` |
+| 从已有 PCAP 提取台账（原值输出） | `fxapk pcap-leads --help` |
+| 离线枚举日期派生的配置通道候选 | `fxapk config-channel --help` |
+| 配置对象取回；执行需显式授权参数 | `fxapk config-probe --help` |
+| 配置声明端口与实测端口的归一化比对 | `fxapk port-normalize --help` |
+| 并入已验证网页观察，派生新报告 | `fxapk supplement-web --help` |
+| 兼容入口；优先使用 `fxapk case phase2` | `fxapk phase2 --help` |
+| 真机脱壳；仅已授权设备，查看参数不执行 | `fxapk unpack --help` |
+| 重打包/装回设备；仅已授权设备，查看参数不执行 | `fxapk repackage --help` |
 
 ## 隐私与输出
 
