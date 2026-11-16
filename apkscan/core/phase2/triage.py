@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import logging
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
@@ -19,6 +20,8 @@ from urllib.parse import urlsplit
 from apkscan.core.json_io import read_json_bounded
 
 from . import inventory as pc
+
+logger = logging.getLogger(__name__)
 
 
 _COLLECTIONS: tuple[str, ...] = ("leads", "endpoints", "findings")
@@ -198,7 +201,9 @@ def _read_parent_versions(
             report, report_raw = read_json_bounded(
                 report_path, limits.max_report_bytes, limits.max_json_depth
             )
-        except (OSError, UnicodeError, ValueError, OverflowError):
+        except (OSError, UnicodeError, ValueError, OverflowError) as exc:
+            # inventory 已接纳这份报告，重读失败会让该包的 parent 版本缺席，必须留痕。
+            logger.warning("[phase2] 重读已登记报告失败，跳过 %s：%s", name, type(exc).__name__)
             continue
         if not isinstance(report, dict):
             continue

@@ -2093,7 +2093,8 @@ def verify_reports(corpus_dir: str | Path) -> dict:
             try:
                 referenced.add(target.resolve())
             except OSError:
-                pass
+                # 解析不了就记不进 referenced，下方 orphan 扫描可能把它误报成孤儿。
+                logger.warning("verify 无法解析报告路径，孤儿结果可能偏多：%s", target, exc_info=True)
         data: bytes | None = None
         if target is None:
             row |= {

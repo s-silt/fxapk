@@ -691,7 +691,11 @@ def load_socket_tables(paths: "Sequence[Path | str]") -> tuple["UidSockets | Non
         for fn in (parse_socket_timeline, parse_uid_sockets):
             try:
                 got = fn(text)
-            except Exception:  # noqa: BLE001 - 单个文件解析失败不阻断其余
+            except Exception as exc:  # noqa: BLE001 - 单个文件解析失败不阻断其余
+                logger.warning(
+                    "[socket_attr] %s 解析 %s 失败，改试其他解析器：%s",
+                    fn.__name__, Path(raw).name, type(exc).__name__,
+                )
                 continue
             if got.entries and (best is None or len(got.entries) > len(best.entries)):
                 best = got
