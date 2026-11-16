@@ -235,3 +235,17 @@ fxapk flutter attach flutter-result --report analysis/sample.json --out new-revi
 ## License
 
 [MIT](LICENSE)
+
+### 新报告的版本来源记录
+
+pipeline 新生成的报告在 `meta.tool_version_provenance` 保存版本观察：
+`effective_version` 对应原有 `meta.tool_version`；`selected_source` 为
+`distribution`、`source` 或无法对应当前解析结果时的 `unknown`；`source_version`
+是随源码和 wheel 携带的构建声明，`distribution_version` 是已安装分发元数据。
+缺失值为 `null`，`distribution_status` 区分 `available` / `missing` / `invalid` / `error`。
+`consistency` 为 `consistent` / `conflict` / `unverifiable`，缺少任一版本证据不算一致。
+冲突时每份新报告生成边界记录一次警告，提示检查该字段和 `selfcheck`。
+
+这只是版本声明的一致性记录，不证明源码未修改或发行构建可信。原有 `tool_version`
+仍优先使用分发版本，corpus 身份与入库策略不变。读取、导出旧报告不会用当前环境补填
+此记录，也不迁移、重键或重写历史证据；旧报告没有该字段表示当时未记录。
