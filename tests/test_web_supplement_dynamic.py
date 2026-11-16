@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pytest
 
-from apkscan.core.models import (
+from fxapk.core.models import (
     ADVICE_INVESTIGATE,
     ADVICE_REVIEW,
     DOWNGRADE_EVIDENCE_SCOPE,
@@ -22,17 +22,17 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
 )
-from apkscan.core.web_supplement_runtime import (
+from fxapk.core.web_supplement_runtime import (
     SOURCE,
     CaptureWindowObserver,
     apply_verified,
     make_capture_observer,
     static_web_arguments,
 )
-from apkscan.core.web_supplement import project_for_digest
-from apkscan.dynamic.auto import _web_observer_factory, _window_callbacks
-from apkscan.dynamic import capture as capture_module
-from apkscan.dynamic.capture import overlap_web_observation
+from fxapk.core.web_supplement import project_for_digest
+from fxapk.dynamic.auto import _web_observer_factory, _window_callbacks
+from fxapk.dynamic import capture as capture_module
+from fxapk.dynamic.capture import overlap_web_observation
 
 
 class _Proc:
@@ -116,7 +116,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, plugin: _Plugin | None) -> None:
             return None, "plugin_unavailable"
         return plugin, ""
 
-    monkeypatch.setattr("apkscan.core.web_supplement_runtime._load_plugin", load)
+    monkeypatch.setattr("fxapk.core.web_supplement_runtime._load_plugin", load)
 
 
 def _verified_runtime_bundle(tmp_path: Path) -> dict[str, Any]:

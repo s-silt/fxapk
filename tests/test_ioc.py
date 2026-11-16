@@ -1,4 +1,4 @@
-"""apkscan.report.ioc 单测 + fxapk export CLI 薄包装测试。
+"""fxapk.report.ioc 单测 + fxapk export CLI 薄包装测试。
 
 ioc 纯函数层把 report.json 的 leads 扁平成 IOC 行（给 MISP/i2/Maltego 跨案碰撞），
 铁律：纯函数禁 print/typer、对坏输入容错返回空、绝不抛；CLI 命令包 try/except、坏输入
@@ -13,9 +13,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core import infra
-from apkscan.report import ioc
+from fxapk import cli
+from fxapk.core import infra
+from fxapk.report import ioc
 from tests import doc_addresses
 
 runner = CliRunner()

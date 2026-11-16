@@ -484,7 +484,7 @@ def _scan_file(src: str, path: str, wanted: set[int], key: str, report: ShapeRep
 
 
 def collect_shapes(
-    root: Path, key: str, *, prod_dir: str = "apkscan",
+    root: Path, key: str, *, prod_dir: str = "fxapk",
     scan: meta_scan.ScanResult | None = None,
 ) -> ShapeReport:
     """全仓收集一个 meta 键的生产者形状。写点由 meta_scan（有测试的地基）发现，

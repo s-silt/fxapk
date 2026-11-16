@@ -14,9 +14,9 @@ from typing import Any
 
 import pytest
 
-from apkscan.config.fetch import FetchResult
-from apkscan.core import config_probe_run
-from apkscan.core.config_probe_run import ProbeRunResult, run_plan
+from fxapk.config.fetch import FetchResult
+from fxapk.core import config_probe_run
+from fxapk.core.config_probe_run import ProbeRunResult, run_plan
 
 _PLAN = {
     "candidates": [
@@ -53,7 +53,7 @@ def no_network(monkeypatch: pytest.MonkeyPatch):
     """把下载函数换成替身并交出它——凡是发包都会被记下来。"""
     def _install(responses: dict[str, FetchResult]) -> _Recorder:
         rec = _Recorder(responses)
-        monkeypatch.setattr("apkscan.config.fetch.fetch_config_object", rec)
+        monkeypatch.setattr("fxapk.config.fetch.fetch_config_object", rec)
         return rec
 
     return _install
@@ -105,7 +105,7 @@ def test_fetched_but_empty_is_not_the_same_as_never_fetched(no_network, monkeypa
         domains: tuple[str, ...] = ()
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Empty())
     result = run_plan(_PLAN, authorized=True)
 
@@ -146,7 +146,7 @@ def test_undecoded_is_not_the_same_as_decoded_and_empty(no_network, monkeypatch)
         ips: tuple[str, ...] = ()
 
     monkeypatch.setattr(
-        "apkscan.config.decode.decode_config_blob",
+        "fxapk.config.decode.decode_config_blob",
         lambda raw, **_k: _Opaque() if raw.startswith(b"\x9c") else _PlainEmpty(),
     )
     by_url = {o.url: o for o in run_plan(_PLAN, authorized=True).outcomes}
@@ -177,7 +177,7 @@ def test_decoded_flag_is_always_emitted_for_fetched_outcomes(no_network, monkeyp
         domains: tuple[str, ...] = ()
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Opaque())
     d = next(o for o in run_plan(_PLAN, authorized=True).outcomes
              if o.url == url).to_dict()
@@ -196,7 +196,7 @@ def test_hit_yields_endpoints_marked_as_config_not_runtime(no_network, monkeypat
         domains = ("c2.example.org",)
         ips = ("198.51.100.7",)  # leak-scan: allow 测试夹具：RFC5737 文档地址段
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Found())
     result = run_plan(_PLAN, authorized=True)
 
@@ -220,7 +220,7 @@ def test_decode_failure_still_counts_as_fetched(no_network, monkeypatch) -> None
     def _boom(*_a, **_k):
         raise ValueError("坏包")
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob", _boom)
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob", _boom)
     outcome = next(o for o in run_plan(_PLAN, authorized=True).outcomes if o.url == ok_url)
     assert outcome.status == "undecoded"
     assert outcome.decoded is False
@@ -234,7 +234,7 @@ def test_fetch_exception_is_contained_to_one_candidate(no_network, monkeypatch) 
             raise OSError("连接重置")
         return FetchResult(url, False, None, 404, "HTTP 404")
 
-    monkeypatch.setattr("apkscan.config.fetch.fetch_config_object", _boom)
+    monkeypatch.setattr("fxapk.config.fetch.fetch_config_object", _boom)
     result = run_plan(_PLAN, authorized=True)
     assert len(result.outcomes) == 2
     assert all(o.status == "failed" for o in result.outcomes)
@@ -283,7 +283,7 @@ def test_pipeline_shares_the_same_endpoint_construction() -> None:
     各写一份的话，迟早在 source 标记或 stored_path 形状上分叉，而报告读起来都"正常"。
     ★变异验证：把 pipeline 里的别名改回独立实现，本测试必红。
     """
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     assert pipeline._config_endpoint is config_probe_run.config_endpoint
     assert pipeline._archive_blob is config_probe_run.archive_blob
@@ -302,9 +302,9 @@ def test_archive_failure_does_not_lose_the_leads(tmp_path: Path, no_network, mon
         domains = ("c2.example.org",)
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Found())
-    monkeypatch.setattr("apkscan.core.config_probe_run.atomic_write_bytes",
+    monkeypatch.setattr("fxapk.core.config_probe_run.atomic_write_bytes",
                         lambda *_a, **_k: (_ for _ in ()).throw(OSError("只读")))
     outcome = next(o for o in
                    run_plan(_PLAN, authorized=True, archive_dir=tmp_path).outcomes
@@ -324,7 +324,7 @@ def test_archive_writes_the_raw_bytes(tmp_path: Path, no_network, monkeypatch) -
         domains = ("c2.example.org",)
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Found())
     outcome = next(o for o in
                    run_plan(_PLAN, authorized=True, archive_dir=tmp_path).outcomes
@@ -351,7 +351,7 @@ def test_stored_path_locates_the_archived_bytes(tmp_path: Path, no_network, monk
         domains = ("c2.example.org",)
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Found())
     monkeypatch.chdir(tmp_path)  # 复刻在工作目录里跑 `--archive blobs` 的形态
     outcome = next(o for o in
@@ -382,7 +382,7 @@ def test_cli_default_is_a_dry_run(tmp_path: Path, no_network, capsys) -> None:
     """★CLI 侧的门：不加 --authorized-active 就只列不发。"""
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
+    from fxapk.cli import app
 
     rec = no_network({})
     res = CliRunner().invoke(app, ["config-probe", str(_report_with_plan(tmp_path))])
@@ -397,7 +397,7 @@ def test_cli_merges_endpoints_without_claiming_runtime(
     """回灌进 report.json 的端点标 remote-config，且不重复既有端点。"""
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
+    from fxapk.cli import app
 
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
@@ -410,7 +410,7 @@ def test_cli_merges_endpoints_without_claiming_runtime(
         domains = ("c2.example.org", "known.example.com")
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Found())
     report = _report_with_plan(tmp_path)
     res = CliRunner().invoke(app, ["config-probe", str(report),
@@ -443,8 +443,8 @@ def test_cli_merge_produces_leads_reachable_by_the_real_exports(
 
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
-    from apkscan.report import ioc
+    from fxapk.cli import app
+    from fxapk.report import ioc
 
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
@@ -456,7 +456,7 @@ def test_cli_merge_produces_leads_reachable_by_the_real_exports(
         domains = ("c2-from-config.example.org",)
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Found())
     report = _report_with_plan(tmp_path)
     res = CliRunner().invoke(app, ["config-probe", str(report),
@@ -492,9 +492,9 @@ def test_cli_merge_quarantines_repack_sample_domains(
 
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
-    from apkscan.core.leads import _VERDICT_REPACK_SUSPECTED
-    from apkscan.report import ioc
+    from fxapk.cli import app
+    from fxapk.core.leads import _VERDICT_REPACK_SUSPECTED
+    from fxapk.report import ioc
 
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
@@ -506,7 +506,7 @@ def test_cli_merge_quarantines_repack_sample_domains(
         domains = ("api.vendor-from-config.example.org",)
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Found())
 
     report = tmp_path / "repack_report.json"
@@ -555,8 +555,8 @@ def test_cli_merge_feeds_the_control_chain_artifacts_key(
 
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
-    from apkscan.config.chain import build_control_chains
+    from fxapk.cli import app
+    from fxapk.config.chain import build_control_chains
 
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
@@ -568,7 +568,7 @@ def test_cli_merge_feeds_the_control_chain_artifacts_key(
         domains = ("chain.example.org",)
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Found())
     report = _report_with_plan(tmp_path)
     res = CliRunner().invoke(app, ["config-probe", str(report),
@@ -606,7 +606,7 @@ def test_cli_merge_marks_the_run_as_active(tmp_path: Path, no_network, monkeypat
 
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
+    from fxapk.cli import app
 
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"x", 200, None)})
@@ -618,7 +618,7 @@ def test_cli_merge_marks_the_run_as_active(tmp_path: Path, no_network, monkeypat
         domains = ("m.example.org",)
         ips: tuple[str, ...] = ()
 
-    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+    monkeypatch.setattr("fxapk.config.decode.decode_config_blob",
                         lambda *_a, **_k: _Found())
     report = _report_with_plan(tmp_path)
     payload = _json.loads(report.read_text(encoding="utf-8"))
@@ -643,7 +643,7 @@ def test_cli_refuses_to_write_into_a_different_sample(
 
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
+    from fxapk.cli import app
 
     rec = no_network({})
     src = _report_with_plan(tmp_path)
@@ -666,7 +666,7 @@ def test_cli_reports_a_missing_plan_instead_of_pretending(tmp_path: Path) -> Non
     """没有预案就说没有——不能静默成功让人以为探过了。"""
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
+    from fxapk.cli import app
 
     path = tmp_path / "report.json"
     path.write_text(json.dumps({"meta": {}}), encoding="utf-8")

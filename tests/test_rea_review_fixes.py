@@ -11,20 +11,20 @@ import json
 
 import pytest
 
-from apkscan.core.case_package import (
+from fxapk.core.case_package import (
     CasePackageError,
     CasePackageErrorCode,
     create_case_package,
     verify_case_package,
 )
-from apkscan.core.closure.targets import select_targets
-from apkscan.core.evidence_scope import (
+from fxapk.core.closure.targets import select_targets
+from fxapk.core.evidence_scope import (
     project_serialized_closure,
     project_serialized_leads,
 )
-from apkscan.core.report_io import report_from_dict
-from apkscan.report.digest import build_digest
-from apkscan.report.ioc import leads_to_ioc_rows
+from fxapk.core.report_io import report_from_dict
+from fxapk.report.digest import build_digest
+from fxapk.report.ioc import leads_to_ioc_rows
 
 _HISTORY = {
     "history": [
@@ -315,9 +315,9 @@ def test_r3_normalized_match_keeps_independent_evidence(
 def test_f2_current_round_brand_evidence_does_not_restamp_history(tmp_path) -> None:  # noqa: ANN001
     import base64
 
-    from apkscan.core.models import Report
-    from apkscan.dynamic.capture_provenance import capture_scope
-    from apkscan.dynamic.merge import decrypt_runtime_messages
+    from fxapk.core.models import Report
+    from fxapk.dynamic.capture_provenance import capture_scope
+    from fxapk.dynamic.merge import decrypt_runtime_messages
 
     def event(name: str) -> dict[str, str]:
         raw = json.dumps({"webName": name}).encode("utf-8")
@@ -353,7 +353,7 @@ def test_f2_current_round_brand_evidence_does_not_restamp_history(tmp_path) -> N
 
 
 def test_f1_supplement_html_keeps_lead_warnings(tmp_path) -> None:  # noqa: ANN001
-    from apkscan.core.web_supplement_report import supplement_report
+    from fxapk.core.web_supplement_report import supplement_report
 
     report_path = tmp_path / "in" / "report.json"
     report_path.parent.mkdir()

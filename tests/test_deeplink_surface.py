@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.deeplink_surface import DeeplinkSurfaceAnalyzer
-from apkscan.core.models import Severity
+from fxapk.analyzers.deeplink_surface import DeeplinkSurfaceAnalyzer
+from fxapk.core.models import Severity
 from tests.conftest import FakeContext
 
 _NS = 'xmlns:android="http://schemas.android.com/apk/res/android"'

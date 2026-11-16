@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from apkscan.attribution.graph import build_infrastructure_graph
+from fxapk.attribution.graph import build_infrastructure_graph
 from tests.attribution_graph_fakes import (
     cert,
     domain,

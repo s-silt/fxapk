@@ -8,21 +8,21 @@
 <p align="center"><a href="README.md">中文</a> &nbsp;·&nbsp; <strong>English</strong></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.25.0">v1.25.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/latest">Latest release</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
-`fxapk` (alias `apkscan`) extracts leads from APKs, authorized device traffic and saved web evidence, recording sources, attribution and coverage gaps. It is a Python CLI; no exe or GUI is provided.
+`fxapk` extracts leads from APKs, authorized device traffic and saved web evidence, recording sources, attribution and coverage gaps. It is a Python CLI; no exe or GUI is provided.
 
 ## Quick start
 
 ```bash
-python -m pip install "fxapk==1.25.0"
+python -m pip install fxapk
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-Static analysis needs no device. Download artifacts and checksums from the [release](https://github.com/s-silt/fxapk/releases/tag/v1.25.0); see [USAGE.en.md](USAGE.en.md) for source installation, credentials and optional tools.
+Static analysis needs no device. Download artifacts and checksums from the [latest release](https://github.com/s-silt/fxapk/releases/latest); see [USAGE.en.md](USAGE.en.md) for source installation, credentials and optional tools.
 
 ## Common tasks
 

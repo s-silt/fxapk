@@ -13,9 +13,9 @@ import zipfile
 
 import pytest
 
-from apkscan.core.integrity import evidence_id
-from apkscan.core.models import AnalysisConfig
-from apkscan.report.json import _to_jsonable
+from fxapk.core.integrity import evidence_id
+from fxapk.core.models import AnalysisConfig
+from fxapk.report.json import _to_jsonable
 
 
 @pytest.fixture
@@ -215,8 +215,8 @@ def test_bundle_tamper_rejected_before_query(flutter, prepared, tmp_path):
 
 
 def test_stage_modes_and_missing_plugin(flutter, monkeypatch):
-    from apkscan.core import flutter_analysis as stage
-    from apkscan.core.pipeline import _PipelineState, _analysis_health
+    from fxapk.core import flutter_analysis as stage
+    from fxapk.core.pipeline import _PipelineState, _analysis_health
     state = _PipelineState(ctx=SimpleNamespace(apk_path="synthetic.apk"), config=AnalysisConfig(), platform="android", capabilities=set())
     state.meta["app_framework"] = {"identified": True, "name": "flutter", "own_code_libs": ["libapp.so"]}
     monkeypatch.setattr(stage, "discover_plugins", lambda: ([], []))
@@ -229,8 +229,8 @@ def test_stage_modes_and_missing_plugin(flutter, monkeypatch):
 
 
 def test_stage_uses_plugin_and_preserves_static_provenance(flutter, prepared, tmp_path, monkeypatch):
-    from apkscan.core import flutter_analysis as stage
-    from apkscan.core.pipeline import _PipelineState
+    from fxapk.core import flutter_analysis as stage
+    from fxapk.core.pipeline import _PipelineState
     cfg = AnalysisConfig(out_dir=str(tmp_path / "pipeline"), flutter="required", flutter_toolchain=str(prepared.config))
     state = _PipelineState(ctx=SimpleNamespace(apk_path=str(prepared.apks[0]), sample_sha256=flutter.evidence.digest(prepared.apks[0])), config=cfg, platform="android", capabilities=set())
     state.meta["app_framework"] = {"identified": True, "name": "flutter"}
@@ -274,7 +274,7 @@ def test_anonymous_closure_signature(flutter, tmp_path):
 
 
 def test_timeout_removes_only_owned_container(flutter, tmp_path, monkeypatch):
-    from apkscan.core.proctree import OwnedRun
+    from fxapk.core.proctree import OwnedRun
     calls = []
     entry = {"binary": str(tmp_path / "tool"), "image_id": "sha256:" + "a" * 64}
     def run(argv, **kwargs):
@@ -294,7 +294,7 @@ def test_timeout_removes_only_owned_container(flutter, tmp_path, monkeypatch):
 
 
 def test_missing_container_cleanup_is_not_success(flutter, tmp_path, monkeypatch):
-    from apkscan.core.proctree import OwnedRun
+    from fxapk.core.proctree import OwnedRun
     monkeypatch.setattr(flutter.runtime, "run_owned", lambda argv, **_: OwnedRun(
         0 if argv[1] == "run" else 1, "", "", False, True, True, False, ()))
     with pytest.raises(flutter.evidence.FlutterError, match="container_cleanup_failed"):
@@ -302,7 +302,7 @@ def test_missing_container_cleanup_is_not_success(flutter, tmp_path, monkeypatch
 
 
 def test_digest_exposes_counts_not_raw_strings():
-    from apkscan.report.digest import build_digest
+    from fxapk.report.digest import build_digest
     report = {"meta": {"flutter_analysis": {"status": "ok", "coverage": {"functions": 2, "source_namespaces": ["private"]},
                                               "compatibility": {"dart_version": "0.0.0"}}}, "leads": [], "endpoints": [], "findings": []}
     result = build_digest(report)["flutter_analysis"]
@@ -328,7 +328,7 @@ def test_unknown_string_escape_rejected(flutter):
 @pytest.mark.parametrize("key,value", [("flutter", "bad"), ("flutter", []), ("flutter_timeout", True),
                                       ("flutter_timeout", 0), ("flutter_toolchain", 1)])
 def test_parser_bridge_validates_flutter_config(key, value):
-    from apkscan.core.parser_worker import _config_from_request
+    from fxapk.core.parser_worker import _config_from_request
     config = asdict(AnalysisConfig())
     assert _config_from_request(config).flutter == "auto"
     config[key] = value
@@ -386,8 +386,8 @@ def test_attach_reads_one_report_snapshot(flutter, prepared, tmp_path, monkeypat
 
 
 def _stub_pipeline(monkeypatch, plugin=None):
-    from apkscan.core import flutter_analysis as stage
-    from apkscan.core import pipeline
+    from fxapk.core import flutter_analysis as stage
+    from fxapk.core import pipeline
 
     def _analyzers(state):
         state.meta["app_framework"] = {"identified": True, "name": "flutter"}
@@ -401,7 +401,7 @@ def _stub_pipeline(monkeypatch, plugin=None):
 
 
 def _fake_plugin(calls):
-    from apkscan.core.models import Endpoint, Evidence
+    from fxapk.core.models import Endpoint, Evidence
 
     class _FakePlugin:
         name = "flutter"
@@ -425,8 +425,8 @@ def _fake_plugin(calls):
 
 
 def test_pipeline_flutter_stage_runs_plugin(fake_ctx, tmp_path, monkeypatch):
-    from apkscan.core import pipeline
-    from apkscan.core.models import evidence_source_is_direct, has_case_evidence
+    from fxapk.core import pipeline
+    from fxapk.core.models import evidence_source_is_direct, has_case_evidence
 
     calls = []
     _stub_pipeline(monkeypatch, _fake_plugin(calls))
@@ -437,7 +437,7 @@ def test_pipeline_flutter_stage_runs_plugin(fake_ctx, tmp_path, monkeypatch):
     candidate = next(e for e in report.endpoints if e.value == "https://example.invalid/api")
     assert evidence_source_is_direct(candidate.evidences[0].source) is False
     assert has_case_evidence(candidate.evidences) is False
-    from apkscan.core.admission import evaluate_evidence
+    from fxapk.core.admission import evaluate_evidence
     assert evaluate_evidence(candidate.evidences[0], "closure_candidate").state == "review"
     assert evaluate_evidence(candidate.evidences[0], "passive_enrichment").state == "review"
     evidence = _to_jsonable(candidate)["evidences"][0]
@@ -446,7 +446,7 @@ def test_pipeline_flutter_stage_runs_plugin(fake_ctx, tmp_path, monkeypatch):
 
 
 def test_pipeline_flutter_off_skips_plugin(fake_ctx, tmp_path, monkeypatch):
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     calls = []
     _stub_pipeline(monkeypatch, _fake_plugin(calls))
@@ -459,7 +459,7 @@ def test_pipeline_flutter_off_skips_plugin(fake_ctx, tmp_path, monkeypatch):
 
 
 def test_pipeline_flutter_missing_plugin_marks_partial(fake_ctx, tmp_path, monkeypatch):
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     _stub_pipeline(monkeypatch)
     report = pipeline.run(fake_ctx, AnalysisConfig(online=False, flutter="auto", out_dir=str(tmp_path)))
@@ -471,8 +471,8 @@ def test_pipeline_flutter_missing_plugin_marks_partial(fake_ctx, tmp_path, monke
 
 
 def _stub_cli(monkeypatch, report):
-    import apkscan.cli as cli
-    import apkscan.core.pipeline as pipeline
+    import fxapk.cli as cli
+    import fxapk.core.pipeline as pipeline
 
     monkeypatch.setattr(cli, "_adb_owned_at_start", lambda: False)
     monkeypatch.setattr(cli.device, "has_device", lambda: False)
@@ -484,8 +484,8 @@ def _stub_cli(monkeypatch, report):
 def test_cli_flutter_required_exit4_preserves_report(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
-    from apkscan.core.models import Report
+    from fxapk.cli import app
+    from fxapk.core.models import Report
 
     report = Report(package_name="synthetic.test", meta={"flutter_analysis": {"status": "failed"}},
                     leads=[], endpoints=[], findings=[], analyzer_status=[], analysis_status="complete")
@@ -504,7 +504,7 @@ def test_cli_flutter_required_exit4_preserves_report(tmp_path, monkeypatch):
 def test_cli_flutter_invalid_mode_exit2(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
+    from fxapk.cli import app
 
     _stub_cli(monkeypatch, None)
     apk = tmp_path / "synthetic.apk"
@@ -517,8 +517,8 @@ def test_cli_flutter_invalid_mode_exit2(tmp_path, monkeypatch):
 def test_cli_flutter_auto_preserves_report_without_gate(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
-    from apkscan.cli import app
-    from apkscan.core.models import Report
+    from fxapk.cli import app
+    from fxapk.core.models import Report
 
     report = Report(package_name="synthetic.test", meta={"flutter_analysis": {"status": "failed"}},
                     leads=[], endpoints=[], findings=[], analyzer_status=[], analysis_status="complete")
@@ -577,7 +577,7 @@ def test_analyze_rejects_overlapping_cache(flutter, prepared, tmp_path, monkeypa
 
 
 def test_pipeline_flutter_apk_identity_mismatch(flutter, prepared, fake_ctx, tmp_path, monkeypatch):
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     _stub_pipeline(monkeypatch, flutter.plugin.FlutterPlugin())
     fake_ctx.apk_path = str(prepared.apks[1])
@@ -593,8 +593,8 @@ def test_pipeline_flutter_apk_identity_mismatch(flutter, prepared, fake_ctx, tmp
 
 
 def test_pipeline_flutter_rejects_dishonest_source(fake_ctx, tmp_path, monkeypatch):
-    from apkscan.core import pipeline
-    from apkscan.core.models import Endpoint, Evidence
+    from fxapk.core import pipeline
+    from fxapk.core.models import Endpoint, Evidence
 
     class _DishonestPlugin:
         name = "flutter"
@@ -617,7 +617,7 @@ def test_pipeline_flutter_rejects_dishonest_source(fake_ctx, tmp_path, monkeypat
 
 
 def test_pipeline_flutter_missing_snapshot_identity(fake_ctx, tmp_path, monkeypatch):
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     calls = []
     _stub_pipeline(monkeypatch, _fake_plugin(calls))
@@ -631,9 +631,9 @@ def test_pipeline_flutter_missing_snapshot_identity(fake_ctx, tmp_path, monkeypa
 def test_cli_input_changed_preserves_snapshot(tmp_path, monkeypatch, dynamic):
     from typer.testing import CliRunner
 
-    import apkscan.cli as cli
-    from apkscan.cli import app
-    from apkscan.core.models import Report
+    import fxapk.cli as cli
+    from fxapk.cli import app
+    from fxapk.core.models import Report
 
     original = hashlib.sha256(b"original").hexdigest()
     replaced = hashlib.sha256(b"replaced").hexdigest()

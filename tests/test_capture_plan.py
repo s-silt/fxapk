@@ -1,4 +1,4 @@
-"""apkscan.dynamic.capture_plan 的单测。
+"""fxapk.dynamic.capture_plan 的单测。
 
 capture_plan 读静态 report.json 的规避信号（加固/endpoint数/加密配方/自建IM），按"探针之外的
 抓包方法目录"的决策树，输出**针对该样本的抓包打法**（起手式带外 pcap → 按规避类型选方法）。
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.dynamic import capture_plan
+from fxapk.dynamic import capture_plan
 
 
 def _joined(steps: list[str]) -> str:
@@ -231,7 +231,7 @@ def test_decide_capture_reads_report_dataclass() -> None:
     修前 _as_dict 只认 dict、对 dataclass 返回 {} → packed/crypto_recipe 信号全丢、决策
     静默退默认(接线空转)。此处断言决策真的从 Report dataclass 抽到了信号。
     """
-    from apkscan.core.models import Lead, LeadCategory, Report
+    from fxapk.core.models import Lead, LeadCategory, Report
 
     report = Report(
         package_name="com.x",

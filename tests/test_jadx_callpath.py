@@ -1,6 +1,6 @@
 """P1-B trace_callpath：确定性 BFS 路径查询 + ledger 投影（阴性绝不产观察）。
 
-先于实现编写（红态契约；导入 apkscan.core.jadx_callpath 在实现落地前收集即失败）。
+先于实现编写（红态契约；导入 fxapk.core.jadx_callpath 在实现落地前收集即失败）。
 行号断言基于手工数行的合成源码。设计见
 docs/superpowers/specs/2026-08-16-p1b-jadx-callpath-design.md。
 """
@@ -13,16 +13,16 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import jadx_callpath as jcp
-from apkscan.core import judgment_ledger as jl
-from apkscan.core import recognition_contract as rc
-from apkscan.core.jadx_callpath import (
+from fxapk.core import jadx_callpath as jcp
+from fxapk.core import judgment_ledger as jl
+from fxapk.core import recognition_contract as rc
+from fxapk.core.jadx_callpath import (
     CallPath,
     CallPathEdge,
     CallPathLimits,
     trace_callpath,
 )
-from apkscan.core.jadx_index import (
+from fxapk.core.jadx_index import (
     INDEX_SCHEMA_VERSION,
     DexInput,
     DexRole,
@@ -38,7 +38,7 @@ from apkscan.core.jadx_index import (
     scan_java_sources,
     verify_dex_inputs,
 )
-from apkscan.core.jadx_index_ledger import (
+from fxapk.core.jadx_index_ledger import (
     CallPathQueryResult,
     IndexQueryState,
     append_jadx_callpath_projection,
@@ -628,7 +628,7 @@ def test_callpath_wrong_action_type_rejected_both_directions() -> None:
     assert exc.value.code == "wrong_action_type"
 
     callpath_events, callpath_action = _authorized_ledger("jadx-callpath-query")
-    from apkscan.core.jadx_index_ledger import IndexQueryResult
+    from fxapk.core.jadx_index_ledger import IndexQueryResult
 
     with pytest.raises(JadxIndexError) as exc:
         append_jadx_query_projection(

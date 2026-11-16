@@ -1,7 +1,7 @@
 """自带 DoH / HTTPDNS 解析检测：取证可见性信号。零真实样本，合成标记。"""
 from __future__ import annotations
 
-from apkscan.analyzers.dns_bypass import DnsBypassAnalyzer, assess_markers
+from fxapk.analyzers.dns_bypass import DnsBypassAnalyzer, assess_markers
 from tests.conftest import FakeContext
 
 _FID = "APP-MANAGED-DNS-RESOLUTION"
@@ -55,7 +55,7 @@ def test_clean_app_not_flagged():
 
 def test_finding_is_low_severity_visibility_signal():
     """★这是能力/可见性信号不是罪状：语料里约三分之一样本具备，严重度不得拔高。"""
-    from apkscan.core.models import Severity
+    from fxapk.core.models import Severity
     result = _analyze(dex_strings=["application/dns-message"])
     f = next(f for f in result.findings if f.id == _FID)
     assert f.severity == Severity.LOW

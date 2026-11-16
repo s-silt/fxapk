@@ -1,6 +1,6 @@
 """P1-C 结构 diff：三分类、重载多重集、absence_claimable 封锁、fail-closed、确定性。
 
-先于实现编写（红态契约；导入 apkscan.core.jadx_structure_diff 在实现落地前收集即失败）。
+先于实现编写（红态契约；导入 fxapk.core.jadx_structure_diff 在实现落地前收集即失败）。
 设计见本地 docs/superpowers/specs/2026-08-16-p1c-structure-diff-design.md（不入 git）。
 """
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.jadx_index import (
+from fxapk.core.jadx_index import (
     DexInput,
     DexRole,
     IndexBuildResult,
@@ -26,7 +26,7 @@ from apkscan.core.jadx_index import (
     scan_java_sources,
     verify_dex_inputs,
 )
-from apkscan.core.jadx_structure_diff import (
+from fxapk.core.jadx_structure_diff import (
     ChangedMethod,
     MethodRegion,
     StructuralDiff,

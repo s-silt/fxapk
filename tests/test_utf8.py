@@ -1,4 +1,4 @@
-"""apkscan.core.utf8 单测：enable_utf8_runtime 设 env / 幂等 / 不抛 / 不覆盖用户设定；
+"""fxapk.core.utf8 单测：enable_utf8_runtime 设 env / 幂等 / 不抛 / 不覆盖用户设定；
 utf8_subprocess_env 兜上 UTF-8 标记。全程不依赖真控制台（reconfigure/ctypes 被 try 包裹）。"""
 
 from __future__ import annotations
@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from apkscan.core.utf8 import enable_utf8_runtime, utf8_subprocess_env
+from fxapk.core.utf8 import enable_utf8_runtime, utf8_subprocess_env
 
 
 def test_enable_utf8_runtime_sets_env(monkeypatch: pytest.MonkeyPatch) -> None:

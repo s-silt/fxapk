@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.analyzers import jadx
-from apkscan.analyzers.jadx import JadxAnalyzer
-from apkscan.core import proctree
+from fxapk.analyzers import jadx
+from fxapk.analyzers.jadx import JadxAnalyzer
+from fxapk.core import proctree
 from tests.conftest import FakeContext
 
 
@@ -71,7 +71,7 @@ def _writes(java_body: str, returncode: int = 0, stderr: str = ""):
 
 def _java_vis(meta: dict) -> str:
     """按 visibility 消费端口径求 java 面档位（消费端接线由 test_pipeline_stages 锁真入口）。"""
-    from apkscan.core import visibility
+    from fxapk.core import visibility
 
     return visibility.assess({"meta": dict(meta)})["sources"]["java"]["visibility"]
 
@@ -256,7 +256,7 @@ def test_extra_dex_paths_fed_to_jadx_through_snapshot(monkeypatch, tmp_path) -> 
     ctx 类型契约。曾漏带 extra_dex_paths：消费方 getattr 兜底静默退化成空列表，串行单测
     （FakeContext 自带字段）全绿、实际使用路径 jadx 拿到 0 个 dump DEX。本测把消费方直接钉在
     build_snapshot 的产物上，快照再漏字段立即变红。"""
-    from apkscan.core.snapshot import build_snapshot
+    from fxapk.core.snapshot import build_snapshot
 
     apk = tmp_path / "app.apk"
     apk.write_bytes(b"PK\x03\x04placeholder")

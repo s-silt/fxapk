@@ -16,7 +16,7 @@ fxapk 需要 Python 3.11+ 及 [pyproject.toml](pyproject.toml) 声明的运行�
 | corpus、Phase-1 包与 Phase-2 CLI | 工作树外的案件/语料库目录；人工复核 |
 | `intake-fetch`、`evidence-review`、`recover-runtime` 与恢复观察脚本 | 已保存材料、兼容 fxfetch CLI、`review` extra；JADX 和授权设备工具按任务准备 |
 
-内置探针位于 `apkscan/dynamic/frida_probes/`：`coldstart-config`、`objstore-config`、
+内置探针位于 `fxapk/dynamic/frida_probes/`：`coldstart-config`、`objstore-config`、
 `native-ssl`、`tls-keylog`、`sms-forward-outbound`、`mqtt-xmpp-im`、
 `telegram-mtproto`、`push-c2-inbound`。其他探针、MCP 服务、自定义表格模板和消息桥接需自备。
 包内脚本不等于主机工具或设备侧 frida-server 已安装，也不表示所有探针都会自动运行。
@@ -58,7 +58,7 @@ fxapk enrich batch -t targets.txt -o enrich_out
 | 离线定点复核与 AArch64 模拟 | `python -m pip install "fxapk[review]==1.25.0"`，包含 pyelftools、Capstone 5、cryptography、Unicorn 2；不安装 fxfetch/JADX/adb/Frida |
 | 实验串案排序器 | `python -m pip install "fxapk[ml]"`；仍须通过独立标签与训练门 |
 | jadx、adb、tshark、Frida、frida-dexdump | [工具链安装与路径配置](tools/TOOLCHAIN.md)、[固定 Python 工具版本](tools/toolchain-requirements.txt) |
-| Android UI 插件 | 独立 `fxapk-android-ui 0.1.2`（核心 1.18.1+）；外部 Android CLI、adb 与授权设备；见 [完整指南](ANDROID-UI.md) |
+| Android UI 插件 | 独立 `fxapk-android-ui`（核心 2.0.0+）；外部 Android CLI、adb 与授权设备；见 [完整指南](ANDROID-UI.md) |
 | mitmproxy | 按工具链文档安装在独立环境，并显式映射可执行文件 |
 
 默认 `capture`/`auto` 仍要求 Frida；显式 `capture --mode floor-only` 不用 Frida，

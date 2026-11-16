@@ -4,8 +4,8 @@ import json
 import pytest
 import requests
 
-from apkscan.core.models import Endpoint
-from apkscan.enrichers.multisource import FofaPassiveEnricher
+from fxapk.core.models import Endpoint
+from fxapk.enrichers.multisource import FofaPassiveEnricher
 
 UPSTREAM = {"error": True, "errmsg": "[官方错误信息] [-403] 访问权限不足"}
 EMPTY = {"error": False, "results": [], "size": 0}

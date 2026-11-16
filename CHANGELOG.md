@@ -5,6 +5,21 @@
 
 ## 待发布
 
+## 2.0.0 — 2026-11-17
+
+- **破坏性变更**：只保留 `fxapk` 一个名字。
+  - 去掉 `apkscan` 命令别名，脚本里的 `apkscan <子命令>` 改为 `fxapk <子命令>`。
+  - 导入包由 `apkscan` 改为 `fxapk`，不提供兼容层：`import apkscan` / `python -m apkscan.cli` 改为 `import fxapk` / `python -m fxapk.cli`；日志记录器名随之变为 `fxapk.*`。
+  - 可选插件随之升级：fxapk-android-ui、fxapk-rea、fxapk-flutter 升为 0.2.0 并要求核心 `>=2.0.0`；旧版插件仍导入 `apkscan`，装在 2.0.0 上会加载失败，需一并升级；新插件不能装在 1.x 上。fxapk-asc 不导入核心，维持 0.1.2。
+  - 有意保持不变，以免旧证据和本地状态失效：Frida 消息类型与控制台标签（`apkscan-crypto` 等）、归因图稳定 ID 的命名空间、工作目录缓存 `.apkscan_cache/`、重打包签名库 `~/.apkscan/`、设备侧导出目录 `/data/local/tmp/apkscan_db`、测试用环境变量 `APKSCAN_*`。
+  - 规则文件注释里的包名同步更新，`ruleset_digest` 因此与 1.x 不同；规则判据未变。
+  - `unpack` 的 playbook 提示改为 `fxapk analyze`。
+- 发版门禁：tag 发版在上传前用即将上传的同一个 wheel 跑 `tools/release_smoke.py`（合成 APK 离线分析 → digest → 证据打包/校验 → 损坏副本必须非零），失败不上传、不重新构建；CI 的 wheel 冒烟跑同一脚本。
+- 文档：README 与 Android UI 指南的安装示例不再锁旧版本（此前 PyPI 页面仍示例 `fxapk==1.25.0`），版本专属内容只由发行说明模板按 tag 生成，测试拦截手写版本号。
+- Phase-2：triage 重读 inventory 已登记报告时，缺失、读不回、字节与登记哈希不符或顶层非对象，不再只写日志：写入 `triage.json` / `queue.md` 的 `issues`（`phase2_report_missing|unreadable|hash_mismatch|not_object`），`triage` / `decide*` / `materialize` / `replay` 默认退出 1，`gate` 的 G1 阻断。此前这类失败退出 0，并会让该 parent 被误判为跨包 advice 冲突。
+- 新增 `DEVICE-ACCEPTANCE.md`：授权专用测试机的手动验收步骤与记录项，只在采集路径改动或发版前跑，不进 CI。
+- 验证范围为合成回归、跨平台 CI 与发版前 wheel 冒烟；未做真机验收。
+
 ## 1.27.1 — 2026-11-16
 
 - `capture --mode` 非法取值的报错文案补上 `no-proxy`；capture 模式与 `--antidetect` 档位改由 `apkscan.dynamic.capabilities` 单一定义，测试拦截手写副本。

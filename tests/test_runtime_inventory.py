@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import runtime_inventory as inv
-from apkscan.core.closure import (
+from fxapk.core import runtime_inventory as inv
+from fxapk.core.closure import (
     CLOSURE_COMPLETE,
     CLOSURE_FAILED,
     CLOSURE_PARTIAL,
@@ -24,7 +24,7 @@ from apkscan.core.closure import (
     evaluate_capture_quality,
     evaluate_closure,
 )
-from apkscan.core.models import Confidence, Endpoint, Evidence, Lead, LeadCategory, Report
+from fxapk.core.models import Confidence, Endpoint, Evidence, Lead, LeadCategory, Report
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +429,7 @@ _STATUS_RANK = {"failed": 0, "partial": 1, "complete": 2}
 
 def _quality_of(report: Report) -> dict:
     """按生产路径求采集质量：_capture_meta 取输入 → evaluate_capture_quality 分档。"""
-    from apkscan.core.closure.gates import _capture_meta
+    from fxapk.core.closure.gates import _capture_meta
 
     return evaluate_capture_quality(_capture_meta(report))
 

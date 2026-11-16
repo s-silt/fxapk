@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import pytest
 
-import apkscan.enrichers._ipinfo as ipinfo_mod
-from apkscan.core.enrichment import ProviderResponseError, safe_error_type
-from apkscan.enrichers._ipinfo import lookup_ip, lookup_ips_batch
+import fxapk.enrichers._ipinfo as ipinfo_mod
+from fxapk.core.enrichment import ProviderResponseError, safe_error_type
+from fxapk.enrichers._ipinfo import lookup_ip, lookup_ips_batch
 
 
 class _FakeResponse:

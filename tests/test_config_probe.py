@@ -1,7 +1,7 @@
 """配置探测预案：把配置接口路径 × 后端域名拼成候选 URL。零真实数据、零网络。"""
 from __future__ import annotations
 
-from apkscan.core import config_probe as cp
+from fxapk.core import config_probe as cp
 
 
 def _meta(paths: list[str], hosts: list[tuple[str, float]], **extra) -> dict:
@@ -90,7 +90,7 @@ def test_pipeline_stage_registered():
     """只写模块不接线 = 没做。"""
     import inspect
 
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     assert '_run_stage(state, "config_probe_plan"' in inspect.getsource(pipeline)
 
@@ -102,7 +102,7 @@ def test_visibility_runs_after_plan_so_it_can_advise_on_it():
     """
     import inspect
 
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     src = inspect.getsource(pipeline)
     assert src.index('_run_stage(state, "config_probe_plan"') < src.index(

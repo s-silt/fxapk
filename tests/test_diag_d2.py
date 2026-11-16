@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.models import Report
-from apkscan.dynamic import auto, capture
-from apkscan.dynamic.capture_sequence import complement_decryption, run_rounds
+from fxapk.core.models import Report
+from fxapk.dynamic import auto, capture
+from fxapk.dynamic.capture_sequence import complement_decryption, run_rounds
 
 _SAMPLE = "ab" * 32
 

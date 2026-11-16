@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.cli import app
+from fxapk.cli import app
 from tests.test_rea_attach import _case, _cdp_bundle
 
 

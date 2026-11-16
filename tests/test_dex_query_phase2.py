@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.dex_query import DexQueryLimits, import_receipt, query_apk
-from apkscan.core.integrity import evidence_id
-from apkscan.core.models import Endpoint
-from apkscan.core.phase2.evidence_map import PackageEvidenceIndex
-from apkscan.core.phase2.inventory import (
+from fxapk.core.dex_query import DexQueryLimits, import_receipt, query_apk
+from fxapk.core.integrity import evidence_id
+from fxapk.core.models import Endpoint
+from fxapk.core.phase2.evidence_map import PackageEvidenceIndex
+from fxapk.core.phase2.inventory import (
     InventoryLimits,
     Phase1EvidenceInventory,
     ReviewCandidate,

@@ -7,10 +7,10 @@ from collections.abc import Iterator, Mapping
 import pytest
 import requests
 
-from apkscan.core.enrichment import enrich_selected_targets, safe_error_type
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.core.registry import BaseEnricher
-from apkscan.enrichers.multisource import (
+from fxapk.core.enrichment import enrich_selected_targets, safe_error_type
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.core.registry import BaseEnricher
+from fxapk.enrichers.multisource import (
     AbuseIpDbPassiveEnricher,
     CensysPassiveEnricher,
     FofaPassiveEnricher,
@@ -30,7 +30,7 @@ from apkscan.enrichers.multisource import (
     _safe_error_type,
     configured_case_close_enrichers,
 )
-from apkscan.enrichers.shodan import ShodanEnricher
+from fxapk.enrichers.shodan import ShodanEnricher
 
 
 class _CaseOnlyEnricher(BaseEnricher):
@@ -832,7 +832,7 @@ def test_all_multisource_adapters_are_passive_case_close_only() -> None:
 
 
 def test_all_multisource_adapters_are_registered_for_runtime_discovery() -> None:
-    from apkscan.core.registry import discover_enrichers
+    from fxapk.core.registry import discover_enrichers
 
     expected = {enricher.name for enricher in configured_case_close_enrichers()}
     discovered = {enricher.name for enricher in discover_enrichers()}
@@ -1170,7 +1170,7 @@ def test_abuseipdb_does_not_apply_to_domains() -> None:
 def test_abuseipdb_is_not_wired_into_five_layer_attribution() -> None:
     """★有意不进五层归属：``isp`` 是 ISP 名而非 BGP AS 组织名，硬映射进 origin_network
     等于造证据。信誉分只作旁证留在 enrichment。"""
-    from apkscan.core.closure.layers import _passive_hosting_evidence
+    from fxapk.core.closure.layers import _passive_hosting_evidence
 
     providers, services, locations = _passive_hosting_evidence(
         {"abuseipdb": {"isp": "Example Hosting Ltd", "country_code": "SC", "source": "abuseipdb"}}

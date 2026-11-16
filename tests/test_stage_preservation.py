@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from apkscan.core.models import (
+from fxapk.core.models import (
     ANALYSIS_STATUS_COMPLETE,
     ANALYSIS_STATUS_PARTIAL,
     Confidence,
@@ -20,9 +20,9 @@ from apkscan.core.models import (
     Report,
     Severity,
 )
-from apkscan.core.pipeline import _dedup_endpoints, _dedup_leads
-from apkscan.dynamic.auto import _adopt_unpacked_report
-from apkscan.report import json as report_json
+from fxapk.core.pipeline import _dedup_endpoints, _dedup_leads
+from fxapk.dynamic.auto import _adopt_unpacked_report
+from fxapk.report import json as report_json
 
 
 def _report(**kwargs: object) -> Report:
@@ -400,7 +400,7 @@ def test_dedup_keeps_every_distinct_evidence() -> None:
 
 
 def test_skipped_web_receipt_keeps_prior_success_and_nonhardening_finding() -> None:
-    from apkscan.core import web_supplement as ws
+    from fxapk.core import web_supplement as ws
 
     original = _report(
         meta={"web_supplement": ws._record({"execute": True}, status="executed", raw_sha256=["a" * 64])},

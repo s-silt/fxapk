@@ -10,7 +10,7 @@ try {
     $probe = @'
 import json, sys, sysconfig
 from pathlib import Path
-from apkscan.core import tools
+from fxapk.core import tools
 names = ['adb', 'jadx', 'apktool', 'tshark', 'frida', 'frida-ps', 'frida-dexdump',
          'mitmdump', 'mitmproxy', 'mitmweb']
 selected = {}

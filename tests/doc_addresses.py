@@ -35,7 +35,7 @@ import ipaddress
 
 import pytest
 
-from apkscan.dynamic import pcap_ingest, probe_ingest
+from fxapk.dynamic import pcap_ingest, probe_ingest
 
 __all__ = [
     "DOC_BACKEND_IP",

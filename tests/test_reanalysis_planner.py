@@ -1,4 +1,4 @@
-"""P3-B 红态契约：apkscan/core/reanalysis.py（planner 纯函数）的行为规范。
+"""P3-B 红态契约：fxapk/core/reanalysis.py（planner 纯函数）的行为规范。
 
 核心不变量（设计见本地 P3 v4 spec §3/§4/§6）：
 - 准入谓词 v1：只吃 OPEN gap；BLOCKS_* 才可能高价值；REDUCES_CONFIDENCE 走白名单；
@@ -17,11 +17,11 @@ import re
 
 import pytest
 
-from apkscan.core import reanalysis as rp
-from apkscan.core import reanalysis_contract as rxc
-from apkscan.core.judgment_ledger import GapStatus
-from apkscan.core.recognition_codec import build_evidence_gap
-from apkscan.core.recognition_contract import (
+from fxapk.core import reanalysis as rp
+from fxapk.core import reanalysis_contract as rxc
+from fxapk.core.judgment_ledger import GapStatus
+from fxapk.core.recognition_codec import build_evidence_gap
+from fxapk.core.recognition_contract import (
     AuthorizationLevel,
     GapEffect,
     ProducerKind,
@@ -143,7 +143,7 @@ def test_duplicate_gap_in_context_fails_closed():
 
 def test_coverage_only_gap_gets_fallback_success_criteria():
     # 合法 gap 可以只带 coverage_requirements；planner 必须给非空 success_criteria。
-    from apkscan.core.recognition_contract import (
+    from fxapk.core.recognition_contract import (
         CoveragePredicate,
         CoverageSource,
         CoverageStatus,
@@ -488,7 +488,7 @@ def test_dex_resource_gaps_stay_unknown():
 def test_real_producer_multisource_leaves_residual_trace():
     """E3 复审 P1 锁：真 gap 生产器多源输出——已授予源出动作且 criteria 恰可兑现、
     未授予源（dex）独立成 gap 计入 unknown 留痕。"""
-    from apkscan.core.gap_production import build_visibility_gaps
+    from fxapk.core.gap_production import build_visibility_gaps
 
     sources = {
         name: {"visibility": "complete", "why": [], "inputs_seen": []}

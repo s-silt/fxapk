@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 
-from apkscan.core.models import (
+from fxapk.core.models import (
     Confidence,
     Endpoint,
     Evidence,
@@ -15,7 +15,7 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
 )
-from apkscan.dynamic.capture_provenance import (
+from fxapk.dynamic.capture_provenance import (
     capture_scope,
     project_observations,
     retain_observations,
@@ -52,7 +52,7 @@ def _verdict(lead: Lead) -> tuple:
 
 
 def test_legacy_merge_propagates_decrypted_ref_without_changing_verdict() -> None:
-    from apkscan.dynamic.merge import merge_runtime_endpoints
+    from fxapk.dynamic.merge import merge_runtime_endpoints
 
     report = rep()
     lead = _lead()
@@ -309,8 +309,8 @@ def test_legacy_truncated_ledger_does_not_project_complete_contact() -> None:
 
 
 def test_namespace_without_matching_round_is_not_verified(tmp_path) -> None:
-    from apkscan.core.integrity import sha256_file
-    from apkscan.dynamic.merge import merge_and_rerender
+    from fxapk.core.integrity import sha256_file
+    from fxapk.dynamic.merge import merge_and_rerender
 
     report = rep()
     sample = "ab" * 32
@@ -342,8 +342,8 @@ def test_namespace_without_matching_round_is_not_verified(tmp_path) -> None:
 
 
 def test_namespace_with_matching_round_keeps_contact_source(tmp_path) -> None:
-    from apkscan.core.integrity import sha256_file
-    from apkscan.dynamic.merge import merge_and_rerender
+    from fxapk.core.integrity import sha256_file
+    from fxapk.dynamic.merge import merge_and_rerender
 
     report = rep()
     sample = "cd" * 32
@@ -374,7 +374,7 @@ def test_namespace_with_matching_round_keeps_contact_source(tmp_path) -> None:
 
 
 def test_legacy_merge_without_namespace_stays_compatible(tmp_path) -> None:
-    from apkscan.dynamic.merge import merge_and_rerender
+    from fxapk.dynamic.merge import merge_and_rerender
 
     report = rep()
     endpoint = Endpoint(
@@ -391,9 +391,9 @@ def test_legacy_merge_without_namespace_stays_compatible(tmp_path) -> None:
 
 
 def test_plaintext_endpoints_do_not_upgrade_contact_or_closure() -> None:
-    from apkscan.attribution.assemble import _runtime_contact_observed
-    from apkscan.core.closure.targets import _runtime_info
-    from apkscan.dynamic.merge import _endpoints_from_plaintext, merge_runtime_endpoints
+    from fxapk.attribution.assemble import _runtime_contact_observed
+    from fxapk.core.closure.targets import _runtime_info
+    from fxapk.dynamic.merge import _endpoints_from_plaintext, merge_runtime_endpoints
 
     report = rep()
     lead = _lead()
@@ -418,7 +418,7 @@ def test_plaintext_endpoints_do_not_upgrade_contact_or_closure() -> None:
 
 
 def test_legacy_credential_events_keep_distinct_refs() -> None:
-    from apkscan.dynamic.merge import _add_runtime_credential_leads
+    from fxapk.dynamic.merge import _add_runtime_credential_leads
 
     report = rep()
     for path in ("first", "second", "second"):
@@ -431,7 +431,7 @@ def test_legacy_credential_events_keep_distinct_refs() -> None:
 
 
 def test_runtime_brand_finding_retains_earlier_and_later_rounds() -> None:
-    from apkscan.dynamic.merge import _add_brand_hint_finding
+    from fxapk.dynamic.merge import _add_brand_hint_finding
 
     report = rep()
     report.meta["runtime_brand_hints"] = ["SYNTHETIC FIRST"]

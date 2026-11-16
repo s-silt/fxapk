@@ -3,10 +3,10 @@ from io import BytesIO
 
 import pytest
 
-from apkscan.core import web_capture
-from apkscan.analyzers.web_har import WebHarAnalyzer
-from apkscan.core.models import AnalysisConfig
-from apkscan.core.webctx import WebContext
+from fxapk.core import web_capture
+from fxapk.analyzers.web_har import WebHarAnalyzer
+from fxapk.core.models import AnalysisConfig
+from fxapk.core.webctx import WebContext
 import json
 
 # 会话均为 mock，不会发起真实连接；公网字面量仅作 connect_ip 透传断言值。
@@ -125,7 +125,7 @@ def test_body_budget_and_partial_export_survive_import(monkeypatch):
 
 
 def test_underlying_pinned_transport_rejects_private_or_unknown():
-    from apkscan.core.origin_check import _public_ip
+    from fxapk.core.origin_check import _public_ip
     for value in ("127.0.0.1", "169.254.169.254", "not-an-ip"):
         with pytest.raises(ValueError):
             _public_ip(value)
@@ -142,10 +142,10 @@ def test_real_session_disables_environment_credentials():
 
 def test_cli_capture_to_analysis_package_and_pre_report(tmp_path, monkeypatch):
     from typer.testing import CliRunner
-    from apkscan.cli import app
-    from apkscan.core import pipeline
-    from apkscan.core.case_package import create_case_package
-    from apkscan.core.phase2.preparation import prepare_case_materials
+    from fxapk.cli import app
+    from fxapk.core import pipeline
+    from fxapk.core.case_package import create_case_package
+    from fxapk.core.phase2.preparation import prepare_case_materials
     evidence = tmp_path / "web"
     evidence.mkdir()
     package = tmp_path / "case" / "sample"

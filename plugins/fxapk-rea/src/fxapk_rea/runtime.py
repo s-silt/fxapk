@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from apkscan.core.proctree import run_owned
-from apkscan.core.tools import safe_which
+from fxapk.core.proctree import run_owned
+from fxapk.core.tools import safe_which
 
 from .evidence import EvidenceError, MAX_INPUT_BYTES, origin_of, read_bounded
 from .rea_compat import provenance

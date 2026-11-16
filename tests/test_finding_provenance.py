@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from apkscan.core import pipeline
-from apkscan.core.models import AnalyzerResult, Confidence, Finding, Severity
-from apkscan.report import json as report_json
+from fxapk.core import pipeline
+from fxapk.core.models import AnalyzerResult, Confidence, Finding, Severity
+from fxapk.report import json as report_json
 
 
 def _stub_contract_reconciliation(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -29,7 +29,7 @@ def test_finding_analyzer_defaults_empty() -> None:
 
 
 def test_aggregation_stamps_analyzer_name(monkeypatch, fake_ctx) -> None:  # type: ignore[no-untyped-def]
-    from apkscan.core.registry import BaseAnalyzer
+    from fxapk.core.registry import BaseAnalyzer
 
     class _A(BaseAnalyzer):
         name = "myzer"
@@ -42,7 +42,7 @@ def test_aggregation_stamps_analyzer_name(monkeypatch, fake_ctx) -> None:  # typ
     monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
     monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: set())
     _stub_contract_reconciliation(monkeypatch)
-    from apkscan.core.models import AnalysisConfig
+    from fxapk.core.models import AnalysisConfig
 
     report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
     stamped = [f for f in report.findings if f.id == "R1"]
@@ -50,8 +50,8 @@ def test_aggregation_stamps_analyzer_name(monkeypatch, fake_ctx) -> None:  # typ
 
 
 def test_aggregation_does_not_override_explicit_analyzer(monkeypatch, fake_ctx) -> None:  # type: ignore[no-untyped-def]
-    from apkscan.core.models import AnalysisConfig
-    from apkscan.core.registry import BaseAnalyzer
+    from fxapk.core.models import AnalysisConfig
+    from fxapk.core.registry import BaseAnalyzer
 
     class _A(BaseAnalyzer):
         name = "myzer"
@@ -80,7 +80,7 @@ def test_finding_confidence_defaults_medium() -> None:
 
 def test_native_obfuscation_finding_is_low_confidence() -> None:
     # 启发式发现（熵/串密度）显式降 LOW，供消费方抑制噪声（packing name-only 在 test_packing 覆盖）。
-    from apkscan.analyzers.native_obfuscation import NativeObfuscationAnalyzer
+    from fxapk.analyzers.native_obfuscation import NativeObfuscationAnalyzer
 
     nf = NativeObfuscationAnalyzer()._build_finding(
         [{"lib": "libx.so", "signals": ["高熵/低串"], "entropy": 7.9,
@@ -96,7 +96,7 @@ def test_native_obfuscation_finding_is_low_confidence() -> None:
 def test_provenance_fields_serialize() -> None:
     r_finding = _finding("S1", analyzer="myzer")
     r_finding.confidence = Confidence.HIGH
-    from apkscan.core.models import Report
+    from fxapk.core.models import Report
 
     rep = Report(
         package_name="x", meta={}, leads=[], endpoints=[], findings=[r_finding], analyzer_status=[]
@@ -117,7 +117,7 @@ def test_finding_kind_defaults_inference() -> None:
 
 
 def test_finding_kinds_taxonomy() -> None:
-    from apkscan.core.models import (
+    from fxapk.core.models import (
         FINDING_KIND_ANALYST_CONCLUSION,
         FINDING_KIND_INFERENCE,
         FINDING_KIND_OBSERVATION,

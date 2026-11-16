@@ -1,6 +1,6 @@
-from apkscan.analyzers.json_endpoints import JsonEndpointAnalyzer
-from apkscan.core.models import AnalysisConfig
-from apkscan.core.webctx import WebContext
+from fxapk.analyzers.json_endpoints import JsonEndpointAnalyzer
+from fxapk.core.models import AnalysisConfig
+from fxapk.core.webctx import WebContext
 
 
 def test_escaped_json_url_retains_decoding_coordinate():
@@ -22,7 +22,7 @@ def test_json_noncode_and_invalid_data_are_not_executed():
 
 
 def test_json_declared_size_budget(monkeypatch):
-    import apkscan.analyzers.json_endpoints as module
+    import fxapk.analyzers.json_endpoints as module
     monkeypatch.setattr(module, "MAX_BYTES", 8)
     ctx = WebContext(AnalysisConfig(online=False), files={
         "web/config.json": br'{"api":"https:\/\/api.example.test"}'})

@@ -10,8 +10,8 @@ import json
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.corpus import (
+from fxapk import cli
+from fxapk.core.corpus import (
     RELATION_INDEX_VERSION,
     _remote_config_objects,
     _sanitize_case_ioc_projection,

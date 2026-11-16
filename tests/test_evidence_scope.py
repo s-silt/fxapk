@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from apkscan.core import infra
-from apkscan.core import pipeline
-from apkscan.core.closure import (
+from fxapk.core import infra
+from fxapk.core import pipeline
+from fxapk.core.closure import (
     CLOSURE_COMPLETE,
     CLOSURE_FAILED,
     ClosureConfig,
     close_report,
 )
-from apkscan.core.closure.layers import _runtime_layer
-from apkscan.core.closure.targets import _runtime_info, _select_targets_with_stats
-from apkscan.core.leads import build_endpoint_leads
-from apkscan.core.models import (
+from fxapk.core.closure.layers import _runtime_layer
+from fxapk.core.closure.targets import _runtime_info, _select_targets_with_stats
+from fxapk.core.leads import build_endpoint_leads
+from fxapk.core.models import (
     DOWNGRADE_EVIDENCE_SCOPE,
     Confidence,
     Endpoint,
@@ -22,7 +22,7 @@ from apkscan.core.models import (
     Report,
     has_case_evidence,
 )
-from apkscan.dynamic.pcap_ingest import _merge_runtime_endpoint_dicts
+from fxapk.dynamic.pcap_ingest import _merge_runtime_endpoint_dicts
 
 
 def _report(endpoint: Endpoint) -> Report:

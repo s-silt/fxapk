@@ -18,11 +18,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.commands import lead as lead_cmd
-from apkscan.core import infra
-from apkscan.core.leads import apply_repack_quarantine
-from apkscan.core.models import (
+from fxapk import cli
+from fxapk.commands import lead as lead_cmd
+from fxapk.core import infra
+from fxapk.core.leads import apply_repack_quarantine
+from fxapk.core.models import (
     DOWNGRADE_EVIDENCE_SCOPE,
     DOWNGRADE_REPACK_IDENTITY,
     DOWNGRADE_SNI_MASQUERADE,
@@ -33,9 +33,9 @@ from apkscan.core.models import (
     Report,
     merge_runtime_into_lead_dict,
 )
-from apkscan.core.json_io import BoundedJsonError
-from apkscan.core.report_io import load_report, write_report
-from apkscan.core.restore import (
+from fxapk.core.json_io import BoundedJsonError
+from fxapk.core.report_io import load_report, write_report
+from fxapk.core.restore import (
     MANUAL_RESTORES_KEY,
     is_restored,
     record_restore,
@@ -188,7 +188,7 @@ def test_closure_excludes_hand_edited_advice_and_counts_it() -> None:
     这种报告处于矛盾态：档位说可查、账本却还压着，而下一次任何重算都会把它压回去。
     放行必须走 `fxapk lead restore`，手改的不认。
     """
-    from apkscan.core.closure.targets import _select_targets_with_stats
+    from fxapk.core.closure.targets import _select_targets_with_stats
 
     hand_edited = _net_lead()
     hand_edited.downgrades[DOWNGRADE_REPACK_IDENTITY] = "还压着"
@@ -210,7 +210,7 @@ def test_closure_counts_manually_restored_leads() -> None:
     （跳过抑制后档位与空账本自洽）——不计数就等于给绕过守卫留了一条**更安静**的路。
     墓碑不做真伪校验，可见性就是全部。
     """
-    from apkscan.core.closure.targets import _select_targets_with_stats
+    from fxapk.core.closure.targets import _select_targets_with_stats
 
     restored_lead = _net_lead()          # 因墓碑而未被抑制，档位是最高档
     meta = dict(_REPACK_META)
@@ -237,7 +237,7 @@ def test_letters_marks_a_manually_restored_target() -> None:
     这条线索本已被自动判据压住、不该套打，是人放回来的。正文不写这一句，产出的就是一份外观
     完全正常的函——读的人无从知道机器本来拦下了它，也就不会去追放行依据。
     """
-    from apkscan.report import letters as letters_mod
+    from fxapk.report import letters as letters_mod
 
     report = {
         "meta": {MANUAL_RESTORES_KEY: [
@@ -263,7 +263,7 @@ def test_letters_marks_a_manually_restored_target() -> None:
 
 def test_html_marks_a_manually_restored_lead() -> None:
     """★HTML 出口：人工放行的线索不能以普通最高档线索的外观混在红标区里。"""
-    from apkscan.report import html as report_html
+    from fxapk.report import html as report_html
 
     lead = _net_lead()
     meta = {MANUAL_RESTORES_KEY: [
@@ -285,7 +285,7 @@ def test_html_marks_a_manually_restored_lead() -> None:
 
 def test_ioc_export_carries_manual_restore_provenance() -> None:
     """★IOC 出口：人工放行必须随行导出——机器消费方（情报平台）看不到就等于没有。"""
-    from apkscan.report import ioc
+    from fxapk.report import ioc
 
     report = {
         "meta": {MANUAL_RESTORES_KEY: [
@@ -312,7 +312,7 @@ def test_replay_ambiguous_keeps_each_match_status(tmp_path: Path) -> None:
     """
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()
-    from apkscan.core.models import apply_downgrade
+    from fxapk.core.models import apply_downgrade
 
     pressed = _net_lead()                        # 被压着 → 能 lift
     apply_downgrade(pressed, DOWNGRADE_REPACK_IDENTITY, "隔离")
@@ -340,8 +340,8 @@ def test_replay_ambiguous_keeps_each_match_status(tmp_path: Path) -> None:
 
 def test_closure_keeps_properly_restored_lead() -> None:
     """走 helper 撤销的（档位与账本自洽）照常进闭环——守卫不能把正常放行也挡了。"""
-    from apkscan.core.closure.targets import _select_targets_with_stats
-    from apkscan.core.models import apply_downgrade, lift_downgrade
+    from fxapk.core.closure.targets import _select_targets_with_stats
+    from fxapk.core.models import apply_downgrade, lift_downgrade
 
     lead = _net_lead()
     apply_downgrade(lead, DOWNGRADE_REPACK_IDENTITY, "隔离")
@@ -676,7 +676,7 @@ def test_runtime_first_seen_lead_also_respects_the_tombstone() -> None:
     真实序列：新报告 replay 放行 → 本轮静态侧没产出该值 → pcap 首次发现它 → 带抑制入库 →
     人工核实被抹掉。去掉 append 前的 strip_restored_downgrades，本测试即红。
     """
-    from apkscan.core.restore import strip_restored_downgrades
+    from fxapk.core.restore import strip_restored_downgrades
 
     index = restore_index({MANUAL_RESTORES_KEY: [
         {"category": "DOMAIN", "value": _VALUE, "source": DOWNGRADE_SNI_MASQUERADE},
@@ -707,7 +707,7 @@ def test_probe_ingest_first_seen_lead_respects_tombstone_via_real_entry(tmp_path
     上一条只调 helper 本身——删掉 append 分支的调用、传错索引、把调用挪到 append 之后，
     那条测试照样绿。接线必须由走真入口的用例来锁（本项目实证过「函数写了但没人调」）。
     """
-    from apkscan.dynamic import probe_ingest
+    from fxapk.dynamic import probe_ingest
 
     report = tmp_path / "report.json"
     # 报告里**没有**这条线索（模拟 replay 放行后、本轮静态侧未产出），但带着放行墓碑。
@@ -775,7 +775,7 @@ def test_replay_distinguishes_partial_restore(tmp_path: Path) -> None:
     """
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()
-    from apkscan.core.models import apply_downgrade
+    from fxapk.core.models import apply_downgrade
 
     lead = _net_lead()
     apply_downgrade(lead, DOWNGRADE_REPACK_IDENTITY, "隔离")
@@ -832,8 +832,8 @@ def test_both_normalizers_share_one_contract() -> None:
     这是**安全键的匹配规则**——分叉会让「已放行」在一处成立、另一处不成立，人工核实在某条
     路径上被静默抹掉。此处直接对两者施加同一组混合大小写/空白/None 输入。
     """
-    from apkscan.core.models import _is_restored_triplet
-    from apkscan.core.restore import norm_component
+    from fxapk.core.models import _is_restored_triplet
+    from fxapk.core.restore import norm_component
 
     cases = ["  DOMAIN ", "domain", "Api.Example.COM", None, "", "  "]
     for raw in cases:

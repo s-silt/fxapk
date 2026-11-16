@@ -2,7 +2,7 @@ from io import BytesIO
 
 import pytest
 
-from apkscan.core.bounded_io import read_limited
+from fxapk.core.bounded_io import read_limited
 
 
 @pytest.mark.parametrize("size,limit", [(0, 0), (1, 0), (3, 3), (4, 3), (100000, 100000), (100001, 100000)])

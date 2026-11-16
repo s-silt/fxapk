@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.core.webctx as webctx_module
-from apkscan.core.models import AnalysisConfig
-from apkscan.core.webctx import (
+import fxapk.core.webctx as webctx_module
+from fxapk.core.models import AnalysisConfig
+from fxapk.core.webctx import (
     MAX_EVIDENCE_BYTES,
     WEB_PREFIX,
     load_web_evidence,
@@ -228,7 +228,7 @@ def test_analyze_web_rejects_out_dir_equal_to_evidence_dir(tmp_path: Path) -> No
     """★``--out <证据目录>`` 必须被拒：否则重跑会把上次的报告当新证据吃回去。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _evidence_dir(tmp_path)
     result = CliRunner().invoke(
@@ -243,7 +243,7 @@ def test_analyze_web_rejects_equal_out_dir_written_differently(tmp_path: Path) -
     """同一目录的另一种写法（``.`` / 尾斜杠）同样要拒 —— 判据是 ``resolve()`` 后相等。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _evidence_dir(tmp_path)
     result = CliRunner().invoke(
@@ -259,7 +259,7 @@ def test_analyze_web_rerun_into_subdir_does_not_reingest_old_report(
     """端到端重跑：``--out`` 指到证据树内子目录时，上一轮报告不得被当新证据读回。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _evidence_dir(tmp_path)
     out_dir = root / "out"

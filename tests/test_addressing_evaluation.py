@@ -41,9 +41,9 @@ def case(name):
 def certificate_endpoint(independent, edge):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives import serialization
-    from apkscan.core.certificate_ownership import verify_certificate_ownership
-    from apkscan.core.models import Endpoint, Evidence, EvidenceScope
-    from apkscan.report.json import _to_jsonable
+    from fxapk.core.certificate_ownership import verify_certificate_ownership
+    from fxapk.core.models import Endpoint, Evidence, EvidenceScope
+    from fxapk.report.json import _to_jsonable
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
     claim = {"schema": "fxapk-certificate-ownership-1", "certificate_sha256": SHA,
@@ -62,7 +62,7 @@ def certificate_endpoint(independent, edge):
 @pytest.mark.parametrize("name", ["positive", "sdk_domain_in_configuration", "contacted_cdn_edge", "shared_ip_multiple_tenants",
                                  "expired_historical_resolution", "modified_runtime", "random_iv_body_hash_change"])
 def test_independent_evaluation_dimensions(name):
-    from apkscan.config.evaluation import evaluate_synthetic_suite
+    from fxapk.config.evaluation import evaluate_synthetic_suite
     result = evaluate_synthetic_suite([case(name)])
     assert result["cases"][0]["matches_expected"] is True
     assert result["real_case_count"] == 0
@@ -70,7 +70,7 @@ def test_independent_evaluation_dimensions(name):
 
 
 def test_evaluation_detects_wrong_labels_and_is_permutation_invariant():
-    from apkscan.config.evaluation import evaluate_synthetic_suite
+    from fxapk.config.evaluation import evaluate_synthetic_suite
     rows = [case("positive"), case("contacted_cdn_edge")]
     rows[0]["expected"]["origin_confirmed"] = True
     result = evaluate_synthetic_suite(rows)

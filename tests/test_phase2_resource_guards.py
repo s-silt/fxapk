@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from apkscan.core.phase2.inventory import _read_json_bounded
-from apkscan.core.phase2.link import write_gate_receipt
+from fxapk.core.phase2.inventory import _read_json_bounded
+from fxapk.core.phase2.link import write_gate_receipt
 
 
 def test_json_read_is_bounded_even_if_file_grows_after_stat():
@@ -58,7 +58,7 @@ def test_json_reader_exact_byte_boundary(tmp_path: Path):
 
 @pytest.mark.parametrize("raw", [b'{"x":NaN}\n', b'{"x":1e999}\n', b'[]\n'])
 def test_clue_jsonl_rejects_nonfinite_and_nonobject(tmp_path: Path, raw: bytes):
-    from apkscan.core.phase2.inventory import load_clue_records
+    from fxapk.core.phase2.inventory import load_clue_records
     path = tmp_path / "clues.jsonl"
     path.write_bytes(raw)
     with pytest.raises(ValueError):
@@ -66,7 +66,7 @@ def test_clue_jsonl_rejects_nonfinite_and_nonobject(tmp_path: Path, raw: bytes):
 
 
 def test_clue_jsonl_enforces_real_byte_limit(tmp_path: Path):
-    from apkscan.core.phase2.inventory import load_clue_records
+    from fxapk.core.phase2.inventory import load_clue_records
     path = tmp_path / "clues.jsonl"
     raw = b'{"synthetic":true}\n'
     path.write_bytes(raw)

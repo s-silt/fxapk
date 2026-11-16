@@ -1,4 +1,4 @@
-"""apkscan.dynamic.provision 单测：requests / lzma / subprocess / shutil.which / 文件系统全 mock。
+"""fxapk.dynamic.provision 单测：requests / lzma / subprocess / shutil.which / 文件系统全 mock。
 
 策略（无真机/无外网，离线锁行为）：
 - subprocess 调用：monkeypatch provision._adb / provision._adb_ok 或 subprocess.run。
@@ -23,8 +23,8 @@ from typing import Any
 
 import pytest
 
-from apkscan.core import device, tools
-from apkscan.dynamic import provision
+from fxapk.core import device, tools
+from fxapk.dynamic import provision
 
 
 @pytest.fixture(autouse=True)
@@ -1427,7 +1427,7 @@ def test_adb_root_shell_no_false_warning_on_su_fallback(monkeypatch, caplog) -> 
         return _FakeCompleted(1, "", "not root")
 
     monkeypatch.setattr(provision, "_adb", _fake_adb)
-    with caplog.at_level(logging.WARNING, logger="apkscan.dynamic.provision"):
+    with caplog.at_level(logging.WARNING, logger="fxapk.dynamic.provision"):
         assert provision._adb_root_shell("kill -INT 123", None) is True
     joined = " ".join(r.getMessage() for r in caplog.records)
     assert "adb 非零退出" not in joined and "root 命令失败" not in joined  # 首探失败静默、su 成功
@@ -1443,7 +1443,7 @@ def test_adb_root_shell_recovers_real_stderr_when_both_fail(monkeypatch, caplog)
         return _FakeCompleted(1, "", "avc: denied write /system")  # 首探权威执行的真因
 
     monkeypatch.setattr(provision, "_adb", _fake_adb)
-    with caplog.at_level(logging.DEBUG, logger="apkscan.dynamic.provision"):
+    with caplog.at_level(logging.DEBUG, logger="fxapk.dynamic.provision"):
         assert provision._adb_root_shell("cp /a /system/b", None) is False
     debug_txt = " ".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
     warn_txt = " ".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)

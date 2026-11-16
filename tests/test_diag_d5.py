@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from apkscan.core.runtime_diagnostics import explain_coverage, observation_from_capture
+from fxapk.core.runtime_diagnostics import explain_coverage, observation_from_capture
 
 _SAMPLE = "ab" * 32
 

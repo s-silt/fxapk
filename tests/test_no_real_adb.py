@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from apkscan.core import device, tools
+from fxapk.core import device, tools
 
 
 def test_adb_is_invisible_to_the_suite() -> None:

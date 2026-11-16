@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-import apkscan.dynamic.capability_probe as P
-from apkscan.dynamic import capabilities as C
+import fxapk.dynamic.capability_probe as P
+from fxapk.dynamic import capabilities as C
 
 
 def _patch(
@@ -23,8 +23,8 @@ def _patch(
     root: bool = False,
     tcpdump: bool = False,
 ) -> None:
-    from apkscan.core import device, tools
-    from apkscan.dynamic import provision
+    from fxapk.core import device, tools
+    from fxapk.dynamic import provision
 
     monkeypatch.setattr(tools, "has_adb", lambda: adb)
     monkeypatch.setattr(device, "has_frida", lambda: frida)
@@ -79,7 +79,7 @@ def test_no_ca_trusted_probed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_probe_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """探测中途异常 → 吞掉、返回已探到的部分，绝不抛。"""
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     def _boom() -> bool:
         raise RuntimeError("boom")

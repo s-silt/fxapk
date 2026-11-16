@@ -8,11 +8,11 @@ import math
 
 import pytest
 
-from apkscan.core import linkage_ml, linkage_training
-from apkscan.core.linkage import rank_link_candidates
-from apkscan.core.linkage_labels import validate_linkage_label_records
-from apkscan.core.linkage_labels import build_linkage_ground_truth
-from apkscan.core.linkage_ml import (
+from fxapk.core import linkage_ml, linkage_training
+from fxapk.core.linkage import rank_link_candidates
+from fxapk.core.linkage_labels import validate_linkage_label_records
+from fxapk.core.linkage_labels import build_linkage_ground_truth
+from fxapk.core.linkage_ml import (
     ArtifactValidationError,
     ML_SCORE_SEMANTICS,
     PAIR_FEATURE_NAMES,
@@ -23,7 +23,7 @@ from apkscan.core.linkage_ml import (
     score_pair_features,
     validate_linkage_model_artifact,
 )
-from apkscan.core.linkage_training import (
+from fxapk.core.linkage_training import (
     DEFAULT_READINESS_THRESHOLDS,
     ReadinessThresholds,
     assess_training_readiness,

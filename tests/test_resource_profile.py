@@ -4,11 +4,11 @@ import json
 
 import pytest
 
-from apkscan.core.batch_enrich import Target, budget_total, estimate_budget, enrich_targets
-from apkscan.core.enrichment_profiles import select_enrichers
-from apkscan.core.models import Endpoint
-from apkscan.enrichers.infrastructure import DayDayMapEnricher
-from apkscan.enrichers.resource_profile import (
+from fxapk.core.batch_enrich import Target, budget_total, estimate_budget, enrich_targets
+from fxapk.core.enrichment_profiles import select_enrichers
+from fxapk.core.models import Endpoint
+from fxapk.enrichers.infrastructure import DayDayMapEnricher
+from fxapk.enrichers.resource_profile import (
     FOFA_PROFILE_FIELDS, DayDayMapResourceProfileEnricher,
     FofaHostProfileEnricher, FofaResourceProfileEnricher,
 )

@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import infra
-from apkscan.core.leads import _apply_default_advice, _config_value_unroutable_host
-from apkscan.core.models import Lead, LeadCategory
+from fxapk.core import infra
+from fxapk.core.leads import _apply_default_advice, _config_value_unroutable_host
+from fxapk.core.models import Lead, LeadCategory
 
 _INV = infra.ADVICE_INVESTIGATE
 _REVIEW = infra.ADVICE_REVIEW

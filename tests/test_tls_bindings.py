@@ -22,7 +22,7 @@ def statement(**change):
 @pytest.mark.parametrize("change", [{}, {"peer_ip": "192.0.2.2"}, {"valid_until": "2026-11-08T00:00:00Z"},
     {"basis": "san_names"}, {"bindings": [{"domain": "a.example.test", "certificate_sha256": "a" * 64}]}])
 def test_independent_bindings_must_match_peer_der_and_observation_window(change):
-    from apkscan.core.tls_bindings import verify_tls_bindings, bound_tls_domains
+    from fxapk.core.tls_bindings import verify_tls_bindings, bound_tls_domains
     material, key = statement(**change)
     sha = hashlib.sha256(b"der").hexdigest()
     checked = verify_tls_bindings(material, key, "192.0.2.1", sha, "2026-11-09T00:30:00Z")
@@ -36,10 +36,10 @@ def test_independent_bindings_must_match_peer_der_and_observation_window(change)
 
 
 def test_cert_selection_difference_alone_never_means_shared_tenants(tmp_path, monkeypatch):
-    from apkscan.core import probe_target as pt
-    from apkscan.core.report_io import report_from_dict
-    from apkscan.attribution.assemble import _ip_entity, _ip_signal_features
-    from apkscan.attribution.roles import RoleSignal
+    from fxapk.core import probe_target as pt
+    from fxapk.core.report_io import report_from_dict
+    from fxapk.attribution.assemble import _ip_entity, _ip_signal_features
+    from fxapk.attribution.roles import RoleSignal
     from tests.test_probe_target import report
     monkeypatch.setattr(pt, "probe_tls", lambda *a, **k: ({"check": "tls-no-sni", "outcome": "certificate_selection_observed",
         "observed_at": "2026-11-09T00:30:00Z", "peer_ip": "192.0.2.1", "sni": None, "chain_verified": True,

@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import judgment_ledger as jl
-from apkscan.core import recognition_codec as codec
-from apkscan.core import recognition_contract as rc
+from fxapk.core import judgment_ledger as jl
+from fxapk.core import recognition_codec as codec
+from fxapk.core import recognition_contract as rc
 from tests.recognition_fixtures import (
     DIGEST_A,
     FIXED_TIME,

@@ -1,4 +1,4 @@
-"""apkscan.core.device 单测：adb_devices 枚举可靠性（先 start-server 再 devices）+ 解析。
+"""fxapk.core.device 单测：adb_devices 枚举可靠性（先 start-server 再 devices）+ 解析。
 
 真机实测 bug 回归：本工具结束 kill-server 不留残留 → 每次 adb 冷启；若 adb devices 赶上
 server 冷启/版本重启会空表，误判「无设备」（而后续 adb shell 因 server 已热而 OK）。
@@ -11,7 +11,7 @@ import sys
 import types
 from typing import Any
 
-from apkscan.core import device
+from fxapk.core import device
 
 
 class _Proc:

@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import jadx_callpath as jcp
-from apkscan.core.jadx_callpath import (
+from fxapk.core import jadx_callpath as jcp
+from fxapk.core.jadx_callpath import (
     _SCOPE_RANK,
     CallPath,
     CallPathEdge,
@@ -43,7 +43,7 @@ from apkscan.core.jadx_callpath import (
     _parse_endpoint,
     trace_callpath,
 )
-from apkscan.core.jadx_index import (
+from fxapk.core.jadx_index import (
     _IDENTIFIER_RE,
     _MAX_PERSISTED_IDENTIFIER,
     REASON_MALFORMED,

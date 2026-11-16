@@ -5,7 +5,7 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from apkscan.analyzers import _common
+from fxapk.analyzers import _common
 
 
 def _make_apk(tmp_path: Path, entry: str, body: bytes) -> str:

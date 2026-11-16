@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.dynamic.actions import AndroidActions
+from fxapk.dynamic.actions import AndroidActions
 
 
 class _Proc:
@@ -20,7 +20,7 @@ def test_actions_require_serial() -> None:
 def test_tap_uses_fixed_adb_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[str]] = []
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda args, **kwargs: seen.append(args) or _Proc())
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda args, **kwargs: seen.append(args) or _Proc())
     actions = AndroidActions(serial="device-1", package="com.example.synthetic")
 
     assert actions.tap(10, 20).ok is True
@@ -29,7 +29,7 @@ def test_tap_uses_fixed_adb_argv(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_input_text_does_not_include_value_in_result(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda _args, **_kwargs: _Proc())
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda _args, **_kwargs: _Proc())
     actions = AndroidActions(serial="device-1", package="com.example.synthetic")
 
     result = actions.input_text("synthetic password")
@@ -40,7 +40,7 @@ def test_input_text_does_not_include_value_in_result(monkeypatch: pytest.MonkeyP
 
 
 def test_foreground_unparseable_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda _args, **kwargs: _Proc(stdout="unknown format"))
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda _args, **kwargs: _Proc(stdout="unknown format"))
     actions = AndroidActions(serial="device-1", package="com.example.synthetic")
 
     assert actions.foreground_package() is None
@@ -53,7 +53,7 @@ def test_input_text_is_one_literal_remote_shell_argument(monkeypatch, value) -> 
 
     seen = []
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda args, **kwargs: seen.append(args) or _Proc())
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda args, **kwargs: seen.append(args) or _Proc())
 
     result = AndroidActions(serial="device-1", package="com.example.synthetic").input_text(value)
 
@@ -66,7 +66,7 @@ def test_input_text_is_one_literal_remote_shell_argument(monkeypatch, value) -> 
 
 @pytest.mark.parametrize("value", ["literal%svalue", "tab\tvalue", "nonascii\u2603"])
 def test_input_text_rejects_values_adb_cannot_preserve(monkeypatch, value) -> None:
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda *_a, **_k: pytest.fail("invalid text reached adb"))
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda *_a, **_k: pytest.fail("invalid text reached adb"))
     with pytest.raises(ValueError, match="invalid_input_text"):
         AndroidActions(serial="device-1", package="com.example.synthetic").input_text(value)
 
@@ -76,7 +76,7 @@ def test_input_text_failure_logs_do_not_expose_value(monkeypatch, caplog, failur
     import logging
     import subprocess
 
-    from apkscan.core import device
+    from fxapk.core import device
 
     secret = "synthetic-secret-321"
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
@@ -103,7 +103,7 @@ def test_input_text_failure_logs_do_not_expose_value(monkeypatch, caplog, failur
 @pytest.mark.parametrize("foreground", [None, "com.example.other"])
 def test_mutating_actions_refuse_unconfirmed_foreground(monkeypatch, operation, foreground) -> None:
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: foreground)
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda *_a, **_k: pytest.fail("unbound action reached adb"))
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda *_a, **_k: pytest.fail("unbound action reached adb"))
 
     result = operation(AndroidActions(serial="device-1", package="com.example.synthetic"))
 
@@ -113,7 +113,7 @@ def test_mutating_actions_refuse_unconfirmed_foreground(monkeypatch, operation, 
 
 
 def test_adb_timeouts_follow_remaining_action_deadline(monkeypatch) -> None:
-    from apkscan.dynamic import actions as action_module
+    from fxapk.dynamic import actions as action_module
     clock = [10.0]
     timeouts = []
     monkeypatch.setattr(action_module.time, "monotonic", lambda: clock[0])
@@ -135,7 +135,7 @@ def test_adb_timeouts_follow_remaining_action_deadline(monkeypatch) -> None:
 def test_exit_zero_security_exception_is_failure(monkeypatch, stream, root_actions, operation):
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
     proc = _Proc(**{stream: "java.lang.SecurityException: Injecting input events requires INJECT_EVENTS permission: synthetic-secret"})
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda *_a, **_k: proc)
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda *_a, **_k: proc)
     result = operation(AndroidActions(serial="device-1", package="com.example.synthetic", root_actions=root_actions))
     assert result.ok is False
     assert result.detail == "injection_permission_denied"
@@ -145,7 +145,7 @@ def test_exit_zero_security_exception_is_failure(monkeypatch, stream, root_actio
 @pytest.mark.parametrize("text", ["Error: Invalid arguments", "Exception occurred while executing 'tap'", "su: Permission denied"])
 def test_known_command_error_prefix_fails_even_at_exit_zero(monkeypatch, text):
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda *_a, **_k: _Proc(stdout=text))
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda *_a, **_k: _Proc(stdout=text))
     result = AndroidActions(serial="device-1", package="com.example.synthetic").tap(1, 2)
     assert not result.ok
     assert result.detail == "device_command_failed"
@@ -154,7 +154,7 @@ def test_known_command_error_prefix_fails_even_at_exit_zero(monkeypatch, text):
 @pytest.mark.parametrize("text", ["Events injected: 1", "0 errors", "normal text mentions Error: later in a sentence"])
 def test_normal_command_output_is_not_an_error(monkeypatch, text):
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda *_a, **_k: _Proc(stdout=text))
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda *_a, **_k: _Proc(stdout=text))
     assert AndroidActions(serial="device-1", package="com.example.synthetic").tap(1, 2).ok
 
 
@@ -164,7 +164,7 @@ def test_explicit_root_text_preserves_two_shell_boundaries_and_redacts_logs(monk
 
     calls = []
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda args, **kwargs: calls.append((args, kwargs)) or _Proc())
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda args, **kwargs: calls.append((args, kwargs)) or _Proc())
     result = AndroidActions(serial="device-exact", package="com.example.synthetic", root_actions=True).input_text(value)
     assert result.ok
     argv, kwargs = calls[0]
@@ -184,7 +184,7 @@ def test_root_input_is_explicit_and_remains_package_and_serial_bound(monkeypatch
 
     calls = []
     monkeypatch.setattr(AndroidActions, "foreground_package", lambda self: self.package)
-    monkeypatch.setattr("apkscan.dynamic.actions.device._run", lambda args, **kwargs: calls.append(args) or _Proc())
+    monkeypatch.setattr("fxapk.dynamic.actions.device._run", lambda args, **kwargs: calls.append(args) or _Proc())
     assert operation(AndroidActions(serial="device-exact", package="com.example.synthetic", root_actions=True)).ok
     assert calls[0][:6] == ["adb", "-s", "device-exact", "shell", "su", "-c"]
     assert shlex.split(shlex.split(" ".join(calls[0][4:]))[2]) == expected

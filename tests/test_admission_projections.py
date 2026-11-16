@@ -2,19 +2,19 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from apkscan.core import infra
-from apkscan.core.admission import evaluate_usage
-from apkscan.core.closure.targets import _runtime_info
-from apkscan.core.corpus import _has_case_runtime_dns_evidence
-from apkscan.core.evidence_scope import project_serialized_closure, project_serialized_leads
-from apkscan.core.leads import _domain_lead, _ip_lead
-from apkscan.core.models import ADVICE_REVIEW, Endpoint, Evidence, EvidenceScope, Report
-from apkscan.core.report_io import report_from_dict
-from apkscan.report import html as report_html
-from apkscan.report import json as report_json
-from apkscan.report.digest import build_digest
-from apkscan.report.ioc import leads_to_ioc_rows
-from apkscan.report.letters import build_letters
+from fxapk.core import infra
+from fxapk.core.admission import evaluate_usage
+from fxapk.core.closure.targets import _runtime_info
+from fxapk.core.corpus import _has_case_runtime_dns_evidence
+from fxapk.core.evidence_scope import project_serialized_closure, project_serialized_leads
+from fxapk.core.leads import _domain_lead, _ip_lead
+from fxapk.core.models import ADVICE_REVIEW, Endpoint, Evidence, EvidenceScope, Report
+from fxapk.core.report_io import report_from_dict
+from fxapk.report import html as report_html
+from fxapk.report import json as report_json
+from fxapk.report.digest import build_digest
+from fxapk.report.ioc import leads_to_ioc_rows
+from fxapk.report.letters import build_letters
 
 
 def _ref(*, source: str = "dex", offset: int = 1, suspicious: bool = False) -> dict:

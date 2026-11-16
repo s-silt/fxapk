@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.core.models import AnalysisConfig
-from apkscan.core.redact import safe_exception_text
-from apkscan.core.webctx import load_web_evidence
+from fxapk.core.models import AnalysisConfig
+from fxapk.core.redact import safe_exception_text
+from fxapk.core.webctx import load_web_evidence
 
 pytest.importorskip("websockets")
 

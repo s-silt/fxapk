@@ -8,8 +8,8 @@ import sys
 
 import pytest
 
-import apkscan.core.dex_query as dex_query
-from apkscan.core.dex_query import DexQueryError, DexQueryLimits, capabilities, query_apk
+import fxapk.core.dex_query as dex_query
+from fxapk.core.dex_query import DexQueryError, DexQueryLimits, capabilities, query_apk
 from tests.fixtures.dex_query.dexgen import build_dex, sample_classes, wide_classes, zip_bytes
 
 _WORKER = [
@@ -85,7 +85,7 @@ def test_capabilities_probe_does_not_mark_the_engine_executed() -> None:
 
 
 def test_forced_tree_kill_result_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    from apkscan.core.proctree import OwnedRun
+    from fxapk.core.proctree import OwnedRun
 
     def fake_run(*_args: object, **_kwargs: object) -> OwnedRun:
         return OwnedRun(

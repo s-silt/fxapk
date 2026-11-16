@@ -2,7 +2,7 @@
 
 [返回项目首页](README.md) · [English](USAGE.en.md)
 
-完整参数 `fxapk --help`；`fxapk` 未装成命令时用 `python -m apkscan.cli`。
+完整参数 `fxapk --help`；`fxapk` 未装成命令时用 `python -m fxapk.cli`。
 
 ## 命令表
 
@@ -196,7 +196,7 @@ git config core.hooksPath .githooks
 
 hook 扫 staged 新增行，默认阻断疑似真实 IP、凭据、案件人名、联系方式、二开包名、无理由及批量豁免。行内例外须写 `leak-scan:` + `allow` + 逐行理由。已有提交用 `fxapk leak-scan --base origin/master --strict` 核对整个候选 diff。测试数据优先用保留段 `192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`、`2001:db8::/32`、`example.com`；无法用保留值触发时用 mock 或有理由的合成夹具。真实地址推上去就收不回来。
 
-代码行为变更本地过 `python -m ruff check apkscan tests`、`python -m pyright apkscan`、`python -m pytest -q`。
+代码行为变更本地过 `python -m ruff check fxapk tests`、`python -m pyright fxapk`、`python -m pytest -q`。
 
 ## 合规边界
 
@@ -219,7 +219,7 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 
 ## 可选 Flutter AOT 插件
 
-`fxapk-flutter`（发行附件 wheel，或源码树 `python -m pip install -e ./plugins/fxapk-flutter`；要求核心 ≥1.23.0）对识别为 Flutter 的 APK 做离线 AOT 静态分析（仅 Android ARM64）。`analyze` 的 `--flutter auto`（默认）/ `off` / `required` 控制该阶段，`required` 未成功时保留报告并退出 4；`--flutter-toolchain` 指定本地 toolchain.json（缺省读 `FXAPK_FLUTTER_TOOLCHAIN` 或 `~/.fxapk/flutter/toolchain.json`）；`--flutter-timeout` 范围 1–1800 秒、默认 300，只约束单次容器运行，不是整条流水线的时限。`auto` 命令没有 Flutter 选项。缺插件或工具链时记录覆盖缺口，不自动安装。`analyze` 还会核对解析期快照与最终指纹：输入文件在分析期间被改写时，保留快照绑定的报告并以退出码 4 结束（`--flutter auto` 同样适用）。
+`fxapk-flutter`（发行附件 wheel，或源码树 `python -m pip install -e ./plugins/fxapk-flutter`；要求核心 ≥2.0.0）对识别为 Flutter 的 APK 做离线 AOT 静态分析（仅 Android ARM64）。`analyze` 的 `--flutter auto`（默认）/ `off` / `required` 控制该阶段，`required` 未成功时保留报告并退出 4；`--flutter-toolchain` 指定本地 toolchain.json（缺省读 `FXAPK_FLUTTER_TOOLCHAIN` 或 `~/.fxapk/flutter/toolchain.json`）；`--flutter-timeout` 范围 1–1800 秒、默认 300，只约束单次容器运行，不是整条流水线的时限。`auto` 命令没有 Flutter 选项。缺插件或工具链时记录覆盖缺口，不自动安装。`analyze` 还会核对解析期快照与最终指纹：输入文件在分析期间被改写时，保留快照绑定的报告并以退出码 4 结束（`--flutter auto` 同样适用）。
 
 ```text
 fxapk analyze sample.apk --offline --flutter auto --out analysis

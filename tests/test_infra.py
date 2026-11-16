@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from apkscan.core import infra
+from fxapk.core import infra
 
 
 # --- C1：library-embedded 分级 -------------------------------------------
@@ -309,7 +309,7 @@ def test_domain_tiers_new_yaml_keys_are_live(monkeypatch):
       顺带把「basename 组的 web 跳过」守卫置于可达状态（真实配置下该组暂无 web_unsafe
       条目，守卫不可达；靠本条注入式测试锁它，防未来配置时守卫已被删）。
     """
-    from apkscan.core import registry
+    from fxapk.core import registry
 
     stub = {
         "library_file_globs": ["*/zzz-dir/*"],

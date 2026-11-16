@@ -19,7 +19,7 @@ def specimen(tmp_path):
 
 
 def test_real_evaluation_keeps_unknowns_out_of_accuracy_denominator(tmp_path):
-    from apkscan.config.evaluation import evaluate_real_suite
+    from fxapk.config.evaluation import evaluate_real_suite
     case = specimen(tmp_path)
     result = evaluate_real_suite([case])
     assert result["real_case_count"] == 1 and result["independently_labeled_case_count"] == 0
@@ -30,7 +30,7 @@ def test_real_evaluation_keeps_unknowns_out_of_accuracy_denominator(tmp_path):
 
 
 def test_real_evaluation_lists_all_six_missing_negative_categories(tmp_path):
-    from apkscan.config.evaluation import evaluate_real_suite
+    from fxapk.config.evaluation import evaluate_real_suite
 
     result = evaluate_real_suite([specimen(tmp_path)])
     expected = ["cdn_contact", "expired_resolution", "modified_runtime", "random_iv", "sdk_config_domain", "shared_ip"]
@@ -40,7 +40,7 @@ def test_real_evaluation_lists_all_six_missing_negative_categories(tmp_path):
 
 @pytest.mark.parametrize("categories", [["modified_runtime"], ["invented"], "modified_runtime", [{}]])
 def test_real_negative_categories_require_explicit_valid_labels(tmp_path, categories):
-    from apkscan.config.evaluation import evaluate_real_suite
+    from fxapk.config.evaluation import evaluate_real_suite
 
     case = specimen(tmp_path)
     label = {"schema": "fxapk-addressing-label-1", "case_id": "example", "sample_sha256": case["apk"]["sha256"],
@@ -58,7 +58,7 @@ def test_real_negative_categories_require_explicit_valid_labels(tmp_path, catego
 
 
 def test_evaluation_rehashes_sample_report_and_runtime_and_never_rewrites(tmp_path):
-    from apkscan.config.evaluation import evaluate_real_suite
+    from fxapk.config.evaluation import evaluate_real_suite
     case = specimen(tmp_path)
     before = {r["path"]: open(r["path"], "rb").read() for r in [case["apk"], case["report"], *case["runtime_reports"]]}
     evaluate_real_suite([case])
@@ -69,7 +69,7 @@ def test_evaluation_rehashes_sample_report_and_runtime_and_never_rewrites(tmp_pa
 
 
 def test_independent_label_is_separate_bound_material_not_inferred_from_zero_events(tmp_path):
-    from apkscan.config.evaluation import evaluate_real_suite
+    from fxapk.config.evaluation import evaluate_real_suite
     case = specimen(tmp_path)
     label = {"schema": "fxapk-addressing-label-1", "case_id": "example", "sample_sha256": case["apk"]["sha256"],
              "basis": "independent_review", "reviewer": "fixture-reviewer", "evidence_sha256": [case["runtime_reports"][0]["sha256"]],
@@ -87,7 +87,7 @@ def test_independent_label_is_separate_bound_material_not_inferred_from_zero_eve
 def test_evaluation_cli_is_offline_and_does_not_overwrite(tmp_path, monkeypatch):
     import socket
     from typer.testing import CliRunner
-    from apkscan.cli import app
+    from fxapk.cli import app
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: pytest.fail("evaluation network"))
     case = specimen(tmp_path)
     manifest = tmp_path / "manifest.json"
@@ -102,9 +102,9 @@ def test_evaluation_cli_is_offline_and_does_not_overwrite(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("variant", ["bound", "unbound_round", "wrong_identity", "stale_ledger"])
 def test_evaluation_rebuilds_capture_scope_and_does_not_trust_old_ledger(tmp_path, variant):
-    from apkscan.config.evaluation import evaluate_real_suite
-    from apkscan.dynamic.addressing_events import AddressingEventCollector
-    from apkscan.dynamic.config_artifacts import ConfigBodyCollector
+    from fxapk.config.evaluation import evaluate_real_suite
+    from fxapk.dynamic.addressing_events import AddressingEventCollector
+    from fxapk.dynamic.config_artifacts import ConfigBodyCollector
     from tests.test_addressing_runtime import ART, BODY, CONTEXT, events
     case = specimen(tmp_path)
     sample = case["apk"]["sha256"]

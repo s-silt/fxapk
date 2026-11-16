@@ -5,9 +5,9 @@ from dataclasses import fields
 from itertools import combinations
 import random
 
-from apkscan.core.linkage import SampleFeatures, _broad_shared_anchors
-from apkscan.core.linkage_review import _components
-from apkscan.core.textutil import strip_url_tail
+from fxapk.core.linkage import SampleFeatures, _broad_shared_anchors
+from fxapk.core.linkage_review import _components
+from fxapk.core.textutil import strip_url_tail
 
 
 def _sample(number: int, **changes) -> SampleFeatures:

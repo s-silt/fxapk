@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.analyzers.repack_identity import VERDICT_REPACK_SUSPECTED
-from apkscan.core import infra, pipeline
-from apkscan.core.closure.targets import _select_targets_with_stats
-from apkscan.core.leads import _VERDICT_REPACK_SUSPECTED, apply_repack_quarantine
-from apkscan.core.models import (
+from fxapk.analyzers.repack_identity import VERDICT_REPACK_SUSPECTED
+from fxapk.core import infra, pipeline
+from fxapk.core.closure.targets import _select_targets_with_stats
+from fxapk.core.leads import _VERDICT_REPACK_SUSPECTED, apply_repack_quarantine
+from fxapk.core.models import (
     DOWNGRADE_REPACK_IDENTITY,
     AnalysisConfig,
     Confidence,
@@ -26,8 +26,8 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
 )
-from apkscan.dynamic import merge
-from apkscan.report import letters
+from fxapk.dynamic import merge
+from fxapk.report import letters
 
 
 def _lead(value: str, category: LeadCategory = LeadCategory.DOMAIN, *, advice: str = "建议调证") -> Lead:

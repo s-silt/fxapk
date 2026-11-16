@@ -16,9 +16,9 @@ import logging
 
 import pytest
 
-from apkscan.core import pipeline
-from apkscan.core.models import AnalysisConfig, AnalyzerResult
-from apkscan.core.registry import (
+from fxapk.core import pipeline
+from fxapk.core.models import AnalysisConfig, AnalyzerResult
+from fxapk.core.registry import (
     _KNOWN_CAPABILITIES,
     _PLATFORM_CAPABILITIES,
     BaseAnalyzer,
@@ -223,7 +223,7 @@ def test_real_analyzers_declare_only_known_capabilities(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """全量真实分析器过一遍校验：改了能力词表后不许有任何一个变成"未知能力"。"""
-    from apkscan.core.registry import discover_analyzers
+    from fxapk.core.registry import discover_analyzers
 
     with caplog.at_level(logging.ERROR):
         analyzers = discover_analyzers()

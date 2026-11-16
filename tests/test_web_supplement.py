@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.core.models import (
+from fxapk.core.models import (
     ADVICE_INVESTIGATE,
     ADVICE_REVIEW,
     OBSERVED_CONTACT_SOURCES,
@@ -22,16 +22,16 @@ from apkscan.core.models import (
     Lead,
     LeadCategory,
 )
-from apkscan.core.web_supplement import (
+from fxapk.core.web_supplement import (
     SOURCE,
     clamp_web_only_leads,
     merge_candidates,
     project_for_digest,
 )
-from apkscan.core.webctx import WebContext
-from apkscan.dynamic.capture import overlap_web_observation
-from apkscan.dynamic.capture_sequence import run_rounds
-from apkscan.report.digest import build_digest
+from fxapk.core.webctx import WebContext
+from fxapk.dynamic.capture import overlap_web_observation
+from fxapk.dynamic.capture_sequence import run_rounds
+from fxapk.report.digest import build_digest
 
 
 MARKER = "MALICIOUS-FREE-TEXT-NOT-FOR-DIGEST"
@@ -49,8 +49,8 @@ def test_pipeline_without_config_does_not_call_plugin(monkeypatch: pytest.Monkey
         called["n"] += 1
         return [], []
 
-    monkeypatch.setattr("apkscan.core.web_supplement.discover_plugins", boom)
-    from apkscan.core import pipeline
+    monkeypatch.setattr("fxapk.core.web_supplement.discover_plugins", boom)
+    from fxapk.core import pipeline
 
     ctx = WebContext(AnalysisConfig(online=False, out_dir="out"), files={"web/index.html": b"<html></html>"})
     report = pipeline.run(ctx, ctx.config)  # type: ignore[arg-type]
@@ -109,7 +109,7 @@ def _observation(script: str) -> dict:
 
 
 def _bundle(tmp_path: Path, script: str) -> Path:
-    importlib.import_module("apkscan.plugins.registry")
+    importlib.import_module("fxapk.plugins.registry")
     src = Path(__file__).parents[1] / "plugins/fxapk-rea/src"
     import sys
     if str(src) not in sys.path:
@@ -130,7 +130,7 @@ def _install_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
     def discover() -> tuple[list[object], list[dict[str, str]]]:
         return [plugin.plugin_factory()], [{"name": "rea", "status": "ok", "reason": ""}]
 
-    monkeypatch.setattr("apkscan.core.web_supplement.discover_plugins", discover)
+    monkeypatch.setattr("fxapk.core.web_supplement.discover_plugins", discover)
 
 
 def test_analyze_web_auto_adds_candidate_and_off_does_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,7 +147,7 @@ def test_analyze_web_auto_adds_candidate_and_off_does_not(tmp_path: Path, monkey
         "source": "bundle",
         "path": str(bundle),
     }), encoding="utf-8")
-    from apkscan import cli
+    from fxapk import cli
 
     out = tmp_path / "out"
     result = CliRunner().invoke(cli.app, [
@@ -186,7 +186,7 @@ def test_analyze_web_auto_adds_candidate_and_off_does_not(tmp_path: Path, monkey
 
 def test_missing_plugin_keeps_main_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "apkscan.core.web_supplement.discover_plugins",
+        "fxapk.core.web_supplement.discover_plugins",
         lambda: ([], [{"name": "rea", "status": "unavailable", "reason": "plugin_unavailable"}]),
     )
     evidence = tmp_path / "html"
@@ -196,7 +196,7 @@ def test_missing_plugin_keeps_main_flow(tmp_path: Path, monkeypatch: pytest.Monk
     config.write_text(json.dumps({
         "schema_version": "fxapk.web_supplement.v1", "mode": "auto", "source": "bundle", "path": str(tmp_path / "missing"),
     }), encoding="utf-8")
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     ctx = WebContext(
         AnalysisConfig(online=False, out_dir=str(tmp_path / "out"), web_supplement=str(config)),
@@ -212,7 +212,7 @@ def test_tamper_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     bundle = _bundle(tmp_path, 'var API_BASE = "http://127.0.0.1:9/only-supplement";\n')
     script = next((bundle / "scripts").glob("*.js"))
     script.write_bytes(script.read_bytes() + b"x")
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     ctx = WebContext(
         AnalysisConfig(online=False, out_dir=str(tmp_path / "out"), web_supplement_request={
@@ -244,7 +244,7 @@ def test_unauthorised_cdp_does_not_touch_socket(monkeypatch: pytest.MonkeyPatch)
 def test_repeat_does_not_raise_trust_and_runtime_lead_stays() -> None:
     runtime = Evidence(source="runtime-pcap", location="pcap")
     endpoint = Endpoint(value="203.0.113.10", kind="ip", evidences=[runtime])
-    from apkscan.core.leads import build_endpoint_leads
+    from fxapk.core.leads import build_endpoint_leads
 
     original = build_endpoint_leads([endpoint], online=False)[0]
     web = Evidence(source=SOURCE, location="raw:aa|request")

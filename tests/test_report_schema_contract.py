@@ -18,8 +18,8 @@
 
 from __future__ import annotations
 
-from apkscan.core.models import Evidence, Lead, LeadCategory, Report
-from apkscan.report import json as report_json
+from fxapk.core.models import Evidence, Lead, LeadCategory, Report
+from fxapk.report import json as report_json
 
 # ★1.2 增加 Evidence.scope；再新增机器可见字段时，集合与版本断言必须一起更新。
 _REPORT_KEYS_1_2 = {

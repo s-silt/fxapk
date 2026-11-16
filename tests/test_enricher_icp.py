@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.enrichers.icp as icp_mod
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.enrichers.icp import IcpEnricher, IcpUnavailable
-from apkscan.selfcheck import build_credential_components
+import fxapk.enrichers.icp as icp_mod
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.enrichers.icp import IcpEnricher, IcpUnavailable
+from fxapk.selfcheck import build_credential_components
 
 
 # --- 通用打桩 -------------------------------------------------------------
@@ -131,7 +131,7 @@ def test_selfcheck_does_not_gate_custom_provider_on_hapi_key(
 ) -> None:
     monkeypatch.delenv("FXAPK_ICP_HAPI_KEY", raising=False)
     monkeypatch.setattr(
-        "apkscan.core.registry.discover_enrichers",
+        "fxapk.core.registry.discover_enrichers",
         lambda: [_ProviderEnricher()],
     )
 
@@ -849,7 +849,7 @@ def test_unavailable_logged_once_for_multiple_domains(
     import logging
 
     enr = IcpEnricher()
-    with caplog.at_level(logging.INFO, logger="apkscan.enrichers.icp"):
+    with caplog.at_level(logging.INFO, logger="fxapk.enrichers.icp"):
         enr.enrich(_ep("a.cn"))
         enr.enrich(_ep("b.cn"))
         enr.enrich(_ep("c.cn"))

@@ -19,17 +19,17 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.core.webctx as webctx_module
-from apkscan.analyzers.web_evidence import (
+import fxapk.core.webctx as webctx_module
+from fxapk.analyzers.web_evidence import (
     EVIDENCE_SOURCE,
     WebInlineConfigAnalyzer,
     WebRedirectChainAnalyzer,
     WebRequestRecipeAnalyzer,
 )
-from apkscan.commands.web import _FALLBACK_BASE, _sanitize_base
-from apkscan.core.context import AnalysisContext
-from apkscan.core.models import AnalysisConfig
-from apkscan.core.webctx import (
+from fxapk.commands.web import _FALLBACK_BASE, _sanitize_base
+from fxapk.core.context import AnalysisContext
+from fxapk.core.models import AnalysisConfig
+from fxapk.core.webctx import (
     MAX_EVIDENCE_BYTES,
     WEB_PREFIX,
     WebContext,
@@ -164,7 +164,7 @@ def test_body_evidence_is_visible_to_reused_endpoints_analyzer(tmp_path: Path) -
     "后缀 **或** 目录前缀"命中、虚拟前缀 ``web/`` 也不在其前缀名单 —— 若不补规范扩展名，则一份
     ``resp.body`` 里的端点一条都抽不到，且报告看起来毫无异常。删掉 canonical 调用 → 本测试必红。
     """
-    from apkscan.analyzers.endpoints import EndpointsAnalyzer
+    from fxapk.analyzers.endpoints import EndpointsAnalyzer
 
     (tmp_path / "resp.body").write_bytes(
         b'<html><script>var u="https://from-body.example.com/v1";</script></html>'
@@ -368,7 +368,7 @@ def test_utf16_html_evidence_is_readable_by_reused_analyzer(tmp_path: Path) -> N
     UTF-8，下游按 UTF-8 解出的是 ``<\\x00h\\x00t\\x00m\\x00l\\x00>``，所有正则全部失配，
     报告与"这份证据没线索"长得一模一样。删掉 normalize 调用 → 本测试必红。
     """
-    from apkscan.analyzers.endpoints import EndpointsAnalyzer
+    from fxapk.analyzers.endpoints import EndpointsAnalyzer
 
     html = '<html><script>var u="https://utf16-body.example.com/v1";</script></html>'
     # 必须带 BOM：无 BOM 的 UTF-16 一律**不猜**（猜错编码 = 伪造证据内容），
@@ -387,7 +387,7 @@ def test_utf16_html_evidence_is_readable_by_reused_analyzer(tmp_path: Path) -> N
 
 def test_utf16_headers_evidence_is_readable_by_reused_analyzer(tmp_path: Path) -> None:
     """UTF-16 的 ``.headers`` 同样要能被抽到 Location 跳转目标（响应头也可能 UTF-16 落盘）。"""
-    from apkscan.analyzers.endpoints import EndpointsAnalyzer
+    from fxapk.analyzers.endpoints import EndpointsAnalyzer
 
     raw = "HTTP/1.1 302 Found\r\nLocation: https://utf16-hdr.example.net/go\r\n"
     (tmp_path / "h.headers").write_bytes(b"\xfe\xff" + raw.encode("utf-16-be"))
@@ -477,7 +477,7 @@ def test_url_only_backend_still_produces_lead() -> None:
     ★必须走 ``build_endpoint_leads`` 真链路：只断言"抽到了 domain 端点"锁不住这条，
       本缺陷的要害正是端点与 Lead 之间那一段。
     """
-    from apkscan.core.leads import build_endpoint_leads
+    from fxapk.core.leads import build_endpoint_leads
 
     html = f'<html><script>window.apiBase = "https://{DOC_HOST}/api/v1";</script></html>'.encode()
     result = WebInlineConfigAnalyzer().analyze(_ctx({"web/i.html": html}))
@@ -529,9 +529,9 @@ def test_multi_page_web_evidence_top_n_selection_end_to_end() -> None:
       真正能把真后端顶上来的是运行时证据（实连的对端绕过来源配额且排序优先），
       静态侧不做、也做不到这个保证。
     """
-    from apkscan.core.closure.targets import _select_targets_with_stats
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import Report
+    from fxapk.core.closure.targets import _select_targets_with_stats
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import Report
 
     files: dict[str, bytes] = {}
     for n in range(1, 6):
@@ -830,7 +830,7 @@ def test_request_recipe_skips_binary_payloads() -> None:
 
 def test_request_recipe_confidence_is_low_and_wording_hedged() -> None:
     """★ 启发式判据不许写成已确认的协议规格（宁可漏，不可造）。"""
-    from apkscan.core.models import Confidence, Severity
+    from fxapk.core.models import Confidence, Severity
 
     token = _b64("Authorization: Bearer placeholder-token")
     js = f'fetch(u,{{headers:{{a:atob("{token}")}}}});'.encode()
@@ -915,7 +915,7 @@ def test_analyze_web_end_to_end_writes_report_json(tmp_path: Path) -> None:
     """★端到端：analyze-web 产出 report.json，且走的是与 analyze 同一条出口。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _evidence_dir(tmp_path)
     result = CliRunner().invoke(
@@ -963,7 +963,7 @@ def test_analyze_web_report_can_be_packaged(tmp_path: Path) -> None:
     """网页一级证据也必须带齐 Phase-1 三锚点，不能产出无法封包的报告。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _evidence_dir(tmp_path)
     runner = CliRunner()
@@ -999,7 +999,7 @@ def test_analyze_web_skips_android_only_analyzers(tmp_path: Path) -> None:
     """★平台门控在真命令下生效：requires=["apk"] 的分析器不得在网页证据上空跑。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _evidence_dir(tmp_path)
     result = CliRunner().invoke(cli.app, ["analyze-web", str(root), "--fmt", "json"])
@@ -1017,7 +1017,7 @@ def test_analyze_web_empty_dir_is_error_not_empty_report(tmp_path: Path) -> None
     """★零证据必须非零退出：空报告与"真的没有线索"不可区分，绝不能 exit 0。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = tmp_path / "empty"
     root.mkdir()
@@ -1032,7 +1032,7 @@ def test_analyze_web_origin_cannot_escape_out_dir(tmp_path: Path) -> None:
     """★不可信输入：--origin 里的路径穿越不得把报告写到 out 目录之外。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     root = _evidence_dir(tmp_path)
     result = CliRunner().invoke(
@@ -1078,8 +1078,8 @@ def test_analyze_web_reports_load_errors_to_stderr(tmp_path: Path) -> None:
     """读取缺口必须当场对人可见（stderr），不只躺在 report.json 里。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli
-    from apkscan.core import webctx
+    from fxapk import cli
+    from fxapk.core import webctx
 
     root = _evidence_dir(tmp_path)
     oversized = root / "huge.html"
@@ -1164,7 +1164,7 @@ def test_script_regex_has_no_catastrophic_backtracking() -> None:
     """
     import time
 
-    from apkscan.analyzers.web_evidence import _iter_script_blocks
+    from fxapk.analyzers.web_evidence import _iter_script_blocks
 
     # ① 开标签后长尾且始终不闭合
     unterminated = "<script>x</script" + " " * 200_000
@@ -1184,7 +1184,7 @@ def test_web_analyzers_reject_regex_redenial_inputs() -> None:
     """★ReDoS 回归（sfind-d8e281fe）：百万级换行/<meta/<script 输入必须秒级完成。"""
     import time
 
-    from apkscan.analyzers.web_evidence import (
+    from fxapk.analyzers.web_evidence import (
         WebInlineConfigAnalyzer,
         WebRedirectChainAnalyzer,
         _iter_script_blocks,

@@ -292,7 +292,7 @@ def scan_source(src: str, path: str = "<mem>") -> ChainScan:
     return res
 
 
-def scan_repository(root: Path, *, prod_dir: str = "apkscan") -> ChainScan:
+def scan_repository(root: Path, *, prod_dir: str = "fxapk") -> ChainScan:
     """扫全部生产代码（测试目录刻意不扫：测试里调 build_endpoint_leads 是在测它本身）。"""
     res = ChainScan()
     base = root / prod_dir

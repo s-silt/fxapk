@@ -62,9 +62,9 @@ jobs:
           # release with changed defaults/rules silently alter what CI enforces.
           python -m pip install "ruff==0.15.15" pyright
       - name: Ruff (lint)
-        run: python -m ruff check apkscan tests plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src
+        run: python -m ruff check fxapk tests plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src
       - name: Pyright (type check)
-        run: python -m pyright apkscan plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src
+        run: python -m pyright fxapk plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src
 
   leak-scan:
     # ★第二道防线：本地 pre-commit hook 可被 --no-verify 跳过，CI 不能。
@@ -94,7 +94,7 @@ jobs:
           # （见下面 full-tree 关只压默认判据），但对"这个 PR 新写的行"完全可控：写的人当场
           # 就能改成 example.com / .test，或加带理由的行内豁免。少了 --strict，新域名字面与
           # 语境框架词只会打印一行"提示"然后 exit 0 —— 那两条判据在 CI 里等于不存在。
-          python -m apkscan.cli leak-scan --base "origin/${{ github.base_ref }}" --strict
+          python -m fxapk.cli leak-scan --base "origin/${{ github.base_ref }}" --strict
 
   leak-scan-full-tree:
     # ★第三道防线：diff 判据只看**新增行**，故合并前已存在的阻断项会被永久 grandfather。
@@ -115,11 +115,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e "."
-      - name: Default blocking findings across tracked apkscan/ + tests/ must be 0
+      - name: Default blocking findings across tracked fxapk/ + tests/ must be 0
         # --tracked：只扫 git 已跟踪文件。不加它会连 CI 上的未跟踪产物（安装期生成物、
         # 缓存解包内容）一起扫，门禁就会随运行环境漂移；枚举不到文件时 CLI exit 2，
         # 「少扫了」不会与「扫全了」同形。
-        run: python -m apkscan.cli leak-scan --tracked --path apkscan --path tests
+        run: python -m fxapk.cli leak-scan --tracked --path fxapk --path tests
 
   test:
     name: pytest (${{ matrix.os }} / py${{ matrix.python-version }})
@@ -165,7 +165,7 @@ jobs:
           FXAPK_REQUIRE_BUILD_TOOLCHAIN: "1"
         run: >-
           python -m pytest -q -n auto
-          --cov=apkscan --cov-report=term-missing:skip-covered --cov-fail-under=80
+          --cov=fxapk --cov-report=term-missing:skip-covered --cov-fail-under=80
           --junitxml=${{ runner.temp }}/fxapk-tests.xml
       - name: Verify Linux process ownership tests actually ran
         if: runner.os == 'Linux'
@@ -196,7 +196,7 @@ jobs:
   jadx-recall-replay:
     # ★召回基线出处的端到端重放：从 origin 历史取 master 基线 commit（bd58041，
     #   全 SHA 钉在 tests/gen_jadx_recall_baseline.py 的 MASTER_COMMIT，workflow 不
-    #   另存一份）的 apkscan 树，在该树的提取器下实测 tests/jadx_recall_corpus.py
+    #   另存一份）的 fxapk 树，在该树的提取器下实测 tests/jadx_recall_corpus.py
     #   语料，与 tests/jadx_recall_master_baseline.py 钉住的基线字面量逐项对账
     #   （纯数据模块——本 job 只装运行期依赖，裁决链不得连带 pytest）。防的是
     #   「MASTER_EXTRACTION/MASTER_PATHS 来自 master 实测」这句宣称烂掉：改语料、
@@ -303,7 +303,7 @@ jobs:
           python -m pip install -e "." pytest
           # droidasc 先按测试清单里的官方轮子 sha256 走 hash 校验安装：同版本号换了制品
           # （或退回 sdist）在这里就红。哈希只存一份在 _ASC_RELEASES，不在 workflow 里抄第二份。
-          python -c "from apkscan.core import dex_query as dq; from tests.test_dex_query_versions import _ASC_RELEASES as r; print(f'droidasc=={dq.PINNED_VERSION} --hash=sha256:{r[dq.PINNED_VERSION][\"wheel_sha256\"]}')" > "$RUNNER_TEMP/droidasc.req"
+          python -c "from fxapk.core import dex_query as dq; from tests.test_dex_query_versions import _ASC_RELEASES as r; print(f'droidasc=={dq.PINNED_VERSION} --hash=sha256:{r[dq.PINNED_VERSION][\"wheel_sha256\"]}')" > "$RUNNER_TEMP/droidasc.req"
           python -m pip install --no-deps --only-binary=:all: --require-hashes -r "$RUNNER_TEMP/droidasc.req"
           # 其余直接依赖按锁装；axml/mutf8 无 hash 钉，mutf8 由 worker 运行期自检编码。
           python -m pip install -r plugins/fxapk-asc/requirements.lock
@@ -363,7 +363,10 @@ jobs:
           /tmp/smoke/bin/fxapk --version
           # ★关键：rules/*.yaml 等 package-data 真打进 wheel 且可被 importlib.resources 读到。
           #   纯源码测试跑不出这类“忘打数据文件 → pip 装完加载不了规则”的发布事故。
-          /tmp/smoke/bin/python -I -c "import sys, apkscan; from pathlib import Path; from importlib.resources import files; from apkscan.core.registry import load_rules; assert Path(apkscan.__file__).is_relative_to(Path(sys.prefix)), 'checkout shadowed installed wheel'; assert all(load_rules(n) for n in ('packers','re_toolkit','app_types','source_access')), 'packaged rules missing from wheel'; assert list(files('apkscan.dynamic').joinpath('frida_js').iterdir()), 'packaged hooks missing'; assert list(files('apkscan').joinpath('report/templates').iterdir()), 'packaged templates missing'; print('installed wheel resources OK')"
+          /tmp/smoke/bin/python -I -c "import sys, fxapk; from pathlib import Path; from importlib.resources import files; from fxapk.core.registry import load_rules; assert Path(fxapk.__file__).is_relative_to(Path(sys.prefix)), 'checkout shadowed installed wheel'; assert all(load_rules(n) for n in ('packers','re_toolkit','app_types','source_access')), 'packaged rules missing from wheel'; assert list(files('fxapk.dynamic').joinpath('frida_js').iterdir()), 'packaged hooks missing'; assert list(files('fxapk').joinpath('report/templates').iterdir()), 'packaged templates missing'; print('installed wheel resources OK')"
+          # 与发版门禁同一路径：离线分析 → digest → 证据打包/校验 → 损坏副本必须非零。
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          /tmp/smoke/bin/python -I tools/release_smoke.py --expect-version "$VERSION"
 
   audit:
     name: dependency audit

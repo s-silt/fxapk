@@ -1,4 +1,4 @@
-"""P3-A 红态契约：apkscan/core/reanalysis_contract.py 的行为规范。
+"""P3-A 红态契约：fxapk/core/reanalysis_contract.py 的行为规范。
 
 这份测试是契约本身（设计见本地 P3 v4 spec §1/§2/§4）。核心不变量：
 - AnalysisType closed-world（8 值）；授权矩阵固定、声明不可降；
@@ -14,10 +14,10 @@ import dataclasses
 
 import pytest
 
-from apkscan.core import reanalysis_contract as rx
-from apkscan.core.judgment_ledger import GapStatus
-from apkscan.core.recognition_codec import build_evidence_gap, build_next_action
-from apkscan.core.recognition_contract import (
+from fxapk.core import reanalysis_contract as rx
+from fxapk.core.judgment_ledger import GapStatus
+from fxapk.core.recognition_codec import build_evidence_gap, build_next_action
+from fxapk.core.recognition_contract import (
     ActionBudget,
     AuthorizationLevel,
     GapEffect,

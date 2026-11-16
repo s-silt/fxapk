@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from apkscan.dynamic import STATUS_ERROR, auto
+from fxapk.dynamic import STATUS_ERROR, auto
 
 #: 三类不该外泄的值揉进同一个异常消息里。
 _SECRET = "https://user:pw@leak-canary.example/a?token=CANARY_SECRET /home/u/cases/CASE-X"
@@ -32,30 +32,30 @@ def _boom(*_args: Any, **_kwargs: Any) -> Any:
 
 #: (step 名, 调用 _run_* 的 thunk, 要打桩的模块与属性)
 _CASES = [
-    ("环境体检", lambda: auto._run_doctor(auto_fix=False, on_progress=None), ("apkscan.dynamic.doctor", "run")),
+    ("环境体检", lambda: auto._run_doctor(auto_fix=False, on_progress=None), ("fxapk.dynamic.doctor", "run")),
     (
         "静态分析",
         lambda: auto._run_static(
             "x.apk", out_dir="out", online=False, formats=["json"], on_progress=None
         ),
-        ("apkscan.core.apk", "load_apk"),
+        ("fxapk.core.apk", "load_apk"),
     ),
     (
         "安装到设备",
         lambda: auto._run_install_app("x.apk", on_progress=None),
-        ("apkscan.dynamic.provision", "install_apk"),
+        ("fxapk.dynamic.provision", "install_apk"),
     ),
     (
         "脱壳",
         lambda: auto._run_unpack("x.apk", out_dir="out", has_device=True, on_progress=None),
-        ("apkscan.dynamic.unpack", "run"),
+        ("fxapk.dynamic.unpack", "run"),
     ),
     (
         "去壳重打包",
         lambda: auto._run_repackage(
             "x.apk", "com.example.app", out_dir="out", has_device=True, on_progress=None
         ),
-        ("apkscan.dynamic.repackage", "run"),
+        ("fxapk.dynamic.repackage", "run"),
     ),
     (
         "抓包",
@@ -67,7 +67,7 @@ _CASES = [
             on_progress=None,
             confirm=None,
         ),
-        ("apkscan.dynamic.capture", "run"),
+        ("fxapk.dynamic.capture", "run"),
     ),
 ]
 

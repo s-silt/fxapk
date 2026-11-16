@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.core.models import EvidenceScope
+from fxapk.core.models import EvidenceScope
 
 ROOT = Path(__file__).parents[1]
 PLUGIN_SRC = ROOT / "plugins" / "fxapk-rea" / "src"
@@ -530,7 +530,7 @@ def test_digest_native_handoff_without_plugin_import():
             "-c",
             (
                 "import json,sys\n"
-                "from apkscan.report.digest import build_digest\n"
+                "from fxapk.report.digest import build_digest\n"
                 "report={'meta':{'native_lib_hashes':[{'name':'a.so','sha256':'ab'*32,'size':1}]},"
                 "'findings':[{'id':'NATIVE-OBFUSCATION-SUSPECTED','severity':'MEDIUM'}],"
                 "'endpoints':[],'leads':[]}\n"
@@ -558,7 +558,7 @@ def test_digest_native_handoff_without_plugin_import():
 
 
 def test_digest_shows_recovery_candidate(native, monkeypatch, tmp_path):
-    from apkscan.report.digest import build_digest
+    from fxapk.report.digest import build_digest
 
     body, recipe = _hidden_file()
     bundle = _inspect_bundle(native, monkeypatch, tmp_path, body)
@@ -717,7 +717,7 @@ def _off_config(path: Path) -> Path:
 
 
 def test_shared_snapshot_dag_is_not_a_cycle(tmp_path):
-    from apkscan.core.web_supplement_report import supplement_report
+    from fxapk.core.web_supplement_report import supplement_report
 
     blob = json.dumps({"schema_version": "1.2", "meta": {}, "endpoints": [], "leads": []}).encode()
     digest = hashlib.sha256(blob).hexdigest()
@@ -785,7 +785,7 @@ def test_history_entry_hash_and_duplicate_refuse(native, monkeypatch, tmp_path):
 
 
 def test_incomplete_native_history_is_not_dropped(tmp_path):
-    from apkscan.core.web_supplement_report import SupplementRefusal, supplement_report
+    from fxapk.core.web_supplement_report import SupplementRefusal, supplement_report
 
     digest = "ab" * 32
     manifest = b"{}\n"
@@ -870,8 +870,8 @@ def test_extract_report_binds_apk_member_and_abi(native, tmp_path):
     [("domain", "pay.example.com"), ("ip", "192.0.2.73")],
 )
 def test_build_endpoint_leads_keeps_unverified_native_low(kind: str, value: str):
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import Confidence, Endpoint, Evidence, EvidenceScope
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import Confidence, Endpoint, Evidence, EvidenceScope
 
     native_ev = Evidence(source="derived-native", location="native-recovery:synthetic", snippet=value)
     web_ev = Evidence(
@@ -938,8 +938,8 @@ def test_build_endpoint_leads_keeps_unverified_native_low(kind: str, value: str)
 def test_build_endpoint_leads_keeps_independent_static_and_pcap(
     kind: str, value: str, kept_advice: str,
 ):
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import Confidence, Endpoint, Evidence
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import Confidence, Endpoint, Evidence
 
     native_ev = Evidence(source="derived-native", location="native-recovery:synthetic", snippet=value)
     dex_ev = Evidence(source="dex", location="strings", snippet=value)
@@ -973,8 +973,8 @@ def test_build_endpoint_leads_keeps_independent_static_and_pcap(
 def test_non_case_scope_cannot_corroborate_unverified_native(
     kind: str, value: str, source: str, scope: EvidenceScope,
 ):
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import Confidence, Endpoint, Evidence
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import Confidence, Endpoint, Evidence
 
     native_ev = Evidence(source="derived-native", location="native-recovery:synthetic", snippet=value)
     other = Evidence(source=source, location="other-case", snippet=value, scope=scope)

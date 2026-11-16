@@ -1,7 +1,7 @@
 """Sequence evidence cannot be assembled by mixing different observations."""
 from copy import deepcopy
 import pytest
-from apkscan.core.closure import evaluate_capture_quality
+from fxapk.core.closure import evaluate_capture_quality
 
 
 def row(n, **quality):
@@ -74,14 +74,14 @@ def test_invalid_ledger_returns_complete_failure_shape(records):
 
 
 def test_unexecuted_empty_sequence_does_not_invent_dynamic_material():
-    from apkscan.core.closure.gates import _capture_meta
-    from apkscan.core.models import Report
+    from fxapk.core.closure.gates import _capture_meta
+    from fxapk.core.models import Report
     report=Report(package_name='com.example.synthetic',meta={'capture_rounds':[]},endpoints=[],leads=[],findings=[],analyzer_status=[])
     assert _capture_meta(report)=={}
 
 
 def test_healthy_floor_does_not_require_intentionally_absent_frida():
-    from apkscan.dynamic.auto import _pass1_suggests_bypass
+    from fxapk.dynamic.auto import _pass1_suggests_bypass
     payload={'endpoint_total':3,'capture_signals':{'hook_ready_status':'none'}}
     assert _pass1_suggests_bypass('done',payload,instrumentation_expected=False)[0] is False
     assert _pass1_suggests_bypass('done',payload)[0] is True  # Legacy instrumentation contract.
@@ -90,10 +90,10 @@ def test_healthy_floor_does_not_require_intentionally_absent_frida():
 def test_actual_merge_to_closure_and_preparation_keeps_round_evidence(tmp_path):
     import hashlib
     import json
-    from apkscan.core.models import Report
-    from apkscan.core.closure.gates import _capture_meta
-    from apkscan.core.phase2.preparation import _stage_observations
-    from apkscan.dynamic.auto import _run_merge
+    from fxapk.core.models import Report
+    from fxapk.core.closure.gates import _capture_meta
+    from fxapk.core.phase2.preparation import _stage_observations
+    from fxapk.dynamic.auto import _run_merge
     report=Report(package_name='com.example.synthetic',meta={
         'capture_apk_identity':{'which':'original','original':{'sha256':'a'*64}}},
         endpoints=[],leads=[],findings=[],analyzer_status=[])

@@ -3,7 +3,7 @@ import json
 from urllib.parse import urlsplit
 import pytest
 import requests
-from apkscan.enrichers import _http, icp
+from fxapk.enrichers import _http, icp
 
 
 def test_hapi_rate_policy_admits_one_nonredirecting_request(monkeypatch):

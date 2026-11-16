@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from apkscan.config.chain import build_control_chains
-from apkscan.core import pipeline
-from apkscan.core.models import AnalysisConfig, Endpoint
+from fxapk.config.chain import build_control_chains
+from fxapk.core import pipeline
+from fxapk.core.models import AnalysisConfig, Endpoint
 
 
 def _ep_with_idc(value: str = "api.evil-c2.com"):

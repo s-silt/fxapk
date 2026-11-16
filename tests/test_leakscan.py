@@ -11,7 +11,7 @@
 2. **它把手法教给下一个人。** 复制这段代码的人会连同绕过手法一起复制。
 
 改法：阳性夹具一律写成**字面量**（扫描器看得见），"这行是有意的合成夹具"由
-:mod:`apkscan.core.leakscan` 既有的行内豁免机制 ``leak-scan: allow <理由>`` 声明——
+:mod:`fxapk.core.leakscan` 既有的行内豁免机制 ``leak-scan: allow <理由>`` 声明——
 例外因此**可见、可审计**，而不是隐写。判据本身**一点没弱化**：豁免只作用于常量定义
 那一行，夹具值经 f-string 进入被扫描的 diff 行时照常命中（见
 :func:`test_positive_fixtures_still_fire_without_any_exemption`）。
@@ -38,7 +38,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import leakscan
+from fxapk.core import leakscan
 
 # --- 阳性夹具：字面量 + 带理由的行内豁免（绝不拼接绕过，见模块文档） ----------------
 #: 触发 ``ip`` 判据用。RFC 7526 已废弃的 6to4 中继 anycast，不是任何主机的地址。
@@ -68,7 +68,7 @@ _DOC_IPV6 = "2001:db8::1"
 #: 阴性夹具：跨词边界的巧合（于/成 是姓氏字），以及公开的第三方包名与 Python 模块路径。
 _NOT_A_CASE_NAME = "用于串案索引"
 _STOCK_PACKAGE = "org.telegram.messenger"
-_MODULE_PATH = "apkscan.core.leakscan"
+_MODULE_PATH = "fxapk.core.leakscan"
 
 
 def _diff(path: str, *added: str) -> str:
@@ -87,7 +87,7 @@ def _rules(findings: list[leakscan.Finding]) -> set[str]:
 
 
 def test_real_public_ipv4_is_rejected() -> None:
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'HOST = "{_PUBLIC_IPV4}"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", f'HOST = "{_PUBLIC_IPV4}"'))
     ip_findings = [f for f in findings if f.rule == "ip"]
     assert ip_findings, "真公网 IPv4 必须被判为泄漏"
     assert ip_findings[0].value == _PUBLIC_IPV4
@@ -95,7 +95,7 @@ def test_real_public_ipv4_is_rejected() -> None:
 
 
 def test_real_public_ipv6_is_rejected() -> None:
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'HOST = "{_PUBLIC_IPV6}"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", f'HOST = "{_PUBLIC_IPV6}"'))
     assert [f for f in findings if f.rule == "ip" and f.value == _PUBLIC_IPV6]
 
 
@@ -116,7 +116,7 @@ def test_documentation_reserved_ranges_pass() -> None:
 def test_public_resolver_and_intercept_lists_pass() -> None:
     """公共解析器 / 已知拦截节点写进代码是功能需要，不是泄漏。"""
     findings = leakscan.scan_diff(
-        _diff("apkscan/network/fingerprints.py", 'R = {"8.8.8.8", "223.5.5.5", "183.192.65.101"}')
+        _diff("fxapk/network/fingerprints.py", 'R = {"8.8.8.8", "223.5.5.5", "183.192.65.101"}')
     )
     assert not [f for f in findings if f.rule == "ip"]
 
@@ -124,18 +124,18 @@ def test_public_resolver_and_intercept_lists_pass() -> None:
 def test_oid_arcs_are_not_mistaken_for_ipv4() -> None:
     """X.509 OID 与 IPv4 同形；不跳过则证书解析代码永远误报。"""
     findings = leakscan.scan_diff(
-        _diff("apkscan/core/infra.py", 'OIDS = ("2.5.4.3", "2.5.29.17", "1.3.6.1", "1.3.101.112")')
+        _diff("fxapk/core/infra.py", 'OIDS = ("2.5.4.3", "2.5.29.17", "1.3.6.1", "1.3.101.112")')
     )
     assert not [f for f in findings if f.rule == "ip"], f"OID 被误判成 IP：{findings}"
 
 
 def test_long_dotted_sequences_are_not_ipv4() -> None:
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", 'oid = "1.3.101.112.1"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", 'oid = "1.3.101.112.1"'))
     assert not [f for f in findings if f.rule == "ip"]
 
 
 def test_out_of_range_octets_are_not_ipv4() -> None:
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", 'v = "999.1.2.3"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", 'v = "999.1.2.3"'))
     assert not [f for f in findings if f.rule == "ip"]
 
 
@@ -145,7 +145,7 @@ def test_out_of_range_octets_are_not_ipv4() -> None:
 
 
 def test_hardcoded_secret_is_rejected() -> None:
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'api_key = "{_SECRET_VALUE}"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", f'api_key = "{_SECRET_VALUE}"'))
     secrets = [f for f in findings if f.rule == "secret"]
     assert secrets, "硬编码凭据必须被判为泄漏"
     assert _SECRET_VALUE not in secrets[0].value, "finding 不得回显凭据明文"
@@ -157,7 +157,7 @@ def test_jwt_bearer_value_is_rejected() -> None:
     # 合成 token：头/载荷是 ``{"alg":"HS256"}`` / ``{"sub":"1234567890"}`` 的 base64，
     # 签名段明文即 "synthetic-signature"。字面量写出、由行内豁免声明其合成性质。
     token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c3ludGhldGljLXNpZ25hdHVyZQ"  # leak-scan: allow secret 判据阳性夹具，签名段明文为 synthetic-signature
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'token = "{token}"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", f'token = "{token}"'))
 
     assert any(f.rule == "secret" for f in findings)
     assert leakscan.blocking(findings)
@@ -166,7 +166,7 @@ def test_jwt_bearer_value_is_rejected() -> None:
 def test_environment_variable_read_is_not_a_secret() -> None:
     """读环境变量是**正确**做法，不能被自家护栏拦下。"""
     findings = leakscan.scan_diff(
-        _diff("apkscan/enrichers/x.py", 'key = os.environ.get("FXAPK_FOFA_KEY", "")')
+        _diff("fxapk/enrichers/x.py", 'key = os.environ.get("FXAPK_FOFA_KEY", "")')
     )
     assert not [f for f in findings if f.rule == "secret"]
 
@@ -178,7 +178,7 @@ def test_key_in_docstring_with_wrapper_call_is_rejected() -> None:
     先过一层编码函数。两者叠加时判据仍须命中。
     """
     findings = leakscan.scan_diff(
-        _diff("apkscan/core/x.py", f'key=UTF-8("{_SECRET_VALUE}")（32B）')
+        _diff("fxapk/core/x.py", f'key=UTF-8("{_SECRET_VALUE}")（32B）')
     )
     secrets = [f for f in findings if f.rule == "secret"]
     assert secrets, "docstring 里被函数包住的 key 也必须判为泄漏"
@@ -195,13 +195,13 @@ def test_env_reader_wrapper_exempts_but_lookalike_value_does_not() -> None:
     """
     # 值在 os.environ.get(...) 里 → 是变量名，放行
     exempt = leakscan.scan_diff(
-        _diff("apkscan/x.py", 'key = os.environ.get("FXAPK_FOFA_KEY", "")')
+        _diff("fxapk/x.py", 'key = os.environ.get("FXAPK_FOFA_KEY", "")')
     )
     assert not [f for f in exempt if f.rule == "secret"], "从环境取值是推荐写法，不能被拦"
 
     # 同样长相、但是直接赋值 → 必须拦
     lookalike = leakscan.scan_diff(
-        _diff("apkscan/x.py", 'key = "REAL_SECRET_VALUE_7Q9K"')  # leak-scan: allow secret 判据阳性夹具，合成串非真实凭据
+        _diff("fxapk/x.py", 'key = "REAL_SECRET_VALUE_7Q9K"')  # leak-scan: allow secret 判据阳性夹具，合成串非真实凭据
     )
     assert [f for f in lookalike if f.rule == "secret"], "长得像变量名的硬编码值仍须被拦"
 
@@ -214,7 +214,7 @@ def test_compound_credential_names_are_covered() -> None:
     """
     for name in ("client_secret", "auth_token", "private_key", "encryption_key"):
         line = f'{name} = "{_SECRET_VALUE}"'
-        findings = leakscan.scan_diff(_diff("apkscan/x.py", line))
+        findings = leakscan.scan_diff(_diff("fxapk/x.py", line))
         assert [f for f in findings if f.rule == "secret"], f"{name} 未被覆盖"
 
 
@@ -225,7 +225,7 @@ def test_env_mention_does_not_exempt_whole_line() -> None:
     否则一句注释就能让任何凭据免检。
     """
     findings = leakscan.scan_diff(
-        _diff("apkscan/x.py", f'api_key = "{_SECRET_VALUE}"  # 迁移自 os.environ.get("X")')
+        _diff("fxapk/x.py", f'api_key = "{_SECRET_VALUE}"  # 迁移自 os.environ.get("X")')
     )
     assert [f for f in findings if f.rule == "secret"], "带 env 字样的行里，硬编码凭据仍须被拦"
 
@@ -244,7 +244,7 @@ def test_placeholder_secrets_pass() -> None:
 
 
 def test_short_values_are_not_secrets() -> None:
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", 'token = "abc123"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", 'token = "abc123"'))
     assert not [f for f in findings if f.rule == "secret"]
 
 
@@ -254,14 +254,14 @@ def test_short_values_are_not_secrets() -> None:
 
 
 def test_outside_domain_is_reported() -> None:
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'H = "{_OUTSIDE_DOMAIN}"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", f'H = "{_OUTSIDE_DOMAIN}"'))
     domains = [f for f in findings if f.rule == "domain"]
     assert domains and domains[0].value == _OUTSIDE_DOMAIN
 
 
 def test_outside_domain_is_advisory_by_default_and_blocks_in_strict() -> None:
     """域名判据噪音大：默认只提示，``strict`` 才阻断。"""
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'H = "{_OUTSIDE_DOMAIN}"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", f'H = "{_OUTSIDE_DOMAIN}"'))
     assert not leakscan.blocking(findings), "域名判据默认不该阻断"
     assert leakscan.blocking(findings, strict=True), "strict 下必须阻断"
 
@@ -283,7 +283,7 @@ def test_provider_official_domains_pass() -> None:
     """任务 1 要把富化器搬进仓库，其中的官方域必须能过自家扫描。"""
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/enrichers/multisource.py",
+            "fxapk/enrichers/multisource.py",
             '_URL = "https://stat.ripe.net/data/prefix-overview/data.json"',
             '_BASE = "https://otx.alienvault.com/api/v1/indicators"',
             '_URL = "https://urlscan.io/api/v1/search/"',
@@ -307,7 +307,7 @@ def test_reverse_dns_package_names_are_not_domains() -> None:
 def test_filenames_and_attribute_access_are_not_domains() -> None:
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             "logger.info('hi')",
             'name = "libjiagu.so"',
             'p = "report.json"',
@@ -321,7 +321,7 @@ def test_python_domain_scans_data_tokens_not_executable_tokens(monkeypatch) -> N
     """Python 的分界是文字 token / 代码 token，不按碰撞 TLD 猜属性含义。"""
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             f'url = "https://{_OUTSIDE_DOMAIN}/x"',
             f'other = f"https://{{host}}.{_OUTSIDE_DOMAIN}"',
             f'before = f"https://{_OUTSIDE_DOMAIN}/{{p}}"',
@@ -365,7 +365,7 @@ def test_non_python_files_keep_line_regex_domain_detection() -> None:
 def test_python_allowlists_reserved_tlds_and_reverse_dns_still_apply() -> None:
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             'allowed = "api.example.com"',
             'reserved = "backend.invalid"',
             'package = "com.test.app"',
@@ -380,7 +380,7 @@ def test_python_tokenize_failure_falls_back_to_conservative_line_scan(monkeypatc
         raise IndentationError("合成 tokenizer 失败")
 
     monkeypatch.setattr(leakscan.tokenize, "generate_tokens", fail)
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'value = "{_OUTSIDE_DOMAIN}"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", f'value = "{_OUTSIDE_DOMAIN}"'))
     assert [finding for finding in findings if finding.rule == "domain"]
 
 
@@ -392,12 +392,12 @@ def test_full_python_file_uses_precise_token_spans_on_mixed_lines() -> None:
 
 def test_diff_worktree_mapping_handles_multiline_string_and_code(tmp_path: Path) -> None:
     """完整文件映射不能把多行字符串正文误当代码；普通属性链仍不判。"""
-    package = tmp_path / "apkscan"
+    package = tmp_path / "fxapk"
     package.mkdir()
     source = f'"""\n{_OUTSIDE_DOMAIN}\n"""\nvalue = node.func.id\n'  # leak-scan: allow domain 判据阴性夹具，验证完整文件 token 映射
     (package / "x.py").write_text(source, encoding="utf-8", newline="\n")
     diff = (
-        "--- /dev/null\n+++ b/apkscan/x.py\n@@ -0,0 +1,4 @@\n"
+        "--- /dev/null\n+++ b/fxapk/x.py\n@@ -0,0 +1,4 @@\n"
         + "".join(f"+{line}\n" for line in source.splitlines())
     )
     domains = [
@@ -449,7 +449,7 @@ def test_neutral_technical_text_passes() -> None:
 
 def test_person_name_with_case_marker_is_rejected() -> None:
     """★这是本判据的起因：探针注释里的「对应<真名>案：<QQ 号>」曾整条漏过。"""
-    findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// 对应{_CASE_NAME}：登录明文触发"))
+    findings = leakscan.scan_diff(_diff("fxapk/x.js", f"// 对应{_CASE_NAME}：登录明文触发"))
     names = [f for f in findings if f.rule == "person_name"]
     assert names, "「姓名 + 案」必须被判为泄漏"
     assert leakscan.blocking(findings), "person_name 判据必须默认阻断"
@@ -457,7 +457,7 @@ def test_person_name_with_case_marker_is_rejected() -> None:
 
 def test_person_name_finding_does_not_echo_the_name() -> None:
     """★脱敏：公开仓库的 CI 日志同样公开，把真名打进 Actions 输出＝换个地方泄漏。"""
-    findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// 见{_CASE_NAME}"))
+    findings = leakscan.scan_diff(_diff("fxapk/x.js", f"// 见{_CASE_NAME}"))
     names = [f for f in findings if f.rule == "person_name"]
     assert names
     assert _CASE_NAME[:-1] not in names[0].value, f"finding 值回显了姓名：{names[0].value}"
@@ -472,7 +472,7 @@ def test_cross_word_boundary_coincidences_are_not_person_names() -> None:
     """
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             f"# {_NOT_A_CASE_NAME}的域名规范化",
             "# 会被当成并案依据的写法",
             "# 报告阶段的逐案事实",
@@ -494,7 +494,7 @@ def test_case_compound_words_are_not_person_names() -> None:
 
 def test_name_plus_case_file_is_not_a_bypass() -> None:
     """★「<真名>案件」必须照样命中——只挡「<真名>案」等于留了一条改措辞就能绕的缝。"""
-    findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// 见{_CASE_NAME}件的样本"))
+    findings = leakscan.scan_diff(_diff("fxapk/x.js", f"// 见{_CASE_NAME}件的样本"))
     assert [f for f in findings if f.rule == "person_name"], (
         f"「姓名 + 案件」是自然写法，必须与「姓名 + 案」同等对待：{findings}"
     )
@@ -508,7 +508,7 @@ def test_case_file_phrasing_does_not_reintroduce_false_positives() -> None:
     """
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             "# 不能静默当成当前案件直接证据",
             "# 钱包内容校验不能替代它属于当前案件",
             "# 只能把整机流量里的背景连接当案件线索",
@@ -531,7 +531,7 @@ def test_names_ending_in_ambiguous_chars_are_still_caught() -> None:
     命中，故该行按本仓纪律用带理由的行内豁免声明，而不是拼接绕过。
     """
     for name_with_case in ("李成案", "王民案", "刘新案", "李真案", "甄子丹案"):  # leak-scan: allow 末字歧义回归夹具，五个占位姓名非案件当事人
-        findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// 对应{name_with_case}"))
+        findings = leakscan.scan_diff(_diff("fxapk/x.js", f"// 对应{name_with_case}"))
         assert [f for f in findings if f.rule == "person_name"], (
             f"{name_with_case} 未命中——末字黑名单收得太宽会造成确定性漏报"
         )
@@ -544,7 +544,7 @@ def test_names_ending_in_ambiguous_chars_are_still_caught() -> None:
 
 def test_qq_and_wxid_are_rejected() -> None:
     findings = leakscan.scan_diff(
-        _diff("apkscan/x.js", f"// {_QQ_TEXT}", f"// {_WXID_TEXT}")
+        _diff("fxapk/x.js", f"// {_QQ_TEXT}", f"// {_WXID_TEXT}")
     )
     contacts = [f for f in findings if f.rule == "contact"]
     assert len(contacts) == 2, f"QQ 与 wxid_ 两种形态都必须命中：{findings}"
@@ -553,7 +553,7 @@ def test_qq_and_wxid_are_rejected() -> None:
 
 def test_contact_finding_does_not_echo_the_account() -> None:
     """★同样脱敏：只报形态与长度，账号本身由人打开文件看。"""
-    findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// {_QQ_TEXT}"))
+    findings = leakscan.scan_diff(_diff("fxapk/x.js", f"// {_QQ_TEXT}"))
     contacts = [f for f in findings if f.rule == "contact"]
     assert contacts
     assert "123456" not in contacts[0].value, f"finding 值回显了账号：{contacts[0].value}"
@@ -567,7 +567,7 @@ def test_wechat_sdk_identifiers_are_not_contacts() -> None:
     另写一套，正是为了不把同一个坑再踩一遍。
     """
     findings = leakscan.scan_diff(
-        _diff("apkscan/x.js", "if (window.weixinJSBridge) { wechat_sdk.init(); }")
+        _diff("fxapk/x.js", "if (window.weixinJSBridge) { wechat_sdk.init(); }")
     )
     assert not [f for f in findings if f.rule == "contact"], f"SDK 标识符被误判：{findings}"
 
@@ -575,7 +575,7 @@ def test_wechat_sdk_identifiers_are_not_contacts() -> None:
 def test_bare_digits_without_a_platform_cue_are_not_contacts() -> None:
     """没有平台触发词的裸数字不判——手机号那类误报正是这么来的（见规则表注释）。"""
     findings = leakscan.scan_diff(
-        _diff("apkscan/x.py", 'TIMEOUT_MS = 123456', 'BUILD = "20260822"')
+        _diff("fxapk/x.py", 'TIMEOUT_MS = 123456', 'BUILD = "20260822"')
     )
     assert not [f for f in findings if f.rule == "contact"], f"裸数字被误判：{findings}"
 
@@ -586,7 +586,7 @@ def test_contact_patterns_really_come_from_the_rules_file() -> None:
     断言的是**正则源串逐条相等**，不是"四个 kind 都在"：后者硬编码一份同名清单也能过，
     那样接线断了测试照样绿。
     """
-    from apkscan.core.registry import load_rules
+    from fxapk.core.registry import load_rules
 
     data = load_rules("contacts")
     assert isinstance(data, dict)
@@ -610,7 +610,7 @@ def test_contact_falls_back_when_the_rules_file_is_unreadable(monkeypatch) -> No
     其余"读不到规则就退化"的地方（如占位 IP 名单）退化方向是多报，安全；contact 退化成
     空集却是**漏报**——正是本判据要防的事。故必须有内置兜底。
     """
-    import apkscan.core.registry as registry
+    import fxapk.core.registry as registry
 
     monkeypatch.setattr(registry, "load_rules", lambda name: (_ for _ in ()).throw(OSError("boom")))
     patterns = leakscan._contact_patterns()
@@ -625,7 +625,7 @@ def test_contact_fallback_is_merged_per_kind(monkeypatch) -> None:
     这是个静默失效的形态：YAML 照常解析、其余判据照常工作，只有被删掉的那一类判据
     悄悄消失。护栏不允许存在"看起来在跑、实际少了一条"的状态。
     """
-    import apkscan.core.registry as registry
+    import fxapk.core.registry as registry
 
     def _only_telegram(name: str) -> dict:
         assert name == "contacts"
@@ -644,7 +644,7 @@ def test_contact_fallback_is_merged_per_kind(monkeypatch) -> None:
 
 
 def test_opaque_repack_package_is_rejected() -> None:
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'PKG = "{_REPACK_PACKAGE}"'))
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", f'PKG = "{_REPACK_PACKAGE}"'))
     packages = [f for f in findings if f.rule == "package"]
     assert packages, f"含随机化段的包名必须被判为泄漏：{findings}"
     assert leakscan.blocking(findings), "package 判据必须默认阻断"
@@ -655,7 +655,7 @@ def test_opaque_repack_package_is_rejected() -> None:
 def test_open_source_and_framework_packages_pass() -> None:
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             f'UPSTREAM = "{_STOCK_PACKAGE}"',
             'FRAMEWORK = "com.android.providers.settings"',
             'ANDROIDX = "androidx.core.app"',
@@ -683,7 +683,7 @@ def test_packages_registered_in_the_rules_files_pass() -> None:
     ]
     assert would_fire, "规则表里没有会触发辅音串启发的包名，本测试失去意义"
     findings = leakscan.scan_diff(
-        _diff("apkscan/x.py", *[f'PKG = "{package}"' for package in would_fire])
+        _diff("fxapk/x.py", *[f'PKG = "{package}"' for package in would_fire])
     )
     assert not [f for f in findings if f.rule == "package"], (
         f"规则表登记的公开包名被误判（白名单接线断了？）：{findings}"
@@ -698,7 +698,7 @@ def test_rules_whitelist_does_not_fold_case() -> None:
     包名开了一张免检票——一次改动就能让任意包名免检。不折叠后，想加白名单就必须在规则表
     里写小写包名，而那一行会被判据自己命中，形成闭环。
     """
-    import apkscan.core.registry as registry
+    import fxapk.core.registry as registry
 
     def _uppercased(name: str) -> dict:
         if name == "bank_packages":
@@ -719,7 +719,7 @@ def test_legitimate_mixed_case_package_names_are_harmless() -> None:
     """
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             'BANK = "com.bankcomm.Bankcomm"',
             'PAY = "com.eg.android.AlipayGphone"',
         )
@@ -733,10 +733,10 @@ def test_python_module_paths_are_not_packages() -> None:
     """Python 模块路径与属性链同形；不排除则整片误报（全树实测 15 处）。"""
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             f"# 见 {_MODULE_PATH} 的实现",
             "spec = importlib.util.find_spec(name)",
-            'monkeypatch.setattr("apkscan.config.fetch.fetch_config_object", rec)',
+            'monkeypatch.setattr("fxapk.config.fetch.fetch_config_object", rec)',
         )
     )
     assert not [f for f in findings if f.rule == "package"], f"模块路径被误判成包名：{findings}"
@@ -744,7 +744,7 @@ def test_python_module_paths_are_not_packages() -> None:
 
 def test_package_rule_ignores_domain_shaped_values() -> None:
     """末段是 TLD ⇒ 那是域名，归 ``domain`` 判据管，两条判据不重复报。"""
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", 'HOST = "im.zxcvbnmqwr.com"'))  # leak-scan: allow 验证 domain 判据接手用的合成未注册域名
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", 'HOST = "im.zxcvbnmqwr.com"'))  # leak-scan: allow 验证 domain 判据接手用的合成未注册域名
     assert not [f for f in findings if f.rule == "package"]
     assert [f for f in findings if f.rule == "domain"], "域名形态应由 domain 判据接手"
 
@@ -768,13 +768,13 @@ def test_opaque_segment_accepts_digits_but_not_pure_numbers() -> None:
     """★随机化的包名段常混数字；只认纯字母等于留了"加个数字就绕过"的缝。"""
     assert leakscan._is_opaque_segment("zxcvbnm123"), "带数字的随机段必须仍算不透明"
     assert not leakscan._is_opaque_segment("20260822"), "纯数字是版本号/序号，不是名字"
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", 'PKG = "im.zxcvbnm123.messenger"'))  # leak-scan: allow package 判据阳性夹具，合成随机段包名
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", 'PKG = "im.zxcvbnm123.messenger"'))  # leak-scan: allow package 判据阳性夹具，合成随机段包名
     assert [f for f in findings if f.rule == "package"], f"数字段绕过没堵住：{findings}"
 
 
 def test_two_segment_package_is_covered() -> None:
     """★``im.<随机段>`` 这种两段包名也要认——只扫 ≥3 段等于留一条去掉一段就绕过的缝。"""
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", 'PKG = "im.zxcvbnmqwr"'))  # leak-scan: allow package 判据阳性夹具，合成两段随机包名
+    findings = leakscan.scan_diff(_diff("fxapk/x.py", 'PKG = "im.zxcvbnmqwr"'))  # leak-scan: allow package 判据阳性夹具，合成两段随机包名
     assert [f for f in findings if f.rule == "package"], f"两段包名漏扫：{findings}"
 
 
@@ -791,7 +791,7 @@ def test_y_counts_as_a_vowel_and_that_is_a_measured_tradeoff() -> None:
     assert not leakscan._is_opaque_segment("synthetic")
     assert not leakscan._is_opaque_segment("conscrypt")
     findings = leakscan.scan_diff(
-        _diff("apkscan/x.py", 'PKG = "com.example.synthetic"', 'AOSP = "com.android.org.conscrypt"')
+        _diff("fxapk/x.py", 'PKG = "com.example.synthetic"', 'AOSP = "com.android.org.conscrypt"')
     )
     assert not [f for f in findings if f.rule == "package"], f"y 口径变了会炸出误报：{findings}"
 
@@ -800,7 +800,7 @@ def test_transliterated_library_names_are_not_packages() -> None:
     """非英语来源（拼音 / 音译）的库名不得误报——它们是新增 SDK 的常见形态。"""
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             'A = "com.zhangshangyinhang.mobile"',
             'B = "cn.gongxiangdanche.app"',
             'C = "com.kuaishouspeed.player"',
@@ -817,14 +817,14 @@ def test_transliterated_library_names_are_not_packages() -> None:
 
 def test_exemption_with_reason_allows_the_line() -> None:
     findings = leakscan.scan_diff(
-        _diff("apkscan/x.py", f'HOST = "{_PUBLIC_IPV4}"  # leak-scan: allow 公共解析器名单')
+        _diff("fxapk/x.py", f'HOST = "{_PUBLIC_IPV4}"  # leak-scan: allow 公共解析器名单')
     )
     assert not findings, f"带理由的豁免必须放行：{findings}"
 
 
 def test_exemption_without_reason_is_itself_a_blocking_finding() -> None:
     findings = leakscan.scan_diff(
-        _diff("apkscan/x.py", f'HOST = "{_PUBLIC_IPV4}"  # leak-scan: allow')
+        _diff("fxapk/x.py", f'HOST = "{_PUBLIC_IPV4}"  # leak-scan: allow')
     )
     assert _rules(findings) == {"exemption"}, "无理由豁免应产 exemption finding"
     assert leakscan.blocking(findings), "无理由豁免必须阻断（护栏自身的完整性检查）"
@@ -838,8 +838,8 @@ def test_exemption_without_reason_is_itself_a_blocking_finding() -> None:
 def test_only_added_lines_are_scanned() -> None:
     """删除行与上下文行不扫——仓库既有内容不该被本护栏追溯审判。"""
     diff = (
-        "--- a/apkscan/x.py\n"
-        "+++ b/apkscan/x.py\n"
+        "--- a/fxapk/x.py\n"
+        "+++ b/fxapk/x.py\n"
         "@@ -1,3 +1,3 @@\n"
         f'-OLD = "{_PUBLIC_IPV4}"\n'
         f' CTX = "{_PUBLIC_IPV4}"\n'
@@ -850,8 +850,8 @@ def test_only_added_lines_are_scanned() -> None:
 
 def test_added_line_numbers_track_the_new_file_side() -> None:
     diff = (
-        "--- a/apkscan/x.py\n"
-        "+++ b/apkscan/x.py\n"
+        "--- a/fxapk/x.py\n"
+        "+++ b/fxapk/x.py\n"
         "@@ -10,4 +20,5 @@\n"
         " ctx1\n"
         "-removed\n"
@@ -860,7 +860,7 @@ def test_added_line_numbers_track_the_new_file_side() -> None:
     )
     findings = [f for f in leakscan.scan_diff(diff) if f.rule == "ip"]
     assert findings and findings[0].line_no == 22, f"行号应为 22，实际 {findings}"
-    assert findings[0].path == "apkscan/x.py"
+    assert findings[0].path == "fxapk/x.py"
 
 
 def test_binary_and_asset_paths_are_skipped() -> None:
@@ -870,11 +870,11 @@ def test_binary_and_asset_paths_are_skipped() -> None:
 
 def test_multiple_files_in_one_diff_are_attributed_correctly() -> None:
     diff = (
-        _diff("apkscan/a.py", f'A = "{_DOC_IP}"')
-        + _diff("apkscan/b.py", f'B = "{_PUBLIC_IPV4}"')
+        _diff("fxapk/a.py", f'A = "{_DOC_IP}"')
+        + _diff("fxapk/b.py", f'B = "{_PUBLIC_IPV4}"')
     )
     findings = [f for f in leakscan.scan_diff(diff) if f.rule == "ip"]
-    assert [f.path for f in findings] == ["apkscan/b.py"]
+    assert [f.path for f in findings] == ["fxapk/b.py"]
 
 
 def test_empty_diff_yields_nothing() -> None:
@@ -889,7 +889,7 @@ def test_empty_diff_yields_nothing() -> None:
 
 def test_format_findings_is_stable_and_marks_blocking() -> None:
     findings = leakscan.scan_diff(
-        _diff("apkscan/x.py", f'H = "{_PUBLIC_IPV4}"', f'D = "{_OUTSIDE_DOMAIN}"')
+        _diff("fxapk/x.py", f'H = "{_PUBLIC_IPV4}"', f'D = "{_OUTSIDE_DOMAIN}"')
     )
     text = leakscan.format_findings(findings)
     assert text == leakscan.format_findings(findings), "输出必须确定"
@@ -989,7 +989,7 @@ def test_positive_fixtures_still_fire_without_any_exemption() -> None:
     """
     findings = leakscan.scan_diff(
         _diff(
-            "apkscan/x.py",
+            "fxapk/x.py",
             f'ipv4 = "{_PUBLIC_IPV4}"',
             f'ipv6 = "{_PUBLIC_IPV6}"',
             f'host = "{_OUTSIDE_DOMAIN}"',
@@ -1029,14 +1029,14 @@ def test_no_split_join_evasion_templates_in_this_file() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 全树门禁：跟踪的 apkscan/ + tests/ 默认阻断恒为 0
+# 全树门禁：跟踪的 fxapk/ + tests/ 默认阻断恒为 0
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = _THIS_FILE.parent.parent
 
 
 def test_tracked_apkscan_and_tests_have_zero_default_blocking() -> None:
-    """★git 跟踪的 ``apkscan/`` + ``tests/`` 默认阻断项必须恒为 **0**。
+    """★git 跟踪的 ``fxapk/`` + ``tests/`` 默认阻断项必须恒为 **0**。
 
     为什么这条测试非有不可：PR diff 判据只看**新增行**，故合并前已存在的阻断项会被永久
     grandfather —— 清理干净的树，只要有人改一条既有行把公网字面写回去，diff 关未必看得见
@@ -1051,7 +1051,7 @@ def test_tracked_apkscan_and_tests_have_zero_default_blocking() -> None:
     "枚举不到"绝不允许与"全树干净"同形。
     """
     errors: list[str] = []
-    targets = leakscan.tracked_files(["apkscan", "tests"], repo_root=_REPO_ROOT, errors=errors)
+    targets = leakscan.tracked_files(["fxapk", "tests"], repo_root=_REPO_ROOT, errors=errors)
     assert errors == [], f"枚举已跟踪文件失败，拒绝给出「干净」结论：{errors}"
     assert len(targets) > 100, f"只枚举到 {len(targets)} 个跟踪文件，疑似枚举口径坏了"
 
@@ -1060,7 +1060,7 @@ def test_tracked_apkscan_and_tests_have_zero_default_blocking() -> None:
     assert scan_errors == [], f"读取待扫文件失败：{scan_errors}"
     blocking = leakscan.blocking(findings)
     assert blocking == [], (
-        "跟踪的 apkscan/ + tests/ 默认阻断项必须为 0（夹具改用 RFC5737/RFC3849，"
+        "跟踪的 fxapk/ + tests/ 默认阻断项必须为 0（夹具改用 RFC5737/RFC3849，"
         "确属功能需要的常量用带具体理由的行内豁免）：\n"
         + leakscan.format_findings(blocking)
     )
@@ -1076,25 +1076,25 @@ def test_tracked_files_reports_error_for_unknown_root() -> None:
 def test_tracked_files_all_valid_roots_report_no_error() -> None:
     """全部 root 有效 → 无错误、两棵树的文件都在（确定性排序）。"""
     errors: list[str] = []
-    targets = leakscan.tracked_files(["apkscan", "tests"], repo_root=_REPO_ROOT, errors=errors)
+    targets = leakscan.tracked_files(["fxapk", "tests"], repo_root=_REPO_ROOT, errors=errors)
     assert errors == []
     assert targets == sorted(targets), "输出必须确定性排序"
     assert len(targets) == len(set(targets)), "不得有重复项"
     rels = {p.relative_to(_REPO_ROOT).as_posix() for p in targets}
-    assert any(r.startswith("apkscan/") for r in rels)
+    assert any(r.startswith("fxapk/") for r in rels)
     assert any(r.startswith("tests/") for r in rels)
 
 
 def test_tracked_files_mixed_valid_and_missing_root_is_an_error() -> None:
     """★一个有效 root + 一个缺失 root：**必须**报错，不得被有效 root 的结果掩盖。
 
-    这曾是个假绿：``git ls-files -- apkscan typo_xyz`` 一次查询返回 apkscan 的两百个
+    这曾是个假绿：``git ls-files -- fxapk typo_xyz`` 一次查询返回 fxapk 的两百个
     文件、退出码 0、``errors`` 为空 —— 门禁于是在漏扫一整棵树的前提下报绿。现在每个
     root 独立验证，缺失的那个自己记一条错误。
     """
     errors: list[str] = []
     targets = leakscan.tracked_files(
-        ["apkscan", "definitely_missing_tree_xyz"], repo_root=_REPO_ROOT, errors=errors
+        ["fxapk", "definitely_missing_tree_xyz"], repo_root=_REPO_ROOT, errors=errors
     )
     assert errors, "缺失 root 必须记入 errors，不能被有效 root 掩盖"
     assert any("definitely_missing_tree_xyz" in e for e in errors), errors
@@ -1105,7 +1105,7 @@ def test_tracked_files_mixed_valid_and_missing_root_is_an_error() -> None:
 def test_cli_tracked_mode_with_one_missing_root_exits_two() -> None:
     """CLI 侧：有效 root + 缺失 root 必须 exit 2，且不得输出"未发现"横幅。"""
     result = _run_cli(
-        "--tracked", "--path", "apkscan", "--path", "definitely_missing_tree_xyz"
+        "--tracked", "--path", "fxapk", "--path", "definitely_missing_tree_xyz"
     )
     assert result.exit_code == 2, f"混合 root 必须 exit 2，实际 {result.exit_code}：{result.output}"
     assert "leak-scan: 未发现泄漏嫌疑" not in result.output
@@ -1120,7 +1120,7 @@ def test_cli_tracked_mode_with_one_missing_root_exits_two() -> None:
 def _run_cli(*argv: str):
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     return CliRunner().invoke(cli.app, ["leak-scan", *argv])
 
@@ -1170,8 +1170,8 @@ def test_cli_tracked_mode_requires_a_path() -> None:
 
 
 def test_cli_tracked_mode_on_this_repo_is_green() -> None:
-    """★与 CI 全树门禁同一条命令：跟踪的 apkscan/ + tests/ 必须 exit 0。"""
-    result = _run_cli("--tracked", "--path", "apkscan", "--path", "tests")
+    """★与 CI 全树门禁同一条命令：跟踪的 fxapk/ + tests/ 必须 exit 0。"""
+    result = _run_cli("--tracked", "--path", "fxapk", "--path", "tests")
     assert result.exit_code == 0, result.output
 
 
@@ -1284,7 +1284,7 @@ def test_ci_pr_diff_gate_runs_strict() -> None:
     """
     script = _ci_leak_scan_run_scripts()["leak-scan"]
     invocation = next(
-        line for line in script.splitlines() if "apkscan.cli leak-scan" in line
+        line for line in script.splitlines() if "fxapk.cli leak-scan" in line
     )
     assert "--strict" in invocation, f"PR diff 关缺 --strict：{invocation}"
     assert "--base" in invocation, f"PR diff 关必须按 base 算 diff：{invocation}"
@@ -1298,11 +1298,11 @@ def test_ci_full_tree_gate_stays_tracked_and_default_tier() -> None:
     """
     script = _ci_leak_scan_run_scripts()["leak-scan-full-tree"]
     invocation = next(
-        line for line in script.splitlines() if "apkscan.cli leak-scan" in line
+        line for line in script.splitlines() if "fxapk.cli leak-scan" in line
     )
     assert "--tracked" in invocation, invocation
     assert "--strict" not in invocation, f"全树关不应升 strict：{invocation}"
-    assert "--path apkscan" in invocation and "--path tests" in invocation, invocation
+    assert "--path fxapk" in invocation and "--path tests" in invocation, invocation
 
 def test_global_fixture_segment_contract() -> None:
     """散在各测试里的 ``is_global`` 夹具依赖标准库分类，这条钉住那个前提。

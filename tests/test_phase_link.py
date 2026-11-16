@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import apkscan.core.phase2.inventory as inventory
+import fxapk.core.phase2.inventory as inventory
 from tests.phase2_fixtures import write_verified_package
 
 
@@ -76,7 +76,7 @@ def test_registered_report_name_is_honoured(tmp_path: Path) -> None:
 
 
 def test_triage_reads_registered_report_not_fixed_name(tmp_path: Path) -> None:
-    import apkscan.core.phase2.triage as triage
+    import fxapk.core.phase2.triage as triage
 
     case_dir = tmp_path / "c"
     write_verified_package(

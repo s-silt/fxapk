@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from apkscan.core.report_io import report_from_dict
-from apkscan.report.digest import build_digest
-from apkscan.report.html import render_to_string
+from fxapk.core.report_io import report_from_dict
+from fxapk.report.digest import build_digest
+from fxapk.report.html import render_to_string
 
 _SAMPLE = "ab" * 32
 
@@ -40,7 +40,7 @@ def _report(meta: dict | None = None) -> dict:
 
 
 def test_missing_meta_does_not_add_digest_fields() -> None:
-    from apkscan.core.web_observations import digest_web_observations
+    from fxapk.core.web_observations import digest_web_observations
 
     base = _report()
     digest = build_digest(base)
@@ -99,7 +99,7 @@ def test_malformed_observation_stays_unknown_and_does_not_leak() -> None:
 def test_unknown_fields_are_dropped_and_bad_schema_stays_unknown(caplog) -> None:
     import logging
 
-    from apkscan.core.web_observations import digest_web_observations
+    from fxapk.core.web_observations import digest_web_observations
 
     secret = "free-text-must-not-surface"
     sha = "ef" * 32
@@ -149,9 +149,9 @@ def test_plugin_module_is_not_imported_by_core(monkeypatch) -> None:
     monkeypatch.delitem(sys.modules, "fxapk_rea", raising=False)
     monkeypatch.delitem(sys.modules, "fxapk_rea.evidence", raising=False)
     monkeypatch.delitem(sys.modules, "fxapk_rea.trace", raising=False)
-    source = Path("apkscan/core/web_observations.py").read_text(encoding="utf-8")
-    digest_source = Path("apkscan/report/digest.py").read_text(encoding="utf-8")
-    html_source = Path("apkscan/report/html.py").read_text(encoding="utf-8")
+    source = Path("fxapk/core/web_observations.py").read_text(encoding="utf-8")
+    digest_source = Path("fxapk/report/digest.py").read_text(encoding="utf-8")
+    html_source = Path("fxapk/report/html.py").read_text(encoding="utf-8")
     assert "fxapk_rea" not in source
     assert "fxapk_rea" not in digest_source
     assert "fxapk_rea" not in html_source

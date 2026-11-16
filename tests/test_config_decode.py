@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from apkscan.config.decode import decode_config_blob
+from fxapk.config.decode import decode_config_blob
 
 _CONFIG = {"domains": ["api.evil-c2.com", "backup.evil-c2.com"], "ips": ["45.11.22.33"]}  # leak-scan: allow 配置解密产物夹具，_classify_host 要判它公网才计入 domains/ips
 _JSON_BYTES = json.dumps(_CONFIG).encode("utf-8")
@@ -97,7 +97,7 @@ def test_gzip_bomb_rejected_without_oom() -> None:
 
     直接断言 _gunzip 返回 None（可判别：修前 gzip.decompress(...)[:cap] 会先全量解压再切片、返回 5MB 字节
     而非 None，本断言在修前必失败）。"""
-    from apkscan.config.decode import _gunzip
+    from fxapk.config.decode import _gunzip
 
     bomb = gzip.compress(b"\x00" * (6 * 1024 * 1024))  # 解压后 6MB > 5MB 上限
     assert len(bomb) < 64 * 1024  # 压缩后仅几 KB（真炸弹形态）
@@ -110,7 +110,7 @@ def test_aes_envelope_json() -> None:
     pytest.importorskip("cryptography")
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-    from apkscan.core.appcrypto import CryptoRecipe
+    from fxapk.core.appcrypto import CryptoRecipe
 
     key = b"0123456789abcdef0123456789abcdef"  # 32B utf8 → AES-256
     iv = b"fedcba9876543210"  # 16B utf8

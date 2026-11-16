@@ -6,7 +6,7 @@
 而自觉会随新代码退化。本文件用 AST 把规则钉死在**已迁移的模块**上。
 
 ★覆盖边界（不可夸大）：只扫下面 ``_GUARDED`` 列出的模块。仓库其余历史日志插值尚未审计，
-在完成全仓审计之前，不能宣称"整个 apkscan 默认终端无敏感信息泄露"。
+在完成全仓审计之前，不能宣称"整个 fxapk 默认终端无敏感信息泄露"。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[1] / "apkscan"
+_ROOT = Path(__file__).resolve().parents[1] / "fxapk"
 
 #: 已完成异常文本治理的模块——新增违规会在这里被拦下。
 _GUARDED = [

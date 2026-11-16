@@ -3,10 +3,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TypedDict, cast
 
-from apkscan.core import closure as closure_module
-from apkscan.core.closure import sources as closure_sources
-from apkscan.core.closure.targets import _select_targets_with_stats
-from apkscan.core.closure import (
+from fxapk.core import closure as closure_module
+from fxapk.core.closure import sources as closure_sources
+from fxapk.core.closure.targets import _select_targets_with_stats
+from fxapk.core.closure import (
     CLOSURE_COMPLETE,
     CLOSURE_FAILED,
     CLOSURE_PARTIAL,
@@ -18,7 +18,7 @@ from apkscan.core.closure import (
     evaluate_closure,
     select_targets,
 )
-from apkscan.core.models import (
+from fxapk.core.models import (
     Confidence,
     Endpoint,
     EnrichmentResult,
@@ -27,7 +27,7 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
 )
-from apkscan.core.registry import BaseEnricher
+from fxapk.core.registry import BaseEnricher
 
 
 class _ClosureLayer(TypedDict):
@@ -308,7 +308,7 @@ def test_modified_runtime_endpoint_cannot_close_case(monkeypatch) -> None:
     """
     # Isolate the runtime gate using an explicit synthetic hosting-delivery
     # fact. Real metadata refresh alone no longer proves that relationship.
-    monkeypatch.setattr("apkscan.core.closure._set_attribution", lambda ep: None)
+    monkeypatch.setattr("fxapk.core.closure._set_attribution", lambda ep: None)
     template = _complete_endpoint()
     modified = _endpoint(
         "198.51.100.10", runtime=True, target=True, payload=True,
@@ -327,7 +327,7 @@ def test_modified_runtime_endpoint_cannot_close_case(monkeypatch) -> None:
 
 
 def test_close_report_untruncated_targets_stay_complete(monkeypatch) -> None:
-    monkeypatch.setattr("apkscan.core.closure._set_attribution", lambda ep: None)
+    monkeypatch.setattr("fxapk.core.closure._set_attribution", lambda ep: None)
     report = _report(_complete_ip_endpoint("198.51.100.10"), _complete_ip_endpoint("198.51.100.11"))
 
     closure = _close(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
@@ -845,15 +845,15 @@ def test_fofa_banner_cannot_override_conflicting_hosting_candidate() -> None:
 
 def test_fofa_fields_match_enricher_query_no_drift() -> None:
     """★codex #3 漂移守卫：closure 的 FOFA 字段序必须与富化器查询串逐字段一致，否则命名解析会错位。"""
-    from apkscan.core import closure as _closure
-    from apkscan.enrichers.multisource import FOFA_QUERY_FIELDS
+    from fxapk.core import closure as _closure
+    from fxapk.enrichers.multisource import FOFA_QUERY_FIELDS
 
     assert ",".join(_closure._FOFA_FIELDS) == FOFA_QUERY_FIELDS
 
 
 def test_fofa_malformed_row_skipped_not_misparsed() -> None:
     """★FOFA 行字段数与预期不符（改列/查询漂移）→ 跳过该行，不按错位下标取值污染归属。"""
-    from apkscan.core.closure import _parse_fofa_row
+    from fxapk.core.closure import _parse_fofa_row
 
     assert _parse_fofa_row(["only", "three", "fields"]) is None      # 太短
     assert _parse_fofa_row(list(range(20))) is None                   # 太长
@@ -1122,7 +1122,7 @@ def test_passive_mode_blocked_active_source_does_not_prevent_completion() -> Non
 
 def _blind_assessment() -> dict:
     """壳桩样本的可见性求值（DEX 只看得到壳桩 → 端点穷尽性无资格下）。"""
-    from apkscan.core import visibility
+    from fxapk.core import visibility
 
     return visibility.assess({"meta": {"is_hardened": True}})
 
@@ -1167,7 +1167,7 @@ def test_runtime_attributed_targets_not_downgraded_by_static_blindness() -> None
 
 
 def test_visible_report_passes_visibility_check() -> None:
-    from apkscan.core import visibility
+    from fxapk.core import visibility
 
     report = _report(_complete_endpoint())
     # 资源层也要有扫描信号，否则它是"未评估"而非"已确认完整"（见下一条测试）；
@@ -1196,7 +1196,7 @@ def test_close_refreshes_stale_visibility_snapshot() -> None:
     一边在可见性里说"未做运行时观测、建议去抓包"。
     退回 close_report 里的 _refresh_visibility 调用，本测试即红。
     """
-    from apkscan.core import visibility
+    from fxapk.core import visibility
 
     report = _report(_complete_endpoint())
     # 分析期快照：那时没有运行时证据
@@ -1232,7 +1232,7 @@ def test_close_does_not_fabricate_visibility_without_signals() -> None:
 
     「没有信号」≠「已确认完整」——凭空写一份 dex=complete 正是本层要防的误读。
     """
-    from apkscan.core import visibility
+    from fxapk.core import visibility
 
     report = _report(_complete_endpoint())
     report.meta.pop("visibility", None)
@@ -1250,7 +1250,7 @@ def test_unassessed_source_warns_without_capping_closure() -> None:
     与「目标全由运行时归因」那条豁免同构：没评估不是实测到的缺口。
     但也不能再说 "static inputs were fully visible" —— 那对未评估的维度是错误陈述。
     """
-    from apkscan.core import visibility
+    from fxapk.core import visibility
 
     report = _report(_complete_endpoint())
     report.meta["visibility"] = visibility.assess({"meta": {"dex_available": True}})
@@ -1268,7 +1268,7 @@ def test_unassessed_source_warns_without_capping_closure() -> None:
 
 def test_confirmed_blind_spot_still_caps_closure() -> None:
     """守恒：**实测到**的静态盲区仍要封顶 partial —— 真 C2 可能就藏在看不见的那部分里。"""
-    from apkscan.core import visibility
+    from fxapk.core import visibility
 
     report = _report(_complete_endpoint())
     report.meta["visibility"] = visibility.assess(
@@ -1303,8 +1303,8 @@ def test_monkeypatch_target_differs_by_caller() -> None:
     解析，必须 patch 包；只在子模块内部互调的，必须 patch 定义它的子模块。
     本测试把这个分界钉住——注释被改坏或函数被挪到另一类时，这里会红。
     """
-    from apkscan.core import closure as pkg
-    from apkscan.core.closure import gates, layers, sources, targets
+    from fxapk.core import closure as pkg
+    from fxapk.core.closure import gates, layers, sources, targets
 
     def _global_names(code: object) -> set[str]:
         """收集 code 对象及其**嵌套** code 对象引用的全局名。
@@ -1346,16 +1346,16 @@ def test_monkeypatch_target_differs_by_caller() -> None:
     for name in patch_package | patch_submodule:
         assert hasattr(pkg, name), f"包的属性面丢了 {name}，既有测试的 patch 会 AttributeError"
     for mod in (sources, layers, targets, gates):
-        assert mod.__name__.startswith("apkscan.core.closure.")
+        assert mod.__name__.startswith("fxapk.core.closure.")
 
 
 def test_incidentally_imported_names_stay_off_the_package_surface() -> None:
     """★原模块"顺带导入"的名字不再从包可见——这是**有意的**，别当遗漏补回来。
 
-    拆分前 `from apkscan.core.closure import os` 之类能用，纯属旧单文件模块的 import 副作用。
+    拆分前 `from fxapk.core.closure import os` 之类能用，纯属旧单文件模块的 import 副作用。
     从别人模块借 import 是坏习惯，re-export 回来等于把它固化成契约。实测全仓零处这样用。
     """
-    from apkscan.core import closure as pkg
+    from fxapk.core import closure as pkg
 
     for name in ("os", "ipaddress", "Counter", "dataclass", "Any", "Endpoint",
                  "ANALYSIS_MODES", "ANALYSIS_MODE_PASSIVE",
@@ -1515,7 +1515,7 @@ def test_failed_provider_payloads_cannot_complete_closure_layers() -> None:
 
 
 def test_registration_layer_fails_closed_when_status_map_omits_provider() -> None:
-    from apkscan.core.closure.layers import _registration_layer
+    from fxapk.core.closure.layers import _registration_layer
 
     layer = _registration_layer({
         "source_status": {"dns": {"status": "hit"}},
@@ -1858,7 +1858,7 @@ def test_offline_close_marks_configured_source_without_cache_as_incomplete() -> 
 def test_unconfigured_source_is_disabled_without_blocking_offline_closure(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("apkscan.core.closure._set_attribution", lambda ep: None)
+    monkeypatch.setattr("fxapk.core.closure._set_attribution", lambda ep: None)
     endpoint = _complete_endpoint()
     report = _report(endpoint)
     enricher = _FakeEnricher("unconfigured_optional", ["ip"], {"record": "MUST-NOT-RUN"})
@@ -1882,7 +1882,7 @@ def test_populate_network_attribution_failure_preserves_existing_view(monkeypatc
     def _boom(*_a, **_k):
         raise RuntimeError("assemble failed")
 
-    monkeypatch.setattr("apkscan.attribution.assemble.build_network_attribution", _boom)
+    monkeypatch.setattr("fxapk.attribution.assemble.build_network_attribution", _boom)
     report = _report(_complete_endpoint())
     report.meta["network_attribution"] = {"phase": "analyze", "roles": ["x"]}  # analyze 期已有有效视图
     closure_module._populate_network_attribution(report)
@@ -1896,7 +1896,7 @@ def test_populate_network_attribution_failure_marks_when_no_prior_view(monkeypat
     def _boom(*_a, **_k):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("apkscan.attribution.assemble.build_network_attribution", _boom)
+    monkeypatch.setattr("fxapk.attribution.assemble.build_network_attribution", _boom)
     report = _report(_complete_endpoint())
     closure_module._populate_network_attribution(report)
     assert report.meta["network_attribution"] == {"phase": "close", "error": "RuntimeError"}
@@ -1961,7 +1961,7 @@ def test_resolved_ips_accepts_dns_hit_and_true_legacy(monkeypatch) -> None:
 
 
 def test_resolved_ips_rejects_canonicalized_legacy_private_failure(monkeypatch) -> None:
-    from apkscan.core.source_status import canonicalize_source_status_tree
+    from fxapk.core.source_status import canonicalize_source_status_tree
 
     monkeypatch.setattr(closure_sources, "_normalized_public_ip", lambda value: str(value).strip())
     enrichment = {

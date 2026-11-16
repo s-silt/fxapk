@@ -17,7 +17,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-from apkscan import cli
+from fxapk import cli
 
 runner = CliRunner()
 

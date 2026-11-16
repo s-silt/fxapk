@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from apkscan.network import NetworkEntity, NetworkEntityType
+from fxapk.network import NetworkEntity, NetworkEntityType
 
 
 EXPECTED_TYPES = {

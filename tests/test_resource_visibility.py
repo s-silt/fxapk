@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.analyzers.endpoints import EndpointsAnalyzer
-from apkscan.core import visibility
-from apkscan.core.visibility import (
+from fxapk.analyzers.endpoints import EndpointsAnalyzer
+from fxapk.core import visibility
+from fxapk.core.visibility import (
     VIS_COMPLETE,
     VIS_PARTIAL,
     VIS_UNAVAILABLE,
@@ -54,7 +54,7 @@ class _Ctx:
 
 
 def _scan(files: dict[str, bytes | None], **kw) -> tuple[int, int, bool]:
-    from apkscan.analyzers.endpoints import EndpointCollector
+    from fxapk.analyzers.endpoints import EndpointCollector
 
     a = EndpointsAnalyzer()
     return a._scan_resources(

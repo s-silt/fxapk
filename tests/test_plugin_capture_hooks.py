@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from apkscan.dynamic import capture_sequence
+from fxapk.dynamic import capture_sequence
 
 
 def _report() -> dict:

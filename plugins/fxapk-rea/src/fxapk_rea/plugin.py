@@ -10,8 +10,8 @@ from typing import Any
 
 import typer
 
-from apkscan.core.atomic import atomic_create_bytes
-from apkscan.plugins.contracts import PLUGIN_API_VERSION
+from fxapk.core.atomic import atomic_create_bytes
+from fxapk.plugins.contracts import PLUGIN_API_VERSION
 
 from .evidence import (
     EvidenceError,

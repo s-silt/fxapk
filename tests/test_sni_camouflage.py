@@ -13,18 +13,18 @@
 
 from __future__ import annotations
 
-from apkscan.core import infra
-from apkscan.core.leads import build_endpoint_leads
-from apkscan.core.models import (
+from fxapk.core import infra
+from fxapk.core.leads import build_endpoint_leads
+from fxapk.core.models import (
     DOWNGRADE_SNI_MASQUERADE,
     SNI_MASQUERADE_KEY,
     Endpoint,
     Evidence,
     LeadCategory,
 )
-from apkscan.dynamic import pcap_ingest
-from apkscan.report import json as report_json
-from apkscan.report import letters as letters_mod
+from fxapk.dynamic import pcap_ingest
+from fxapk.report import json as report_json
+from fxapk.report import letters as letters_mod
 
 #: 合成桶名（形态同真实，不含取自样本材料的值）——用于「租户桶 × 伪装 SNI」的组合用例。
 _B_BUCKET = "0123456789abcdef"
@@ -196,8 +196,8 @@ def test_masquerade_survives_report_json_roundtrip_into_the_letter() -> None:
     """
     import json
 
-    from apkscan.core import report_io
-    from apkscan.report import letters
+    from fxapk.core import report_io
+    from fxapk.report import letters
 
     s = _summary(_flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}), _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True))
     lead = _lead(pcap_ingest.to_report_leads(s), f"{_BACKEND}:{_ODD_PORT}/tcp")
@@ -228,7 +228,7 @@ def _lead_as_dict(lead) -> dict:
 
 def test_no_masquerade_means_no_warning_in_letter() -> None:
     """无伪装的普通 IP 线索不得平白多出这段警示（警示贬值成噪声就没人看了）。"""
-    from apkscan.report import letters
+    from fxapk.report import letters
 
     s = _summary(_flow(_STD_PORT_HOST, 443, set()), _flow(_STD_PORT_HOST, 443, set(), inbound=True))  # 合成段，护栏放行、无需豁免
     lead = _lead(pcap_ingest.to_report_leads(s), f"{_STD_PORT_HOST}:443/tcp")  # 合成段，护栏放行、无需豁免
@@ -247,7 +247,7 @@ def test_masquerade_merges_into_an_existing_lead(tmp_path) -> None:
     """
     import json
 
-    from apkscan.report import letters
+    from fxapk.report import letters
 
     report = tmp_path / "report.json"
     report.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}, ensure_ascii=False),
@@ -479,8 +479,8 @@ def test_letters_never_drafts_for_a_masqueraded_domain() -> None:
     标的自身出现在自己的 sni_masquerade 里 → 绝不套打。删掉 _is_actionable 里那道闸，
     即便 advice 被上游误升为 ADVICE_INVESTIGATE 本测试也必须红。
     """
-    from apkscan.report import json as report_json
-    from apkscan.report import letters
+    from fxapk.report import json as report_json
+    from fxapk.report import letters
 
     s = _summary(
         _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}),

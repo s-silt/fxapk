@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.analyzers import endpoints, jadx, js_bundle
-from apkscan.analyzers.jadx import JadxAnalyzer
-from apkscan.core import tld_policy
-from apkscan.core.models import Endpoint
+from fxapk.analyzers import endpoints, jadx, js_bundle
+from fxapk.analyzers.jadx import JadxAnalyzer
+from fxapk.core import tld_policy
+from fxapk.core.models import Endpoint
 
 
 def test_tld_sets_are_single_source() -> None:

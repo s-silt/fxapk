@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.enrichers.ip_rdap as ip_rdap_mod
-from apkscan.core.models import Endpoint
-from apkscan.enrichers.ip_rdap import IpRdapEnricher, _extract_ip_rdap
+import fxapk.enrichers.ip_rdap as ip_rdap_mod
+from fxapk.core.models import Endpoint
+from fxapk.enrichers.ip_rdap import IpRdapEnricher, _extract_ip_rdap
 
 
 @pytest.fixture(autouse=True)

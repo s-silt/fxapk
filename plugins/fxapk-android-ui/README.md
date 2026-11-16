@@ -2,7 +2,7 @@
 
 **中文** · [English](README.en.md)
 
-可选的 Android CLI UI 观察插件，独立版本 0.1.2，适用于 fxapk 1.18.1+ 与 Python 3.11+。
+可选的 Android CLI UI 观察插件，独立版本 0.2.0，适用于 fxapk 2.0.0+ 与 Python 3.11+。
 
 核心与插件安装在同一环境。在 fxapk 源码根目录运行：
 

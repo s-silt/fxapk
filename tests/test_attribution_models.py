@@ -7,9 +7,9 @@ import json
 
 import pytest
 
-from apkscan.attribution import AttributionEvidence
-from apkscan.core.models import Evidence as CoreEvidence
-from apkscan.network import NetworkEntity, NetworkEntityType
+from fxapk.attribution import AttributionEvidence
+from fxapk.core.models import Evidence as CoreEvidence
+from fxapk.network import NetworkEntity, NetworkEntityType
 
 
 def _target() -> NetworkEntity:

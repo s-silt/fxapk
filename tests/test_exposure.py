@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from apkscan.core import exposure, forensic
+from fxapk.core import exposure, forensic
 
 
 def test_assess_tech_stack_from_shodan_banner() -> None:

@@ -11,17 +11,17 @@ import inspect
 
 import pytest
 
-from apkscan.analyzers.app_framework import AppFrameworkAnalyzer
-from apkscan.core import appframework, pipeline
-from apkscan.core.appframework import (
+from fxapk.analyzers.app_framework import AppFrameworkAnalyzer
+from fxapk.core import appframework, pipeline
+from fxapk.core.appframework import (
     AppFramework,
     detect_framework,
     framework_from_meta,
     is_app_own_code,
 )
-from apkscan.core.leads import _vendor_sdk_libraries
-from apkscan.core.models import Endpoint, Evidence
-from apkscan.core.registry import discover_analyzers
+from fxapk.core.leads import _vendor_sdk_libraries
+from fxapk.core.models import Endpoint, Evidence
+from fxapk.core.registry import discover_analyzers
 from tests.conftest import FakeContext
 
 # ---------------------------------------------------------------------------
@@ -275,6 +275,6 @@ def test_framework_stage_runs_before_leads_are_built() -> None:
 
 def test_meta_key_has_one_definition() -> None:
     """分析器与消费方必须共用同一个键名，各写各的迟早对不上。"""
-    import apkscan.analyzers.app_framework as analyzer_mod
+    import fxapk.analyzers.app_framework as analyzer_mod
 
     assert analyzer_mod.META_KEY is appframework.META_KEY

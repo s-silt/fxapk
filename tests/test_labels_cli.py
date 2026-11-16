@@ -12,7 +12,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from apkscan import cli
+from fxapk import cli
 
 runner = CliRunner()
 

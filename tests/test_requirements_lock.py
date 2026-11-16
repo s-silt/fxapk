@@ -77,7 +77,7 @@ def test_lock_does_not_contain_the_project_itself() -> None:
     留着会让锁只能在生成它的那台机器上装得起来——正好毁掉可复现这件事。
     """
     names = set(_locked_versions())
-    for own in ("fxapk", "apkscan"):
+    for own in ("fxapk", "fxapk"):
         assert own not in names, f"锁里混进了本项目自身（{own}）"
     raw = _LOCK.read_text(encoding="utf-8")
     assert "file://" not in raw, "锁里有本地路径依赖，换台机器就装不起来"

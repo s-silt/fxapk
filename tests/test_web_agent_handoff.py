@@ -6,15 +6,15 @@ import subprocess
 
 import pytest
 
-from apkscan.core.web_observation_plan import (
+from fxapk.core.web_observation_plan import (
     build_agent_handoff,
     build_plan,
     parse_config,
     refresh_agent_handoff,
 )
-from apkscan.core.web_supplement_runtime import SkippingObserver, make_capture_observer
-from apkscan.core.models import AnalysisConfig
-from apkscan.report.digest import build_digest
+from fxapk.core.web_supplement_runtime import SkippingObserver, make_capture_observer
+from fxapk.core.models import AnalysisConfig
+from fxapk.report.digest import build_digest
 
 
 def _config(**extra: str | bool | int | list[str]) -> dict[str, str | bool | int | list[str]]:

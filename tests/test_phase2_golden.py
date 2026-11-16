@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from apkscan.core.phase2.decision import (
+from fxapk.core.phase2.decision import (
     build_decision,
     classify_replay_change,
     materialize_snapshot,
@@ -28,8 +28,8 @@ from apkscan.core.phase2.decision import (
     run_gate,
     signals_hash,
 )
-from apkscan.core.phase2.inventory import build_inventory
-from apkscan.core.phase2.triage import build_triage
+from fxapk.core.phase2.inventory import build_inventory
+from fxapk.core.phase2.triage import build_triage
 from tests.phase2_fixtures import write_verified_package
 
 # create_case_package 把 created_at 写进 package_id。不冻住这个时钟时，
@@ -49,7 +49,7 @@ _DRIVE = re.compile(r"[A-Za-z]:[\\/]")
 
 
 def _freeze_package_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("apkscan.core.case_package._now", lambda: FROZEN_NOW)
+    monkeypatch.setattr("fxapk.core.case_package._now", lambda: FROZEN_NOW)
 
 
 def _runtime(omit: str | None = None, **overrides: Any) -> dict[str, Any]:

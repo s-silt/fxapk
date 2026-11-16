@@ -6,10 +6,10 @@ import pytest
 import requests
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core import enrichment_recovery as recovery
-from apkscan.core.batch_enrich import Target
-from apkscan.enrichers.multisource import FofaPassiveEnricher, HunterPassiveEnricher
+from fxapk import cli
+from fxapk.core import enrichment_recovery as recovery
+from fxapk.core.batch_enrich import Target
+from fxapk.enrichers.multisource import FofaPassiveEnricher, HunterPassiveEnricher
 
 
 def response(status=200, *, payload=None, headers=None):
@@ -124,7 +124,7 @@ def test_hunter_retry_rechecks_free_balance_and_keeps_unknown_reservation(clock,
 
 def test_cli_dry_run_budgets_retry_without_calls(clock, monkeypatch, tmp_path: Path):
     http = Session([])
-    monkeypatch.setattr('apkscan.core.registry.discover_enrichers', lambda: [FofaPassiveEnricher(http)])
+    monkeypatch.setattr('fxapk.core.registry.discover_enrichers', lambda: [FofaPassiveEnricher(http)])
     targets = tmp_path / 'targets.txt'
     targets.write_text('example.com\n')
     result = CliRunner().invoke(cli.app, ['enrich', 'batch', '-t', str(targets), '-o', str(tmp_path/'out'),
@@ -137,13 +137,13 @@ def test_cli_dry_run_budgets_retry_without_calls(clock, monkeypatch, tmp_path: P
 
 
 def test_completed_provider_does_not_gain_retry_budget():
-    from apkscan.core.batch_enrich import BudgetLine
+    from fxapk.core.batch_enrich import BudgetLine
     assert recovery.recovery_budget([BudgetLine('fofa', 'already_done', 0)], [FofaPassiveEnricher()]) == {}
 
 
 def test_cli_recovery_retains_failed_event_and_resume_makes_no_new_calls(clock, monkeypatch, tmp_path):
     http = Session([response(429), response()])
-    monkeypatch.setattr('apkscan.core.registry.discover_enrichers', lambda: [FofaPassiveEnricher(http)])
+    monkeypatch.setattr('fxapk.core.registry.discover_enrichers', lambda: [FofaPassiveEnricher(http)])
     targets = tmp_path / 'targets.txt'
     targets.write_text('example.com\n')
     args = ['enrich', 'batch', '-t', str(targets), '-o', str(tmp_path/'out'),
@@ -163,7 +163,7 @@ def test_cli_recovery_retains_failed_event_and_resume_makes_no_new_calls(clock, 
 
 @pytest.fixture
 def shodan_adapter(monkeypatch, tmp_path):
-    from apkscan.enrichers import shodan
+    from fxapk.enrichers import shodan
 
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "synthetic")
     monkeypatch.setenv("FXAPK_HTTP_RATE_LIMITS", "")

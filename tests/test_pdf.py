@@ -1,4 +1,4 @@
-"""apkscan.report.pdf 测试：全程 mock 浏览器与 subprocess，不真起 Chrome。"""
+"""fxapk.report.pdf 测试：全程 mock 浏览器与 subprocess，不真起 Chrome。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 
-from apkscan.report import pdf
+from fxapk.report import pdf
 
 
 def _src_html(tmp_path: Path) -> Path:
@@ -111,8 +111,8 @@ def test_render_falls_back_to_temp_html(monkeypatch, tmp_path):
     monkeypatch.setattr(pdf, "find_browser", lambda: "fake-chrome")
     monkeypatch.setattr(pdf.subprocess, "run", _run_writes_pdf)
 
-    # 无 html_source：render 会 import apkscan.report.html 渲临时 HTML，monkeypatch 掉它。
-    import apkscan.report.html as report_html
+    # 无 html_source：render 会 import fxapk.report.html 渲临时 HTML，monkeypatch 掉它。
+    import fxapk.report.html as report_html
 
     def _fake_render(report, path):  # noqa: ANN001
         Path(path).write_text("<html>tmp</html>", encoding="utf-8")

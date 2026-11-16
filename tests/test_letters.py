@@ -1,4 +1,4 @@
-"""apkscan.report.letters 单测 + fxapk letters CLI 薄包装测试。
+"""fxapk.report.letters 单测 + fxapk letters CLI 薄包装测试。
 
 letters 纯函数层把 report.json 的 leads 套打成「调证函 / 协查文书」草稿（markdown），
 铁律（与 ioc.py 一致）：纯函数禁 print/typer、对坏输入容错返回空/跳过、绝不抛；
@@ -18,8 +18,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.report import letters
+from fxapk import cli
+from fxapk.report import letters
 
 runner = CliRunner()
 
@@ -172,9 +172,9 @@ def test_payment_lead_produces_one_letter() -> None:
 def test_letter_body_contains_case_close_resolved_evidence() -> None:
     """★P1-3 端到端：域名端点带缓存 resolved_ip_enrichment(ip_rdap 资源登记方 VULTR-NET) → close_report
     重建顶层归因吸收它 → 文书「基础设施归属链」渲染资源登记方，而非漏证据渲染「未知」。"""
-    from apkscan.core.closure import ClosureConfig, close_report
-    from apkscan.core.models import Confidence, Endpoint, Evidence, Lead, LeadCategory, Report
-    from apkscan.report.json import to_dict
+    from fxapk.core.closure import ClosureConfig, close_report
+    from fxapk.core.models import Confidence, Endpoint, Evidence, Lead, LeadCategory, Report
+    from fxapk.report.json import to_dict
 
     ip = "198.51.100.41"
     evidence = Evidence(source="dex", location="classes.dex")

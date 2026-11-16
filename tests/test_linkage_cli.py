@@ -6,9 +6,9 @@ import json
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core import corpus, linkage_labels
-from apkscan.core.linkage_ml import (
+from fxapk import cli
+from fxapk.core import corpus, linkage_labels
+from fxapk.core.linkage_ml import (
     LinkageModelArtifact,
     PAIR_FEATURE_NAMES,
     PAIR_FEATURE_SCHEMA_VERSION,
@@ -209,7 +209,7 @@ def test_invalid_or_in_worktree_labels_fail_without_echoing_values(tmp_path, mon
     assert private_field not in invalid.stderr
     assert str(labels) not in invalid.stderr
 
-    monkeypatch.setattr("apkscan.commands.corpus._inside_git_worktree", lambda _path: True)
+    monkeypatch.setattr("fxapk.commands.corpus._inside_git_worktree", lambda _path: True)
     blocked = runner.invoke(cli.app, ["corpus", "link-labels-validate", "--labels", str(labels)])
     assert blocked.exit_code == 2
     assert str(labels) not in blocked.stderr
@@ -685,7 +685,7 @@ def test_link_candidates_applies_explicit_shadow_model_after_full_rule_recall(
         artifact_digest=_sha("d"),
     )
     monkeypatch.setattr(
-        "apkscan.commands.corpus._load_private_linkage_model", lambda _path: model
+        "fxapk.commands.corpus._load_private_linkage_model", lambda _path: model
     )
 
     result = CliRunner().invoke(
@@ -759,10 +759,10 @@ def test_aggregate_and_omit_commands_hide_rejected_corpus_path(tmp_path, monkeyp
     labels.write_text("", encoding="utf-8")
     model_out = tmp_path / "model.json"
     private_corpus = tmp_path / "case-2026-secret-corpus"
-    original = __import__("apkscan.commands.corpus", fromlist=["_inside_git_worktree"])
+    original = __import__("fxapk.commands.corpus", fromlist=["_inside_git_worktree"])
     real_inside = original._inside_git_worktree
     monkeypatch.setattr(
-        "apkscan.commands.corpus._inside_git_worktree",
+        "fxapk.commands.corpus._inside_git_worktree",
         lambda path: path == private_corpus or real_inside(path),
     )
 

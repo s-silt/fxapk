@@ -2,7 +2,7 @@
 
 [Project overview](README.en.md) · [中文](USAGE.md)
 
-Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `python -m apkscan.cli`.
+Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `python -m fxapk.cli`.
 
 ## Command table
 
@@ -210,7 +210,7 @@ git config core.hooksPath .githooks
 
 The hook scans staged added lines and by default blocks suspected real IPs, credentials, case names, contact identifiers, secondary package names, and unjustified or bulk exemptions. An inline exception must be written as `leak-scan:` + `allow` + a per-line reason. For committed changes use `fxapk leak-scan --base origin/master --strict` to check the entire candidate diff. Prefer the reserved ranges for test data — `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`, `example.com`; when a reserved value cannot trigger the code path, use a mock or a justified synthetic fixture. A real address cannot be taken back once pushed.
 
-Code behavior changes pass `python -m ruff check apkscan tests`, `python -m pyright apkscan` and `python -m pytest -q` locally.
+Code behavior changes pass `python -m ruff check fxapk tests`, `python -m pyright fxapk` and `python -m pytest -q` locally.
 
 ## Compliance boundaries
 
@@ -233,7 +233,7 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 
 ## Optional Flutter AOT plugin
 
-`fxapk-flutter` (release-attachment wheel, or `python -m pip install -e ./plugins/fxapk-flutter` in the source tree; requires core >=1.23.0) performs offline AOT static analysis on APKs identified as Flutter (Android ARM64 only). `analyze` controls the stage via `--flutter auto` (default) / `off` / `required`, where `required` preserves the report but exits 4 on failure; `--flutter-toolchain` points to a local toolchain.json (falling back to `FXAPK_FLUTTER_TOOLCHAIN` or `~/.fxapk/flutter/toolchain.json`); `--flutter-timeout` accepts 1-1800 seconds (default 300) and bounds a single container run only - it is not a whole-pipeline deadline. The `auto` command has no Flutter options. A missing plugin or toolchain is recorded as a coverage gap; nothing is installed automatically. `analyze` also compares the parse-time snapshot with the final fingerprint: if the input file changed during analysis, it keeps the snapshot-bound report and exits 4 (this applies to `--flutter auto` as well).
+`fxapk-flutter` (release-attachment wheel, or `python -m pip install -e ./plugins/fxapk-flutter` in the source tree; requires core >=2.0.0) performs offline AOT static analysis on APKs identified as Flutter (Android ARM64 only). `analyze` controls the stage via `--flutter auto` (default) / `off` / `required`, where `required` preserves the report but exits 4 on failure; `--flutter-toolchain` points to a local toolchain.json (falling back to `FXAPK_FLUTTER_TOOLCHAIN` or `~/.fxapk/flutter/toolchain.json`); `--flutter-timeout` accepts 1-1800 seconds (default 300) and bounds a single container run only - it is not a whole-pipeline deadline. The `auto` command has no Flutter options. A missing plugin or toolchain is recorded as a coverage gap; nothing is installed automatically. `analyze` also compares the parse-time snapshot with the final fingerprint: if the input file changed during analysis, it keeps the snapshot-bound report and exits 4 (this applies to `--flutter auto` as well).
 
 ```text
 fxapk analyze sample.apk --offline --flutter auto --out analysis

@@ -8,8 +8,8 @@ import struct
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.cli import app
-from apkscan.core.offline_review import crypto, filesystem, native, runner, trace
+from fxapk.cli import app
+from fxapk.core.offline_review import crypto, filesystem, native, runner, trace
 
 
 @pytest.fixture(autouse=True)

@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import dex_query as dq
-from apkscan.core.dex_query import DexQueryLimits, query_apk
+from fxapk.core import dex_query as dq
+from fxapk.core.dex_query import DexQueryLimits, query_apk
 from tests.fixtures.dex_query.dexgen import build_dex, sample_classes, wide_classes, zip_bytes
 from tests.test_dex_query_versions import _ASC_RELEASES
 

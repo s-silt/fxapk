@@ -10,9 +10,9 @@ from typing import Any
 
 import pytest
 
-from apkscan.attribution.assemble import _parse_asn, build_network_attribution
-from apkscan.core.models import Endpoint, Evidence, EvidenceScope
-from apkscan.dynamic.merge import load_runtime_endpoints
+from fxapk.attribution.assemble import _parse_asn, build_network_attribution
+from fxapk.core.models import Endpoint, Evidence, EvidenceScope
+from fxapk.dynamic.merge import load_runtime_endpoints
 
 
 def _ep(value, kind, enrichment=None, evidences=None):
@@ -331,9 +331,9 @@ def test_assemble_imports_no_network_or_enricher_stack() -> None:
     # network" (the socket tripwire test covers that); the HTTP / enricher / intel
     # stack is what must stay unimported.
     code = (
-        "import apkscan.attribution.assemble, sys;"
-        "bad=[m for m in sys.modules if m == 'requests' or m == 'apkscan.core.enrichment'"
-        " or m.startswith('apkscan.enrichers') or m.startswith('apkscan.intel')];"
+        "import fxapk.attribution.assemble, sys;"
+        "bad=[m for m in sys.modules if m == 'requests' or m == 'fxapk.core.enrichment'"
+        " or m.startswith('fxapk.enrichers') or m.startswith('fxapk.intel')];"
         "print(sorted(bad))"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
@@ -341,7 +341,7 @@ def test_assemble_imports_no_network_or_enricher_stack() -> None:
 
 
 def test_digest_surfaces_a_compact_network_attribution_block() -> None:
-    from apkscan.report.digest import build_digest
+    from fxapk.report.digest import build_digest
 
     blob = _build(_cn_ip_endpoint())
     report = {"package_name": "com.x", "meta": {"network_attribution": blob}, "leads": []}
@@ -353,7 +353,7 @@ def test_digest_surfaces_a_compact_network_attribution_block() -> None:
 
 
 def test_digest_degrades_on_malformed_network_attribution() -> None:
-    from apkscan.report.digest import build_digest
+    from fxapk.report.digest import build_digest
 
     digest = build_digest({"meta": {"network_attribution": "not-a-dict"}, "leads": []})
     assert "network_attribution" not in digest  # None -> key omitted, never raises
@@ -375,7 +375,7 @@ def test_digest_degrades_on_malformed_network_attribution() -> None:
 def test_digest_role_candidates_have_exact_keys_including_kind() -> None:
     """★codex 复审 P2-4：role_candidates 每项键集须 == 设计 schema {endpoint,kind,ip,role,score,confidence}，
     kind（domain/ip）如实透传，排序按 role_rank——此前实现漏 kind，与 spec 漂移且无测试锁定。"""
-    from apkscan.report.digest import _ROLE_RANK, build_digest
+    from fxapk.report.digest import _ROLE_RANK, build_digest
 
     blob = {"endpoints": [
         {"endpoint": "c2.fraud-gw.cn", "kind": "domain", "ips": [
@@ -1027,7 +1027,7 @@ def test_intercept_node_never_edge_signals() -> None:
 # --------------------------------------------------------------------------- #
 def test_infrastructure_attribution_from_entry_maps_five_layer_dict() -> None:
     """from_entry 把嵌套五层 dict 拍平成 typed 字段（系统一 schema 读点单一收敛点）。"""
-    from apkscan.attribution.assemble import InfrastructureAttribution
+    from fxapk.attribution.assemble import InfrastructureAttribution
 
     attr = InfrastructureAttribution.from_entry({
         "country": "CN",
@@ -1047,8 +1047,8 @@ def test_infrastructure_attribution_from_entry_maps_five_layer_dict() -> None:
 
 def test_network_observations_from_endpoint_reads_runtime() -> None:
     """from_endpoint 把端点 enrichment/evidences 收敛成 typed 观测（is_this_ip / asn_country / 路径 / cloaking）。"""
-    from apkscan.attribution.assemble import NetworkObservations
-    from apkscan.network import NetworkEntity, NetworkEntityType
+    from fxapk.attribution.assemble import NetworkObservations
+    from fxapk.network import NetworkEntity, NetworkEntityType
 
     ip = NetworkEntity(kind=NetworkEntityType.IP, value="203.0.113.9")
     ep = _ep("203.0.113.9", "ip", {
@@ -1075,12 +1075,12 @@ def test_network_observations_from_endpoint_reads_runtime() -> None:
 
 def test_role_feature_adapter_decoupled_from_dict_schema() -> None:
     """RoleFeatureAdapter.from_attribution 只吃 typed 契约、不碰任何裸 dict——直接构造 typed 视图即可发射信号。"""
-    from apkscan.attribution.assemble import (
+    from fxapk.attribution.assemble import (
         InfrastructureAttribution,
         NetworkObservations,
         RoleFeatureAdapter,
     )
-    from apkscan.network import NetworkEntity, NetworkEntityType
+    from fxapk.network import NetworkEntity, NetworkEntityType
 
     ip = NetworkEntity(kind=NetworkEntityType.IP, value="203.0.113.9")
     attribution = InfrastructureAttribution(
@@ -1118,7 +1118,7 @@ def test_runtime_first_contact_ts_rejects_overflowing_int_without_raising() -> N
     修前 math.isfinite(huge_int) 在内部转 float 时抛 OverflowError，令 helper 食言'绝不抛'。"""
     from types import SimpleNamespace
 
-    from apkscan.attribution.assemble import _runtime_first_contact_ts
+    from fxapk.attribution.assemble import _runtime_first_contact_ts
 
     boom = SimpleNamespace(enrichment={"runtime": {"first_contact_ts": 10**400}})
     assert _runtime_first_contact_ts(boom) is None  # 不抛
@@ -1174,7 +1174,7 @@ def test_known_intercept_ips_cover_both_carriers() -> None:
     ★收录门槛：必须有主动观测到的形态（自签/ISP 证书 + 拦截提示页 + 业务 API 403），
       **不能**因为"某个涉案域名解析到过它"就收——那只说明该域名被拦了。
     """
-    from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS, is_known_intercept_ip
+    from fxapk.network.fingerprints import KNOWN_INTERCEPT_IPS, is_known_intercept_ip
 
     # 这两个值本就在源码里（公开仓库可见），逐条钉住不产生新的暴露面。
     confirmed = {

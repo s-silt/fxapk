@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from apkscan.network.fingerprints import (
+from fxapk.network.fingerprints import (
     normalize_authority,
     normalize_domain,
     normalize_ip,
@@ -105,7 +105,7 @@ def test_stable_digest_rejects_noncanonical_json(payload: object) -> None:
 
 def test_parse_asn_shared_contract() -> None:
     """P1：共享 ASN 解析契约（core 五层 + assemble 角色共用同一份）——返回 (asn, org_tail)，严格全匹配、绝不抛。"""
-    from apkscan.network.fingerprints import parse_asn
+    from fxapk.network.fingerprints import parse_asn
     assert parse_asn(13335) == (13335, None)
     assert parse_asn("AS13335") == (13335, None)
     assert parse_asn("AS13335 Cloudflare, Inc.") == (13335, "Cloudflare, Inc.")
@@ -121,9 +121,9 @@ def test_parse_asn_shared_contract() -> None:
 
 def test_network_category_shared_contract() -> None:
     """P1：网络类别规范取值单一来源——五层(core)与角色层(assemble)的类别集合都由 network.categories 构建、不漂移。"""
-    from apkscan.attribution import assemble
-    from apkscan.core import attribution as core
-    from apkscan.network import categories as cat
+    from fxapk.attribution import assemble
+    from fxapk.core import attribution as core
+    from fxapk.network import categories as cat
     assert cat.CAT_CLOUD == "cloud" and cat.CAT_IDC == "idc" and cat.CAT_CDN == "cdn"
     # core 的 CAT_* 就是共享常量（re-export）
     assert core.CAT_CLOUD is cat.CAT_CLOUD and core.CAT_CDN is cat.CAT_CDN

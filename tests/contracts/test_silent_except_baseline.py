@@ -63,11 +63,11 @@ def test_detects_pass_continue_break_and_scope() -> None:
         "    except (StopIteration, OSError):\n"
         "        break\n"
     )
-    found = silent_except.scan_source(src, "apkscan/x.py")
+    found = silent_except.scan_source(src, "fxapk/x.py")
     assert found == {
-        "apkscan/x.py::f::ValueError::continue": 1,
-        "apkscan/x.py::C.g::<bare>::pass": 1,
-        "apkscan/x.py::<module>::(StopIteration, OSError)::break": 1,
+        "fxapk/x.py::f::ValueError::continue": 1,
+        "fxapk/x.py::C.g::<bare>::pass": 1,
+        "fxapk/x.py::<module>::(StopIteration, OSError)::break": 1,
     }
 
 
@@ -84,9 +84,9 @@ def test_padding_does_not_bypass_detection() -> None:
         "    except ValueError:\n"
         "        ...\n"
     )
-    assert silent_except.scan_source(src, "apkscan/x.py") == {
-        "apkscan/x.py::f::OSError::pass": 1,
-        "apkscan/x.py::f::ValueError::pass": 1,
+    assert silent_except.scan_source(src, "fxapk/x.py") == {
+        "fxapk/x.py::f::OSError::pass": 1,
+        "fxapk/x.py::f::ValueError::pass": 1,
     }
 
 
@@ -100,7 +100,7 @@ def test_handled_except_is_not_flagged() -> None:
         "        logging.debug('x: %s', exc)\n"
         "        return None\n"
     )
-    assert not silent_except.scan_source(src, "apkscan/x.py")
+    assert not silent_except.scan_source(src, "fxapk/x.py")
 
 
 def test_new_and_fixed_are_both_reported() -> None:

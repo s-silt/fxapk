@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from apkscan.attribution import (
+from fxapk.attribution import (
     AttributionEvidence,
     EvidenceScorer,
     InfrastructureRole,
@@ -11,7 +11,7 @@ from apkscan.attribution import (
     RoleScore,
     RoleSignal,
 )
-from apkscan.network import NetworkEntity, NetworkEntityType
+from fxapk.network import NetworkEntity, NetworkEntityType
 
 
 def ip(value: str = "1.2.3.4", sources: tuple[str, ...] = ("pcap",)) -> NetworkEntity:

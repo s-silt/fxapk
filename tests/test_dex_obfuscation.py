@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import random
 
-from apkscan.analyzers.dex_obfuscation import DexObfuscationAnalyzer, assess_string_pool
+from fxapk.analyzers.dex_obfuscation import DexObfuscationAnalyzer, assess_string_pool
 from tests.conftest import FakeContext
 
 _FINDING = "DEX-STRING-POOL-OPAQUE"
@@ -63,7 +63,7 @@ def test_emoji_heavy_app_not_flagged() -> None:
 
 def test_zwj_and_variation_selectors_not_unreadable() -> None:
     """ZWJ / 变体选择符是正常文本构成部件，不计入不可读。"""
-    from apkscan.analyzers.dex_obfuscation import _unreadable_char_ratio
+    from fxapk.analyzers.dex_obfuscation import _unreadable_char_ratio
     for s in ("👨‍👩‍👧‍👦", "👩‍💻", "👍🏽", "☺️"):
         assert _unreadable_char_ratio(s) == 0.0, s
 
@@ -74,7 +74,7 @@ def test_descriptor_detection_does_not_eat_business_text() -> None:
     修前只判「首字符 L/[/( + 含 ; 或 )」，`Login failed; retry later`、`(optional) phone number`、
     `(点击重试)` 全被误排——被排除的串不进分母，反而抬高不透明占比、把正常 App 推向误报。
     """
-    from apkscan.analyzers.dex_obfuscation import _is_descriptor
+    from fxapk.analyzers.dex_obfuscation import _is_descriptor
     for text in ("Login failed; retry later", "(optional) phone number",
                  "List; of items", "(点击重试)"):
         assert _is_descriptor(text) is False, text

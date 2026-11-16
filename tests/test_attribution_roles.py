@@ -5,15 +5,15 @@ import json
 
 import pytest
 
-from apkscan.attribution.models import AttributionEvidence
-from apkscan.attribution.roles import (
+from fxapk.attribution.models import AttributionEvidence
+from fxapk.attribution.roles import (
     InfrastructureRole,
     RoleAssessment,
     RoleClassifier,
     RoleFeature,
     RoleSignal,
 )
-from apkscan.network import NetworkEntity, NetworkEntityType
+from fxapk.network import NetworkEntity, NetworkEntityType
 
 
 def _entity(value: str = "1.2.3.4") -> NetworkEntity:
@@ -674,8 +674,8 @@ def test_duplicate_features_and_input_order_do_not_change_output() -> None:
 
 
 def test_public_api_exports_role_types() -> None:
-    import apkscan.attribution as attribution
-    from apkscan.attribution import (
+    import fxapk.attribution as attribution
+    from fxapk.attribution import (
         EvidenceScorer as ExportedScorer,
         InfrastructureRole as ExportedRole,
         MissingScoreEvidence as ExportedMissing,
@@ -686,7 +686,7 @@ def test_public_api_exports_role_types() -> None:
         RoleSignal as ExportedSignal,
         ScoreContribution as ExportedContribution,
     )
-    from apkscan.attribution.scorer import (
+    from fxapk.attribution.scorer import (
         EvidenceScorer,
         MissingScoreEvidence,
         RoleScore,

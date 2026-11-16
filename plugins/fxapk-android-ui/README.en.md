@@ -2,7 +2,7 @@
 
 [中文](README.md) · **English**
 
-Optional Android CLI UI observation plugin, version 0.1.2, for fxapk 1.18.1+ and Python 3.11+.
+Optional Android CLI UI observation plugin, version 0.2.0, for fxapk 2.0.0+ and Python 3.11+.
 
 Install the core and plugin in the same environment. From the fxapk source root:
 

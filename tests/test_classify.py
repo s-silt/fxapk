@@ -12,8 +12,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.classify import classify_app
-from apkscan.core.models import (
+from fxapk.analyzers.classify import classify_app
+from fxapk.core.models import (
     Endpoint,
     Evidence,
     Lead,
@@ -63,7 +63,7 @@ def test_loan_classification_emits_investigation_lead() -> None:
         Lead(category=LeadCategory.CONTACT, value="客服微信 daikuan88"),
     ]
     # 文案信号通过 finding 描述带入（不重新扫 dex）。
-    from apkscan.core.models import Finding, Severity
+    from fxapk.core.models import Finding, Severity
 
     report.findings = [
         Finding(

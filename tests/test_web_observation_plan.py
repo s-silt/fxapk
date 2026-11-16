@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from apkscan.core.web_observation_plan import (
+from fxapk.core.web_observation_plan import (
     build_plan,
     load_config_bytes,
     parse_config,

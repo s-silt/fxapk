@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from apkscan.core import meta_contract, pipeline, registry
-from apkscan.core.models import AnalysisConfig
+from fxapk.core import meta_contract, pipeline, registry
+from fxapk.core.models import AnalysisConfig
 
 
 def test_pipeline_reserved_key_conflict_fails_registry_build(monkeypatch) -> None:
@@ -99,8 +99,8 @@ def test_pipeline_true_entry_records_missing_analyzers_without_failing(monkeypat
 
 def test_pipeline_true_entry_rejects_unregistered_meta(monkeypatch) -> None:
     """未注册写入必须经 pipeline.run 真入口标红，不能只测 helper。"""
-    from apkscan.core.models import AnalyzerResult
-    from apkscan.core.registry import BaseAnalyzer
+    from fxapk.core.models import AnalyzerResult
+    from fxapk.core.registry import BaseAnalyzer
     from tests.conftest import FakeContext
 
     class LateAnalyzer(BaseAnalyzer):

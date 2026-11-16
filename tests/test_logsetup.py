@@ -1,16 +1,16 @@
-"""apkscan.core.logsetup 单测：LocatingFormatter 给 WARNING+ 追加来源定位；
+"""fxapk.core.logsetup 单测：LocatingFormatter 给 WARNING+ 追加来源定位；
 setup_logging 幂等、装 handler。"""
 
 from __future__ import annotations
 
 import logging
 
-from apkscan.core.logsetup import LocatingFormatter, setup_logging
+from fxapk.core.logsetup import LocatingFormatter, setup_logging
 
 
 def _record(level: int, *, func: str = "myfunc", lineno: int = 42, module: str = "mymod") -> logging.LogRecord:
     rec = logging.LogRecord(
-        name="apkscan.x", level=level, pathname="x.py", lineno=lineno,
+        name="fxapk.x", level=level, pathname="x.py", lineno=lineno,
         msg="boom", args=(), exc_info=None, func=func,
     )
     rec.module = module

@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import json
 
-from apkscan.analyzers.firebase import FirebaseAnalyzer
-from apkscan.core.infra import ADVICE_INVESTIGATE, classify_domain
-from apkscan.core.models import LeadCategory
+from fxapk.analyzers.firebase import FirebaseAnalyzer
+from fxapk.core.infra import ADVICE_INVESTIGATE, classify_domain
+from fxapk.core.models import LeadCategory
 from tests.conftest import FakeContext
 
 

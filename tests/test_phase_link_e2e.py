@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.case_package import CasePackageError, create_case_review, project_case_status
+from fxapk import cli
+from fxapk.core.case_package import CasePackageError, create_case_review, project_case_status
 from tests.phase2_fixtures import write_verified_package
 
 runner = CliRunner()

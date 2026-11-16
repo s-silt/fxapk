@@ -22,8 +22,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from apkscan.core.models import LeadCategory, Report
-from apkscan.dynamic import cryptohook, merge
+from fxapk.core.models import LeadCategory, Report
+from fxapk.dynamic import cryptohook, merge
 
 
 # ---------------------------------------------------------------------------

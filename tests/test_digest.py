@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core import pipeline
-from apkscan.core.admission import evaluate_usage
-from apkscan.core.models import AnalysisConfig, Endpoint, EnrichmentResult, Evidence
-from apkscan.core.registry import BaseEnricher
-from apkscan.report.digest import build_digest
+from fxapk import cli
+from fxapk.core import pipeline
+from fxapk.core.admission import evaluate_usage
+from fxapk.core.models import AnalysisConfig, Endpoint, EnrichmentResult, Evidence
+from fxapk.core.registry import BaseEnricher
+from fxapk.report.digest import build_digest
 
 runner = CliRunner()
 
@@ -505,7 +505,7 @@ def test_cli_digest_bad_path_exits_1() -> None:
 def test_build_digest_carries_downgrade_ledger() -> None:
     """★抑制账本必须进 digest：降档原因不再拼 notes，digest 的主要读者是 AI，
     它要判断「这条为什么被压着、能不能放回」全靠这个字段——漏了它，压档就成了无来由的档位。"""
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     report = {
         "leads": [
@@ -529,7 +529,7 @@ def test_build_digest_carries_downgrade_ledger() -> None:
 def test_build_digest_redact_keeps_ledger_usable() -> None:
     """redact 路径：账本的值过脱敏兜底后仍是字符串、键不丢——账本值是判据产生的固定文案，
     脱敏是防御性的（防上游把 PII 写进说明），不该把整个字段抹没。"""
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     report = {
         "leads": [
@@ -555,8 +555,8 @@ def test_build_digest_flags_manually_restored_leads() -> None:
     手改 advice 会被 closure 的一致性守卫挡下，手塞一条墓碑不会——不呈现就等于给绕过守卫留了
     一条更安静的路。墓碑不做真伪校验，可见性是唯一站得住的保证。
     """
-    from apkscan.core import infra
-    from apkscan.core.restore import MANUAL_RESTORES_KEY
+    from fxapk.core import infra
+    from fxapk.core.restore import MANUAL_RESTORES_KEY
 
     report = {
         "meta": {MANUAL_RESTORES_KEY: [

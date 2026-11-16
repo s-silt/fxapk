@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from apkscan.core.models import LeadCategory, Report
-from apkscan.core.observations import evidence_identity
-from apkscan.dynamic import merge
+from fxapk.core.models import LeadCategory, Report
+from fxapk.core.observations import evidence_identity
+from fxapk.dynamic import merge
 
 
 def _report() -> Report:
@@ -51,7 +51,7 @@ def test_cached_runtime_read_keeps_original_hash_when_file_changes(tmp_path):
         first = merge._load_events_field(str(path), "jsbridge_events")
         path.write_bytes(b"{}")
         second = merge._load_events_field(str(path), "jsbridge_events")
-    from apkscan.dynamic.event_origin import evidence_coordinates
+    from fxapk.dynamic.event_origin import evidence_coordinates
     assert evidence_coordinates(first[0]) == evidence_coordinates(second[0])
     assert evidence_coordinates(second[0])["provenance"]["artifact_sha256"] == hashlib.sha256(raw).hexdigest()
     assert merge._load_events_field(str(path), "jsbridge_events") == []
@@ -125,7 +125,7 @@ def test_message_seconds_and_frida_milliseconds_keep_their_producer_units(tmp_pa
     ],
 )
 def test_unknown_or_invalid_timestamp_is_unavailable(field, timestamp):
-    from apkscan.dynamic.event_origin import RuntimePayload, bind_event, evidence_coordinates
+    from fxapk.dynamic.event_origin import RuntimePayload, bind_event, evidence_coordinates
 
     payload = RuntimePayload({}, b"{}", "runtime_report.json")
     event = bind_event(payload, field, 0, {"ts": timestamp})
@@ -171,7 +171,7 @@ def test_bundled_event_normalization_and_aggregation_preserve_occurrences(tmp_pa
 
 @pytest.mark.parametrize("raw", [b'{"credential_events":[],"credential_events":[]}', b'{"v":NaN}', b'{"v":1e999}', b'[]', b'{'])
 def test_runtime_input_failure_is_not_a_successful_zero_findings_merge(tmp_path, raw):
-    from apkscan.dynamic.runtime_input import RuntimeReadFailure
+    from fxapk.dynamic.runtime_input import RuntimeReadFailure
 
     path = tmp_path / "runtime_report.json"
     path.write_bytes(raw)
@@ -184,7 +184,7 @@ def test_runtime_input_failure_is_not_a_successful_zero_findings_merge(tmp_path,
 
 
 def test_runtime_input_budget_and_invalid_rows_are_reported(tmp_path, monkeypatch):
-    from apkscan.dynamic import runtime_input
+    from fxapk.dynamic import runtime_input
 
     path = tmp_path / "runtime_report.json"
     raw = b'{"credential_events":[null,{}]}'

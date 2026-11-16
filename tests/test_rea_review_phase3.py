@@ -6,12 +6,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from apkscan.core.native_handoff import project_native_handoff
-from apkscan.core.web_observation_plan import build_agent_handoff, build_plan
-from apkscan.core.web_supplement import project_for_digest
-from apkscan.core.web_supplement_preservation import project_attempts
-from apkscan.core.web_supplement_runtime import route_stripped_cdp
-from apkscan.report.digest import build_digest
+from fxapk.core.native_handoff import project_native_handoff
+from fxapk.core.web_observation_plan import build_agent_handoff, build_plan
+from fxapk.core.web_supplement import project_for_digest
+from fxapk.core.web_supplement_preservation import project_attempts
+from fxapk.core.web_supplement_runtime import route_stripped_cdp
+from fxapk.report.digest import build_digest
 
 
 def _cdp(mode: str = "auto") -> dict[str, object]:
@@ -112,7 +112,7 @@ def test_d2_coverage_whitelist_and_latest_attempt_only() -> None:
 
 
 def test_d3_relation_keeps_request_frame_and_unverified_script() -> None:
-    from apkscan.core.web_supplement import _request_relations
+    from fxapk.core.web_supplement import _request_relations
 
     sha = "ef" * 32
     hop = {

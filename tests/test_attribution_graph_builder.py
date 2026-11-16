@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.attribution.graph import _EDGE_HANDLERS, build_infrastructure_graph
-from apkscan.network import Observation
-from apkscan.network.converters import ConversionResult
+from fxapk.attribution.graph import _EDGE_HANDLERS, build_infrastructure_graph
+from fxapk.network import Observation
+from fxapk.network.converters import ConversionResult
 from tests.attribution_graph_fakes import (
     cert,
     domain,
@@ -133,10 +133,10 @@ def test_unknown_type_is_provenance_only_no_edge_no_issue() -> None:
 
 def test_role_consumed_verbatim_not_rederived(monkeypatch) -> None:
     score = domestic_relay_score("1.2.3.4")
-    import apkscan.attribution.graph as graph_mod  # noqa: F401 - builder must not re-run these
+    import fxapk.attribution.graph as graph_mod  # noqa: F401 - builder must not re-run these
 
-    from apkscan.attribution import roles as roles_mod
-    from apkscan.attribution import scorer as scorer_mod
+    from fxapk.attribution import roles as roles_mod
+    from fxapk.attribution import scorer as scorer_mod
 
     monkeypatch.setattr(roles_mod.RoleClassifier, "assess",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-derived")))
@@ -156,7 +156,7 @@ def test_role_only_target_still_admits_node() -> None:
 def test_ineligible_role_is_kept() -> None:
     # an origin_candidate assessment on an IP with only DOMESTIC_NETWORK evidence is
     # ineligible; the annotation is still carried (negatives are explainability).
-    from apkscan.attribution import (
+    from fxapk.attribution import (
         EvidenceScorer,
         InfrastructureRole,
         RoleClassifier,
@@ -268,7 +268,7 @@ def test_conflicting_id_across_conversions_raises_in_any_order() -> None:
 
 
 def test_merge_equivalence() -> None:
-    from apkscan.network.converters import merge_conversion_results
+    from fxapk.network.converters import merge_conversion_results
 
     a = ConversionResult(evidence=(evidence(id="e1", type="dns_resolution", target=ip("1.2.3.4"), value="a.com"),))
     b = ConversionResult(evidence=(evidence(id="e2", type="asn", target=ip("1.2.3.4"), value=13335, source="shodan"),))

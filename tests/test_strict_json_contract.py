@@ -6,12 +6,12 @@ import json
 
 import pytest
 
-from apkscan.core.json_contract import JsonContractError
-from apkscan.core import case_package
-from apkscan.core.case_package import create_case_package, verify_case_package
-from apkscan.core.models import Report
-from apkscan.core.report_io import load_report, write_report
-from apkscan.report import json as report_json
+from fxapk.core.json_contract import JsonContractError
+from fxapk.core import case_package
+from fxapk.core.case_package import create_case_package, verify_case_package
+from fxapk.core.models import Report
+from fxapk.core.report_io import load_report, write_report
+from fxapk.report import json as report_json
 
 
 def _typed_report(meta: dict) -> Report:

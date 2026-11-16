@@ -5,8 +5,8 @@ import sys
 
 import pytest
 
-from apkscan import cli
-from apkscan.core import dotenv, logsetup, utf8
+from fxapk import cli
+from fxapk.core import dotenv, logsetup, utf8
 
 
 @pytest.mark.parametrize("argv", [

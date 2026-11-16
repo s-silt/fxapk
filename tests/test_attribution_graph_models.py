@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from apkscan.attribution.graph import (
+from fxapk.attribution.graph import (
     GraphEdge,
     GraphIssue,
     GraphNode,
@@ -14,8 +14,8 @@ from apkscan.attribution.graph import (
     GraphRelation,
     InfrastructureGraph,
 )
-from apkscan.network import NetworkEntityType
-from apkscan.network.fingerprints import stable_digest as _stable_digest
+from fxapk.network import NetworkEntityType
+from fxapk.network.fingerprints import stable_digest as _stable_digest
 from tests.attribution_graph_fakes import domestic_relay_score
 
 

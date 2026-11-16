@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.analyzers.manifest import ManifestAnalyzer
-from apkscan.core.models import AnalyzerResult, Finding, Severity
+from fxapk.analyzers.manifest import ManifestAnalyzer
+from fxapk.core.models import AnalyzerResult, Finding, Severity
 from tests.conftest import FakeContext
 
 ANDROID_NS = "http://schemas.android.com/apk/res/android"

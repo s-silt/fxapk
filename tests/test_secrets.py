@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from apkscan.core.secrets import (
+from fxapk.core.secrets import (
     SecretRules,
     is_real_secret,
     is_sdk_constant,

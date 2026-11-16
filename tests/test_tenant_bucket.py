@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import infra
+from fxapk.core import infra
 
 #: 合成桶名：形态与真实一致（十六进制串），不含任何取自样本材料的值。
 _B = "0123456789abcdef"
@@ -432,8 +432,8 @@ def test_template_reason_reaches_the_lead_through_the_real_entry() -> None:
     「这是个桶名占位符、下一步该去取运行时真桶名」。本仓栽过两次同款
     （``shape_uncertain`` / ``sni_masquerade`` 都曾只写进 notes 而出口不渲染）。
     """
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import Endpoint, Evidence
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import Endpoint, Evidence
 
     value = "%s.gz.bcebos.com"  # leak-scan: allow 接线锁夹具，须用真实端点域才走得到模板判据
     ep = Endpoint(
@@ -459,7 +459,7 @@ def test_template_survives_the_extraction_layer() -> None:
     那一刻模板判据静默失能，而上面那些手造 ``Endpoint`` 的测试**照常全绿**。
     所以必须有一条从原始字节起跑的锁。
     """
-    from apkscan.analyzers.endpoints import EndpointsAnalyzer
+    from fxapk.analyzers.endpoints import EndpointsAnalyzer
     from tests.conftest import FakeContext
 
     template_url = "https://%s.gz.bcebos.com/%s.dat"  # leak-scan: allow 提取层锁夹具，须用真实端点域才走得到模板判据

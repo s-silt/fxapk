@@ -5,13 +5,13 @@
 """
 from __future__ import annotations
 
-from apkscan.analyzers.repack_identity import (
+from fxapk.analyzers.repack_identity import (
     RepackIdentityAnalyzer,
     classify_sig_alias,
     decide_verdict,
     profile_stack,
 )
-from apkscan.core.models import CertInfo, Severity
+from fxapk.core.models import CertInfo, Severity
 from tests.conftest import FakeContext
 
 _REPACK_ID = "REPACK-IDENTITY-SUSPECTED"

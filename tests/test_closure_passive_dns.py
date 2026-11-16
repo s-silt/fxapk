@@ -11,8 +11,8 @@
 
 from __future__ import annotations
 
-from apkscan.core.closure import _sync_passive_dns_evidence
-from apkscan.core.models import Endpoint, Evidence, Lead, LeadCategory, Report
+from fxapk.core.closure import _sync_passive_dns_evidence
+from fxapk.core.models import Endpoint, Evidence, Lead, LeadCategory, Report
 
 _HISTORY = {
     "otx": {"passive_dns": [
@@ -106,9 +106,9 @@ def test_wired_into_close_report_end_to_end() -> None:
     结案链路里调用得到，一个字都没证。把 close_report 里那行删掉，上面六条照样全绿；
     只有这一条会红。本仓反复栽在同一件事上：信号提取出来了，没人接。
     """
-    from apkscan.core.closure import close_report
-    from apkscan.core.closure._shared import ClosureConfig
-    from apkscan.core.infra import ADVICE_INVESTIGATE
+    from fxapk.core.closure import close_report
+    from fxapk.core.closure._shared import ClosureConfig
+    from fxapk.core.infra import ADVICE_INVESTIGATE
 
     value = "shop.evil-synthetic.test"
     lead = Lead(

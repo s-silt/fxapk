@@ -10,10 +10,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from apkscan.core import pipeline
-from apkscan.core.models import AnalysisConfig, CertInfo, Component, ComponentSet, LeadCategory
-from apkscan.report import html as html_report
-from apkscan.report import json as json_report
+from fxapk.core import pipeline
+from fxapk.core.models import AnalysisConfig, CertInfo, Component, ComponentSet, LeadCategory
+from fxapk.report import html as html_report
+from fxapk.report import json as json_report
 
 from tests.conftest import FakeContext
 

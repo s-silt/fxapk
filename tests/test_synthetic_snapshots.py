@@ -15,9 +15,9 @@ import os
 
 import pytest
 
-from apkscan.core import corpus
-from apkscan.core.attribution import build_endpoint_attribution
-from apkscan.report.html import render_to_string
+from fxapk.core import corpus
+from fxapk.core.attribution import build_endpoint_attribution
+from fxapk.report.html import render_to_string
 from tests.synthetic import snapshot
 from tests.synthetic.samples import SAMPLES, SyntheticSample
 

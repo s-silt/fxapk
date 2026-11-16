@@ -1,14 +1,14 @@
 """ContactsAnalyzer 测试：QQ/微信/Telegram/邮箱/手机号 → CONTACT 线索 + 去误报。
 
-用 FakeContext 喂合成数据，配真实 apkscan/rules/contacts.yaml 规则。
+用 FakeContext 喂合成数据，配真实 fxapk/rules/contacts.yaml 规则。
 """
 
 from __future__ import annotations
 
 import time
 
-from apkscan.analyzers.contacts import ContactsAnalyzer
-from apkscan.core.models import Confidence, LeadCategory
+from fxapk.analyzers.contacts import ContactsAnalyzer
+from fxapk.core.models import Confidence, LeadCategory
 
 from tests.conftest import FakeContext
 from urllib.parse import urlsplit

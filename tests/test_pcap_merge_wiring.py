@@ -19,13 +19,13 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import visibility
-from apkscan.core.closure.layers import _runtime_layer
-from apkscan.core.closure.targets import _select_targets_with_stats
-from apkscan.core.models import LeadCategory, Report
-from apkscan.core.report_io import report_from_dict
-from apkscan.core import runtime_inventory
-from apkscan.dynamic import pcap_ingest
+from fxapk.core import visibility
+from fxapk.core.closure.layers import _runtime_layer
+from fxapk.core.closure.targets import _select_targets_with_stats
+from fxapk.core.models import LeadCategory, Report
+from fxapk.core.report_io import report_from_dict
+from fxapk.core import runtime_inventory
+from fxapk.dynamic import pcap_ingest
 from tests.doc_addresses import (
     DOC_BACKEND_IP,
     DOC_SECOND_IP,
@@ -264,7 +264,7 @@ def test_refresh_preserves_a_gap_when_its_inputs_were_stripped() -> None:
     当前快照会记录逐维 ``inputs_seen``；后续刷新只要发现旧键消失，就沿用旧盲区。
     旧 schema 没有该字段时仍按「该维输入全删」兼容，避免冻结合法 runtime 升级。
     """
-    from apkscan.core.closure import refresh_visibility_snapshot
+    from fxapk.core.closure import refresh_visibility_snapshot
 
     hardened = {
         "dex_available": True, "dex_scanned": 1, "is_hardened": True,
@@ -286,7 +286,7 @@ def test_refresh_preserves_a_gap_when_its_inputs_were_stripped() -> None:
 
 def test_refresh_preserves_gap_when_only_some_inputs_were_stripped() -> None:
     """只剩一个无害键也不能把加固盲区刷成 complete；旧 ``any()`` 判据会放过此案。"""
-    from apkscan.core.closure import refresh_visibility_snapshot
+    from fxapk.core.closure import refresh_visibility_snapshot
 
     original = {
         "dex_available": True,
@@ -318,7 +318,7 @@ def test_refresh_preserves_gap_when_only_some_inputs_were_stripped() -> None:
 
 def test_refresh_preserves_gap_when_old_input_disappears_as_new_one_is_added() -> None:
     """新键不能掩盖旧键丢失；只判断「当前是真子集」会漏掉这种混合变化。"""
-    from apkscan.core.closure import refresh_visibility_snapshot
+    from fxapk.core.closure import refresh_visibility_snapshot
 
     original = {
         "dex_available": True,
@@ -342,7 +342,7 @@ def test_refresh_preserves_gap_when_old_input_disappears_as_new_one_is_added() -
 
 def test_legacy_snapshot_with_no_inputs_left_keeps_confirmed_gap() -> None:
     """1.0 快照无 provenance 时仍保留旧有的「该维输入全删才回填」兼容保护。"""
-    from apkscan.core.closure import refresh_visibility_snapshot
+    from fxapk.core.closure import refresh_visibility_snapshot
 
     legacy = {
         "schema_version": "1.0",
@@ -368,7 +368,7 @@ def test_legacy_snapshot_with_no_inputs_left_keeps_confirmed_gap() -> None:
 
 def test_legacy_snapshot_does_not_freeze_a_valid_runtime_upgrade() -> None:
     """旧快照不知道原键集合；已有新 runtime 信号时必须允许刷新，不能一律保守回填。"""
-    from apkscan.core.closure import refresh_visibility_snapshot
+    from fxapk.core.closure import refresh_visibility_snapshot
 
     legacy = {
         "schema_version": "1.0",
@@ -1019,7 +1019,7 @@ def test_port_normalize_can_read_the_merged_endpoint(tmp_path: Path) -> None:
     该字段此前根本没被 pcap 回灌生成，文档宣称的「报告实测端口交叉校验」对这类报告不可用——
     只测端点建出来了，挡不住这种「字段名对不上、下游静默拿不到」。
     """
-    from apkscan.config import port_norm
+    from fxapk.config import port_norm
 
     payload = _merge(tmp_path, _two_port_summary())
     observed = port_norm.observed_ports_from_report(payload)
@@ -1093,7 +1093,7 @@ def test_endpoint_exclusions_survive_merge_into_main_report(tmp_path) -> None:
       （``dict(raw_signals)``）；若哪天改成字段白名单而漏了这一项，排除记录就会在合并时
       静默蒸发——那正是这条链最初要修的「静默」本身。本条把最终落点钉住。
     """
-    from apkscan.dynamic.merge import merge_capture_quality
+    from fxapk.dynamic.merge import merge_capture_quality
 
     runtime = tmp_path / "runtime_report.json"
     runtime.write_text(

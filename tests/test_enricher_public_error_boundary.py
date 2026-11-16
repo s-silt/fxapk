@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from apkscan.core.enrichment import enrich_selected_targets, safe_error_type
-from apkscan.core.models import Endpoint, EnrichmentResult, Report
-from apkscan.core.registry import BaseEnricher
-from apkscan.report import json as report_json
+from fxapk.core.enrichment import enrich_selected_targets, safe_error_type
+from fxapk.core.models import Endpoint, EnrichmentResult, Report
+from fxapk.core.registry import BaseEnricher
+from fxapk.report import json as report_json
 
 _CANARY_URL = "https://user:SECRET@canary.example.test/query?token=TOKEN"
 _CANARY_CASE = "/cases/CASE-CANARY"

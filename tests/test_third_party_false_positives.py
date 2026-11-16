@@ -23,9 +23,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import infra, pipeline
-from apkscan.core.models import AnalysisConfig
-from apkscan.core.regress import ADVICE_INVESTIGATE
+from fxapk.core import infra, pipeline
+from fxapk.core.models import AnalysisConfig
+from fxapk.core.regress import ADVICE_INVESTIGATE
 from tests.conftest import FakeContext
 from tests.synthetic.third_party import THIRD_PARTY_SAMPLES, ThirdPartySample
 from tests.synthetic.third_party_baseline import BASELINE

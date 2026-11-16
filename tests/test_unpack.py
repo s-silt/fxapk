@@ -1,4 +1,4 @@
-"""apkscan.dynamic.unpack 单测：monkeypatch device.* 与 subprocess，离线、无真机。
+"""fxapk.dynamic.unpack 单测：monkeypatch device.* 与 subprocess，离线、无真机。
 
 覆盖三条主路径（与 DynamicResult 契约对齐）：
   1. 无设备 / 缺工具 → status="skipped" + 精确手册（playbook 非空，含关键命令）。
@@ -16,12 +16,12 @@ from typing import Any
 
 import pytest
 
-from apkscan.dynamic import (
+from fxapk.dynamic import (
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_SKIPPED,
 )
-from apkscan.dynamic import unpack
+from fxapk.dynamic import unpack
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ def test_no_device_skipped_with_playbook(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "/data/local/tmp" in playbook_text
     assert "pip install" in playbook_text and "frida-dexdump" in playbook_text
     assert "frida-dexdump -FU -f <package>" in playbook_text
-    assert "apkscan analyze <apk> --extra-dex" in playbook_text
+    assert "fxapk analyze <apk> --extra-dex" in playbook_text
 
 
 def test_missing_only_frida_server_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,10 +198,10 @@ def test_dump_success_done_with_artifacts(
 
 def _stub_reanalyze_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """把 _reanalyze 的重量级依赖换掉，只留指纹那段真跑。"""
-    from apkscan.core import apk as apk_mod
-    from apkscan.core import pipeline as pipeline_mod
-    from apkscan.report import html as html_mod
-    from apkscan.report import json as json_mod
+    from fxapk.core import apk as apk_mod
+    from fxapk.core import pipeline as pipeline_mod
+    from fxapk.report import html as html_mod
+    from fxapk.report import json as json_mod
 
     class _R:
         def __init__(self) -> None:
@@ -242,7 +242,7 @@ def test_reanalyze_survives_fingerprint_failure(
 ) -> None:
     """指纹算不出来时只记日志，不能让脱壳整个失败——主产物是 DEX。"""
     held = _stub_reanalyze_deps(monkeypatch)
-    from apkscan.core import integrity
+    from fxapk.core import integrity
 
     def _boom(*_a: Any, **_k: Any) -> dict:
         raise OSError("simulated")

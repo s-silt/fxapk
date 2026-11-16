@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from apkscan.core.atomic import atomic_write_bytes
+from fxapk.core.atomic import atomic_write_bytes
 
 PATCH_ID = "fxapk-rea-6.4.0-script-lifetime-1"
 RELATIVE = "dist/browser/CdpPageCaptureScripts.js"

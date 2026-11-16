@@ -1,8 +1,8 @@
 """Explicit endpoint-invocation budgets apply to both enrichment entry paths."""
 import pytest
-from apkscan.core.enrichment import enrich_selected_targets
-from apkscan.core.models import Endpoint, EnrichmentResult, Evidence, EvidenceScope
-from apkscan.core.registry import BaseEnricher
+from fxapk.core.enrichment import enrich_selected_targets
+from fxapk.core.models import Endpoint, EnrichmentResult, Evidence, EvidenceScope
+from fxapk.core.registry import BaseEnricher
 
 
 class SyntheticSource(BaseEnricher):
@@ -40,7 +40,7 @@ def test_invalid_budget_never_falls_back_to_unlimited(limit):
 
 
 def test_budget_is_shared_across_separate_target_calls():
-    from apkscan.core.enrichment_budget import EnrichmentBudget
+    from fxapk.core.enrichment_budget import EnrichmentBudget
     budget = EnrichmentBudget(total=2)
     source = SyntheticSource()
     endpoints = [Endpoint(kind="domain", value=f"item-{i}.invalid") for i in range(5)]
@@ -54,7 +54,7 @@ def test_budget_is_shared_across_separate_target_calls():
 
 def test_budget_admission_is_thread_safe():
     from concurrent.futures import ThreadPoolExecutor
-    from apkscan.core.enrichment_budget import EnrichmentBudget
+    from fxapk.core.enrichment_budget import EnrichmentBudget
     budget = EnrichmentBudget(total=37, providers={"synthetic": 23})
     with ThreadPoolExecutor(max_workers=8) as pool:
         outcomes = list(pool.map(lambda _: budget.admit("synthetic"), range(500)))
@@ -63,7 +63,7 @@ def test_budget_admission_is_thread_safe():
 
 
 def test_zero_budget_case_close_records_skips_without_network():
-    from apkscan.core.closure import ClosureConfig, close_report
+    from fxapk.core.closure import ClosureConfig, close_report
     from tests.test_closure import _endpoint, _report
     source = SyntheticSource()
     ep = _endpoint("api.example.test", kind="domain", runtime=True, target=True, payload=True)
@@ -77,7 +77,7 @@ def test_zero_budget_case_close_records_skips_without_network():
 
 
 def test_closure_budget_cannot_reset_for_resolved_ips(monkeypatch):
-    from apkscan.core.closure import ClosureConfig, close_report, sources
+    from fxapk.core.closure import ClosureConfig, close_report, sources
     from tests.test_closure import _endpoint, _report, _FakeEnricher
     monkeypatch.setattr(sources, "_normalized_public_ip", lambda value: str(value).strip())
     domain = _endpoint("api.example.test", kind="domain", runtime=True, target=True, payload=True)

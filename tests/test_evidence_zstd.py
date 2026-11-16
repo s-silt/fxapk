@@ -10,9 +10,9 @@ import zlib
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.cli import app
-from apkscan.core import evidence_archive as ea
-from apkscan.core.evidence_output import EvidenceOutput
+from fxapk.cli import app
+from fxapk.core import evidence_archive as ea
+from fxapk.core.evidence_output import EvidenceOutput
 
 
 def frame_archive(path, frame, plaintext, method=93):
@@ -230,7 +230,7 @@ def test_original_zipfile_is_not_globally_patched(tmp_path):
 @pytest.mark.parametrize("compression", ["zstd", "deflate"])
 @pytest.mark.parametrize("state,exit_code", [("ok", 0), ("partial", 5), ("failed", 6)])
 def test_recovery_archive_keeps_upstream_failures_and_actual_codec(tmp_path, monkeypatch, compression, state, exit_code):
-    from apkscan.dynamic import recovery
+    from fxapk.dynamic import recovery
     def run(plan, output, progress, *, retain_review_inputs):
         assert retain_review_inputs
         output.mkdir()

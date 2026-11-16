@@ -1,4 +1,4 @@
-"""文件夹批量分析引擎（apkscan.dynamic.batch.run_folder）测试。
+"""文件夹批量分析引擎（fxapk.dynamic.batch.run_folder）测试。
 
 引擎只编排：扫文件夹 → sha256 去重 → 逐个调 auto.run（launch-only）→ 有设备则卸载 →
 记台账 → 汇总。device/auto/provision 全部 monkeypatch 掉，不碰真机、不读报告文件。
@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.dynamic import batch
-from apkscan.dynamic.ledger import AnalyzedLedger, apk_sha256
+from fxapk import cli
+from fxapk.dynamic import batch
+from fxapk.dynamic.ledger import AnalyzedLedger, apk_sha256
 
 runner = CliRunner()
 

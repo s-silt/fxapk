@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from apkscan.core.linkage_discovery import discover_linkage_anchors
-from apkscan.core.linkage_labels import validate_linkage_label_records
+from fxapk.core.linkage_discovery import discover_linkage_anchors
+from fxapk.core.linkage_labels import validate_linkage_label_records
 
 
 def _sha(char: str) -> str:

@@ -8,15 +8,15 @@ import subprocess
 
 import pytest
 
-from apkscan.dynamic.cryptohook import normalize_credential_event
-from apkscan.dynamic.cryptohook import normalize_sqlcipher_event
+from fxapk.dynamic.cryptohook import normalize_credential_event
+from fxapk.dynamic.cryptohook import normalize_sqlcipher_event
 
 
 def test_okhttp_observer_never_consumes_request_body():
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js required for synthetic Java bridge execution")
-    hook = Path(__file__).parents[1] / "apkscan/dynamic/frida_js/okhttp_hook.js"
+    hook = Path(__file__).parents[1] / "fxapk/dynamic/frida_js/okhttp_hook.js"
     harness = r"""
 const fs = require('fs'), vm = require('vm'), assert = require('assert');
 const events = [], execute = {};
@@ -68,7 +68,7 @@ def test_sqlcipher_observer_never_executes_sql_or_changes_original_return_and_er
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js required for synthetic Java bridge execution")
-    hook = Path(__file__).parents[1] / "apkscan/dynamic/frida_js/sqlcipher_hook.js"
+    hook = Path(__file__).parents[1] / "fxapk/dynamic/frida_js/sqlcipher_hook.js"
     harness = r"""
 const fs = require('fs'), vm = require('vm'), assert = require('assert');
 const events = [], sentinel = new Error('synthetic open failure');

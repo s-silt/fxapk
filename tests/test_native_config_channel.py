@@ -11,8 +11,8 @@ from __future__ import annotations
 import base64
 import hashlib
 
-from apkscan.analyzers.native_config_channel import NativeConfigChannelAnalyzer
-from apkscan.core.gobuildinfo import _INFO_END, _INFO_START
+from fxapk.analyzers.native_config_channel import NativeConfigChannelAnalyzer
+from fxapk.core.gobuildinfo import _INFO_END, _INFO_START
 
 _FAKE_KEY_B64 = base64.b64encode(
     b"-----BEGIN RSA PRIVATE KEY-----\n" + b"A" * 1200 + b"\n-----END RSA PRIVATE KEY-----\n"

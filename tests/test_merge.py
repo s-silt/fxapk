@@ -1,4 +1,4 @@
-"""apkscan.dynamic.merge 的单测。
+"""fxapk.dynamic.merge 的单测。
 
 策略：合成 Report + 运行时 Endpoint，全程无设备/无子进程：
 - 验证运行时端点去重并入 report.endpoints（与静态 value 重叠时并进同一端点）。
@@ -19,9 +19,9 @@ from typing import Any
 
 import pytest
 
-from apkscan.core import infra
-from apkscan.core import visibility
-from apkscan.core.models import (
+from fxapk.core import infra
+from fxapk.core import visibility
+from fxapk.core.models import (
     Confidence,
     Endpoint,
     Evidence,
@@ -30,7 +30,7 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
 )
-from apkscan.dynamic import merge
+from fxapk.dynamic import merge
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +276,7 @@ def test_merge_returns_counts() -> None:
 
 def test_merge_uses_pipeline_dedup_semantics(monkeypatch) -> None:
     """合并必须复用 pipeline._dedup_endpoints（确保零行为偏移）。"""
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     called: dict[str, bool] = {"dedup": False}
     real_dedup = pipeline._dedup_endpoints
@@ -293,7 +293,7 @@ def test_merge_uses_pipeline_dedup_semantics(monkeypatch) -> None:
 
 def test_merge_never_raises_on_internal_error(monkeypatch) -> None:
     """内部异常（如 dedup 炸）不抛，返回零统计。"""
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     def _boom(endpoints):
         raise RuntimeError("dedup exploded")
@@ -454,7 +454,7 @@ def test_load_runtime_endpoints_bad_json_returns_empty_logged(tmp_path, caplog) 
 def test_load_runtime_endpoints_uses_bounded_fail_closed_reader(
     tmp_path, monkeypatch, caplog, raw: bytes, reason: str,
 ) -> None:
-    from apkscan.dynamic import runtime_input
+    from fxapk.dynamic import runtime_input
 
     path = tmp_path / "runtime_report.json"
     path.write_bytes(raw)
@@ -653,9 +653,9 @@ def test_modified_runtime_end_to_end_capture_merge_closure(tmp_path) -> None:
     **capture.run 实际写出的 runtime_report.json** 出发，覆盖 floor 侧 runtime-pcap 的降钉（缺口②），
     并一路验到 closure 的 complete 判定与 quality 门（缺口③）。附 original 对照。
     """
-    from apkscan.core.closure import ClosureConfig, close_report, evaluate_capture_quality
-    from apkscan.core.models import OBSERVED_CONTACT_SOURCES
-    from apkscan.dynamic import capture as _capture
+    from fxapk.core.closure import ClosureConfig, close_report, evaluate_capture_quality
+    from fxapk.core.models import OBSERVED_CONTACT_SOURCES
+    from fxapk.dynamic import capture as _capture
 
     def _write_and_merge(*, allow: bool, antidetect: str) -> tuple[dict, Report]:
         out_dir = tmp_path / ("mod" if allow else "orig")
@@ -687,7 +687,7 @@ def test_modified_runtime_end_to_end_capture_merge_closure(tmp_path) -> None:
         )
         rr = out_dir / "runtime_report.json"
         # 用生产侧序列化器（capture 写 runtime_report 用的就是它），保证与真实产物同形。
-        from apkscan.report import json as report_json
+        from fxapk.report import json as report_json
 
         _write_runtime_report(
             rr,
@@ -751,7 +751,7 @@ def test_merge_and_rerender_refreshes_visibility(tmp_path) -> None:
 
     退回 merge_and_rerender 里的那段重算，本测试即红。
     """
-    from apkscan.core import visibility
+    from fxapk.core import visibility
 
     runtime_report = tmp_path / "runtime_report.json"
     _write_runtime_report(
@@ -866,7 +866,7 @@ def test_merge_and_rerender_report_module_missing_not_fatal(tmp_path, monkeypatc
         raise RuntimeError("render exploded")
 
     # 让 html 渲染炸，json 正常。
-    from apkscan.report import html as report_html
+    from fxapk.report import html as report_html
 
     monkeypatch.setattr(report_html, "render", _boom)
 
@@ -977,7 +977,7 @@ def test_merge_and_rerender_reads_runtime_report_once(tmp_path, monkeypatch) -> 
 def test_merge_none_loads_endpoints_and_shares_verified_payload_with_events(
     tmp_path, monkeypatch,
 ) -> None:
-    import apkscan.core.integrity as integrity
+    import fxapk.core.integrity as integrity
 
     runtime_path = tmp_path / "runtime_report.json"
     payload = {
@@ -1079,8 +1079,8 @@ def test_loaders_unchanged_without_active_cache(tmp_path) -> None:
 
 
 def test_load_runtime_endpoints_preserves_evidence_facts_and_review_status(tmp_path) -> None:
-    from apkscan.core.admission import evaluate_evidence
-    from apkscan.core.observations import occurrence_id
+    from fxapk.core.admission import evaluate_evidence
+    from fxapk.core.observations import occurrence_id
 
     report_file = tmp_path / "runtime_report.json"
     _write_runtime_report(
@@ -1414,7 +1414,7 @@ def test_walk_json_strings_is_iterative_and_depth_bounded() -> None:
 
 def test_decrypt_runtime_messages_missing_crypto_lib(tmp_path, monkeypatch) -> None:
     """缺 cryptography → 不解密、warning、静态报告不受损（保留密文，不崩）。"""
-    from apkscan.core import appcrypto
+    from fxapk.core import appcrypto
 
     monkeypatch.setattr(appcrypto, "_HAS_CRYPTO", False)
     data = "anybase64=="
@@ -1625,7 +1625,7 @@ def test_merge_runtime_traces_anti_analysis_finding(tmp_path) -> None:
     stats = merge.merge_runtime_traces(report, rr)
 
     assert stats["antidetect_probes"] == 3
-    from apkscan.core.models import Severity
+    from fxapk.core.models import Severity
 
     aa = [f for f in report.findings if f.category == "anti_analysis"]
     assert len(aa) == 1
@@ -1640,7 +1640,7 @@ def test_merge_runtime_traces_emulator_only_is_medium(tmp_path) -> None:
     rr = _write_rr_traces(tmp_path, antidetect=[{"kind": "emulator", "probe": "qemu"}])
     report = _make_report()
     merge.merge_runtime_traces(report, rr)
-    from apkscan.core.models import Severity
+    from fxapk.core.models import Severity
 
     aa = next(f for f in report.findings if f.category == "anti_analysis")
     assert aa.severity == Severity.MEDIUM  # 仅模拟器检测
@@ -1667,7 +1667,7 @@ def test_merge_runtime_traces_adds_jsbridge_leads(tmp_path) -> None:
 
 
 def test_merge_runtime_traces_confirms_sensitive_api_finding(tmp_path) -> None:
-    from apkscan.core.models import Finding, Severity
+    from fxapk.core.models import Finding, Severity
 
     rr = _write_rr_traces(
         tmp_path, sensitive=[{"api": "TelephonyManager.getDeviceId"}]

@@ -1,0 +1,325 @@
+"""授权档：下载远程配置对象的原始字节。
+
+**门控由调用方（pipeline 阶段）负责**——本模块只在被明确调用时下载，且自带超时 + 墙钟总时限 + 响应体
+大小硬帽 + Content-Length 预检。任何失败（无 requests / 连接错 / 非 200 / 超大 / 被 SSRF 防护拒）→
+``ok=False`` + error，绝不抛。下到的是**未信任的第三方字节**：只存不执行，交给 ``config.decode`` 离线解码。
+
+★连接前防护：URL 预检之后，连接守卫再次验证完整解析集合，再把选定的数字地址交给
+共享 pinned_transport；TCP 不再按域名二次解析。保留原 Host/SNI 与 TLS 验证，并核真实 peer。
+守卫缺失或挂载失败即停止下载。禁重定向、环境代理及重试；预算和失败返回形状不变。
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import logging
+import socket
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlsplit
+
+from fxapk.core.redact import redact_url, safe_exception_text
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_TIMEOUT = 10.0
+_DEFAULT_MAX_BYTES = 5 * 1024 * 1024  # 配置对象应很小；硬帽防超大响应耗尽内存/带宽
+_CHUNK = 8192
+
+_IpAddr = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+_NAT64_WKP = ipaddress.IPv6Network("64:ff9b::/96")  # leak-scan: allow RFC 6052/8215 NAT64 前缀，协议常量非主机地址
+_NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
+
+
+def _embedded_ipv4(addr: _IpAddr) -> list[ipaddress.IPv4Address]:
+    """IPv6 中嵌入的 IPv4（IPv4-mapped / NAT64 / 6to4 / Teredo），须与外层一并按公网判。"""
+    if not isinstance(addr, ipaddress.IPv6Address):
+        return []
+    out: list[ipaddress.IPv4Address] = []
+    if addr.ipv4_mapped is not None:
+        out.append(addr.ipv4_mapped)
+    if addr in _NAT64_WKP:
+        out.append(ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF))
+    if addr.sixtofour is not None:
+        out.append(addr.sixtofour)
+    if addr.teredo is not None:
+        out.extend(addr.teredo)
+    return out
+
+
+def _ip_is_blocked(addr: _IpAddr) -> bool:
+    """非公网即拒（以 ``is_global`` 为白名单），并检查 IPv6 内嵌 IPv4；SSRF 判据的单一来源。"""
+    is_nat64_wkp = isinstance(addr, ipaddress.IPv6Address) and addr in _NAT64_WKP
+    if (
+        not addr.is_global
+        or addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or (addr.is_reserved and not is_nat64_wkp)
+        or addr.is_multicast
+        or addr.is_unspecified
+    ):
+        return True
+    if isinstance(addr, ipaddress.IPv6Address) and addr in _NAT64_LOCAL:
+        return True
+    return any(_ip_is_blocked(v4) for v4 in _embedded_ipv4(addr))
+
+
+def _checked_addresses(url: str) -> tuple[list[_IpAddr], str]:
+    """解析 host 的全部地址并逐一过 ``_ip_is_blocked``；返回 ``(地址列表, 拒绝原因)``。
+
+    地址列表供调用方**固定连接**——预检通过的 IP 直接交给连接层，消除
+    「预检解析一次、连接再解析一次」之间的 DNS rebinding 窗口。
+    """
+    host = urlsplit(url).hostname if isinstance(url, str) else None
+    if not host:
+        return [], "无法解析 host"
+    candidates: list[_IpAddr] = []
+    try:
+        candidates.append(ipaddress.ip_address(host))  # host 是 IP 字面量
+    except ValueError:
+        try:
+            for info in socket.getaddrinfo(host, None):
+                try:
+                    candidates.append(ipaddress.ip_address(info[4][0]))
+                except ValueError:
+                    continue
+        except (socket.gaierror, OSError):
+            return [], "DNS 解析失败"
+    if not candidates:
+        return [], "无可解析地址"
+    for ip in candidates:
+        if _ip_is_blocked(ip):
+            return [], f"目标解析到非公网地址 {ip}"
+    return candidates, ""
+
+
+def _target_is_safe(url: str) -> tuple[bool, str]:
+    """★SSRF 预解析校验：解析 host 的所有地址，任一落受限段即拒（防被诱导访问内网/窃取云 IAM 凭据）。
+
+    IP 字面量直接判；域名走 getaddrinfo，**全部**解析地址都须安全才放行。解析失败 → 拒。
+    这是第一层；DNS-rebinding（预检判公网、连接时返内网）由连接层 ``_assert_peer_public`` 兜底。绝不抛。
+    """
+    candidates, why = _checked_addresses(url)
+    return bool(candidates), why
+
+
+class _BlockedPeerError(Exception):
+    """连接层校验：实际连接的 peer IP 落受限段（DNS-rebinding 防护）。经 urllib3/requests 包装成连接错误。"""
+
+
+def _assert_peer_public(sock: Any) -> None:  # noqa: ANN401 — urllib3 socket，鸭子类型
+    """校验一个**已连接** socket 的对端 IP 非受限段；命中即关闭 + 抛 _BlockedPeerError（TLS/HTTP 前）。
+
+    拿不到 peer（getpeername 失败）→ 不阻断（预解析校验已把关），也不误杀。绝不因自身逻辑抛非
+    _BlockedPeerError 的异常。
+    """
+    try:
+        ip_text = sock.getpeername()[0]
+        addr = ipaddress.ip_address(ip_text)
+    except (OSError, IndexError, TypeError, ValueError):
+        return
+    if _ip_is_blocked(addr):
+        try:
+            sock.close()
+        except OSError:
+            pass
+        raise _BlockedPeerError(f"连接到受限地址 {addr}（DNS-rebinding 防护）")
+
+
+# --------------------------------------------------------------------------- #
+# IP 钉定传输：urllib3 建立 TCP 前验证并固定地址，TLS/HTTP 前核对实际 peer。
+# urllib3 内部 API 不可用即关闭下载（不回落普通会话）。
+# --------------------------------------------------------------------------- #
+try:
+    from requests.adapters import HTTPAdapter as _RequestsHTTPAdapter
+    from urllib3.connection import HTTPConnection as _U3HTTPConn
+    from urllib3.connection import HTTPSConnection as _U3HTTPSConn
+    from urllib3.connectionpool import HTTPConnectionPool as _U3HTTPPool
+    from urllib3.connectionpool import HTTPSConnectionPool as _U3HTTPSPool
+    from urllib3.poolmanager import PoolManager as _U3PoolManager
+
+    class _PeerGuardMixin:
+        host: str
+        port: int
+        timeout: Any
+        source_address: Any
+        socket_options: Any
+
+        def _new_conn(self):  # type: ignore[no-untyped-def]
+            from fxapk.core.pinned_transport import connect_first, resolve_public
+
+            addresses = resolve_public(self.host, self.port)
+            sock = connect_first(addresses, self.port, timeout=self.timeout,
+                                 source_address=self.source_address, socket_options=self.socket_options)
+            self.peer_ip = str(sock.getpeername()[0])
+            return sock
+
+    class _GuardedHTTPConnection(_PeerGuardMixin, _U3HTTPConn):
+        pass
+
+    class _GuardedHTTPSConnection(_PeerGuardMixin, _U3HTTPSConn):
+        pass
+
+    class _GuardedHTTPConnectionPool(_U3HTTPPool):
+        ConnectionCls = _GuardedHTTPConnection  # type: ignore[assignment]  # 混入 mixin 的动态子类
+
+    class _GuardedHTTPSConnectionPool(_U3HTTPSPool):
+        ConnectionCls = _GuardedHTTPSConnection  # type: ignore[assignment]
+
+    class _GuardedPoolManager(_U3PoolManager):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+            super().__init__(*args, **kwargs)
+            self.pool_classes_by_scheme = {
+                "http": _GuardedHTTPConnectionPool,
+                "https": _GuardedHTTPSConnectionPool,
+            }
+
+    class _GuardedAdapter(_RequestsHTTPAdapter):
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):  # type: ignore[no-untyped-def]
+            self.poolmanager = _GuardedPoolManager(
+                num_pools=connections, maxsize=maxsize, block=block, **pool_kwargs
+            )
+
+    _GUARDED_ADAPTER_CLS: type | None = _GuardedAdapter
+except Exception:  # noqa: BLE001 — 守卫不可用时关闭下载，不回落普通连接。
+    _GUARDED_ADAPTER_CLS = None
+
+
+def _build_guarded_session() -> Any:  # noqa: ANN401 — requests.Session | None（懒加载）
+    """构建 IP 钉定会话；依赖或守卫不可用、挂载失败均返回 None。"""
+    try:
+        import requests
+    except ImportError:
+        return None
+    if _GUARDED_ADAPTER_CLS is None:
+        return None
+    session = requests.Session()
+    session.trust_env = False  # 不读环境代理/.netrc/CA 变量，确保实连 peer 是目标而非代理
+    if _GUARDED_ADAPTER_CLS is not None:
+        try:
+            adapter = _GUARDED_ADAPTER_CLS(max_retries=0)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+        except Exception:  # noqa: BLE001 — fail closed
+            session.close()
+            logger.warning("[remote_config] 挂载 IP 钉定 adapter 失败，停止下载", exc_info=True)
+            return None
+    return session
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    """一次下载的结果。``ok`` 时 ``raw`` 为字节；否则 ``error`` 记原因（不抛给调用方）。"""
+
+    url: str
+    ok: bool
+    raw: bytes | None
+    status: int | None
+    error: str | None
+    declared_length: int | None = None
+    content_encoding: str | None = None
+    peer_ip: str | None = None
+
+
+def fetch_config_object(
+    url: str, *, timeout: float = _DEFAULT_TIMEOUT, max_bytes: int = _DEFAULT_MAX_BYTES
+) -> FetchResult:
+    """流式下载 ``url`` 的原始字节，带超时 + 墙钟总时限 + 大小硬帽 + SSRF 双层防护。任何失败 → ok=False。"""
+    if not isinstance(url, str) or not url.lower().startswith(("http://", "https://")):
+        return FetchResult(url, False, None, None, "非 http(s) URL")
+    safe, why = _target_is_safe(url)  # 第一层：预解析校验
+    if not safe:
+        logger.warning(
+            "[remote_config] 拒绝下载（SSRF 预解析防护）%s：%s",
+            redact_url(url),
+            why,
+        )
+        return FetchResult(url, False, None, None, f"目标被 SSRF 防护拒绝：{why}")
+    session = _build_guarded_session()  # 第二层：连接层实连 IP 校验（防 DNS-rebinding）
+    if session is None:
+        return FetchResult(url, False, None, None, "requests 或 IP 钉定守卫不可用，停止下载")
+
+    # ★墙钟总预算：scalar timeout 只管单次 recv 间隔，慢速滴流可事实挂死；额外设总时限硬顶。
+    deadline = time.monotonic() + max(timeout * 3, 30.0)
+    resp = None
+    try:
+        # ★allow_redirects=False：对手服务器可 302 重定向到内网/元数据（SSRF），禁跟随（只下直连 URL）。
+        resp = session.get(url, timeout=timeout, stream=True, allow_redirects=False)
+        status = resp.status_code
+        peer_ip = getattr(getattr(getattr(resp, "raw", None), "_connection", None), "peer_ip", None)
+        if status != 200:
+            return FetchResult(url, False, None, status, f"HTTP {status}")
+        declared = resp.headers.get("Content-Length")
+        if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+            return FetchResult(url, False, None, status, f"响应体过大（声明 {declared}B > 上限 {max_bytes}B）")
+
+        # ★墙钟看门狗：慢速滴流（每次 recv 都有数据、但永远凑不满一个 chunk）会让
+        #   iter_content 内部的 read() 一直阻塞，分块循环里的 deadline 检查永远轮不到。
+        #   到点由旁路线程 shutdown 底层 socket，让阻塞中的 recv 立即报错返回。
+        done = threading.Event()
+
+        def _deadline_guard() -> None:
+            if done.wait(timeout=max(0.0, deadline - time.monotonic())):
+                return
+            try:
+                raw = getattr(resp, "raw", None)
+                fp = getattr(raw, "_fp", None)
+                buf = getattr(fp, "fp", None)
+                sock_io = getattr(buf, "raw", None)
+                sock = getattr(sock_io, "_sock", None)
+                if sock is not None:
+                    sock.shutdown(socket.SHUT_RDWR)
+                    sock.close()
+            except Exception as exc:  # noqa: BLE001 — 解包失败仍走 resp.close() 兜底
+                logger.debug("[remote_config] 看门狗掐断 socket 失败：%s", type(exc).__name__)
+            try:
+                resp.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[remote_config] 看门狗关闭响应失败：%s", type(exc).__name__)
+
+        guard = threading.Thread(target=_deadline_guard, daemon=True)
+        guard.start()
+        try:
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in resp.iter_content(_CHUNK):
+                if time.monotonic() > deadline:
+                    return FetchResult(url, False, None, status, "下载总时限超限，已中止（慢速滴流防护）")
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    return FetchResult(url, False, None, status, f"响应体超上限 {max_bytes}B，已中止下载")
+                chunks.append(chunk)
+            return FetchResult(
+                url, True, b"".join(chunks), status, None,
+                int(declared) if declared is not None and declared.isdigit() else None,
+                resp.headers.get("Content-Encoding"),
+                peer_ip if isinstance(peer_ip, str) else None,
+            )
+        finally:
+            done.set()
+    except Exception as exc:  # noqa: BLE001 — requests 各类异常（含 rebinding 掐断）一律降级，绝不抛
+        logger.warning(
+            "[remote_config] 下载失败 %s：%s",
+            redact_url(url),
+            safe_exception_text(exc),
+        )
+        return FetchResult(url, False, None, None, f"下载异常：{type(exc).__name__}")
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception as exc:  # noqa: BLE001 — 关闭失败不影响下载结果
+                logger.debug("[remote_config] 关闭响应失败：%s", type(exc).__name__)
+        try:
+            session.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[remote_config] 关闭会话失败：%s", type(exc).__name__)
+
+
+__all__ = ["FetchResult", "fetch_config_object"]

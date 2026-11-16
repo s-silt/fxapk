@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.re_toolkit import ReToolkitAnalyzer
-from apkscan.core.models import AnalyzerResult, Severity
+from fxapk.analyzers.re_toolkit import ReToolkitAnalyzer
+from fxapk.core.models import AnalyzerResult, Severity
 
 from tests.conftest import FakeContext
 

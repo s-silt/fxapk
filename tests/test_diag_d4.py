@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from apkscan.core.models import Report
-from apkscan.core.runtime_diagnostics import explain_coverage
-from apkscan.dynamic import merge
+from fxapk.core.models import Report
+from fxapk.core.runtime_diagnostics import explain_coverage
+from fxapk.dynamic import merge
 
 _SAMPLE = "ab" * 32
 

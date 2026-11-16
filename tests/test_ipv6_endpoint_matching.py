@@ -15,8 +15,8 @@ closure 回写、letters 归属链三处同时匹配不上。
 
 from __future__ import annotations
 
-from apkscan.core import infra
-from apkscan.dynamic import pcap_ingest
+from fxapk.core import infra
+from fxapk.dynamic import pcap_ingest
 
 _V6 = "2001:db8::1"
 _V6_FULL = "2606:4700:4700::1111"  # leak-scan: allow IPv6 Lead 括号形态夹具，须被判公网才产 IPv6 Lead
@@ -124,7 +124,7 @@ def test_ipv6_runtime_endpoint_reaches_attribution() -> None:
     这条才是能逮住"格式改了但消费方没跟上"的测试。上一轮我只测到 match_key 与 letters，
     attribution 那一环没走，于是自己引入的回归自己没发现——由 codex 复审指出。
     """
-    from apkscan.attribution import assemble
+    from fxapk.attribution import assemble
 
     flows = [
         pcap_ingest.Flow(proto="tcp", src_ip="192.168.10.233", src_port=45678,
@@ -145,7 +145,7 @@ def test_ipv6_runtime_endpoint_reaches_attribution() -> None:
 
 def test_ipv6_lead_reaches_the_letter_attribution_chain() -> None:
     """★letters 侧：括号形态的 IPv6 Lead 要能关联上裸 IPv6 Endpoint 的五层归属链。"""
-    from apkscan.report import letters
+    from fxapk.report import letters
 
     layer = {
         "ip": _V6_FULL,

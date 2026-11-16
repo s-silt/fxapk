@@ -19,8 +19,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.crypto import CryptoAnalyzer
-from apkscan.core.models import AnalyzerResult, Severity
+from fxapk.analyzers.crypto import CryptoAnalyzer
+from fxapk.core.models import AnalyzerResult, Severity
 
 from tests.conftest import FakeContext
 
