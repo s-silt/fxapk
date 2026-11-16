@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from apkscan.core.atomic import atomic_create_bytes
+from fxapk.core.atomic import atomic_create_bytes
 
 from .attachment import AttachError, _MAX_TRACE, _verify_bundle
 from .evidence import EvidenceError, import_observation

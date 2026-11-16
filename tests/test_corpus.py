@@ -13,9 +13,9 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core import corpus
-from apkscan.core.models import (
+from fxapk import cli
+from fxapk.core import corpus
+from fxapk.core.models import (
     Confidence,
     Endpoint,
     Evidence,
@@ -24,7 +24,7 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
 )
-from apkscan.report import json as report_json
+from fxapk.report import json as report_json
 
 
 def _evidence(scope: str = "case_evidence") -> dict:
@@ -86,7 +86,7 @@ def test_exclusive_report_create_never_publishes_partial_bytes_after_hard_exit(
 import os
 import sys
 from pathlib import Path
-from apkscan.core import corpus
+from fxapk.core import corpus
 
 real_write = os.write
 
@@ -244,7 +244,7 @@ def test_reindex_does_not_mark_unassessed_repack_identity_as_current(tmp_path: P
 
     assert len(rebuilt) == 1
     assert "repack_identity_verdict" not in rebuilt[0]
-    from apkscan.core.linkage import rank_link_candidates
+    from fxapk.core.linkage import rank_link_candidates
 
     result = rank_link_candidates(rebuilt)
     assert result["status"] == "partial"

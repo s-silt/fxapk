@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.enrichers.whois as whois_mod
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.enrichers.whois import WhoisEnricher
+import fxapk.enrichers.whois as whois_mod
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.enrichers.whois import WhoisEnricher
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +80,7 @@ def test_name_and_applies_to():
 
 def test_query_whois_reusable_function(fake_whois: _FakeWhoisModule):
     """whois.py 把查询+抽取逻辑抽成可复用的模块级函数 query_whois(domain)->dict。"""
-    from apkscan.enrichers.whois import query_whois
+    from fxapk.enrichers.whois import query_whois
 
     fake_whois.return_value = {
         "registrar": "GoDaddy.com, LLC",
@@ -97,7 +97,7 @@ def test_query_whois_reusable_function(fake_whois: _FakeWhoisModule):
 
 def test_query_whois_propagates_exception(fake_whois: _FakeWhoisModule):
     """query_whois 不吞错：网络失败原样抛出，由调用方决定兜底（rdap 据此回退失败）。"""
-    from apkscan.enrichers.whois import query_whois
+    from fxapk.enrichers.whois import query_whois
 
     fake_whois.raises = TimeoutError("down")
     with pytest.raises(TimeoutError):

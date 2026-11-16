@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import dex_query as dq
+from fxapk.core import dex_query as dq
 from tests.fixtures.dex_query.dexgen import build_dex, sample_classes, zip_bytes
 
 # 值来自官方 PyPI 轮子，独立计算，不得从生产常量反算。

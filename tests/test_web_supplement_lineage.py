@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from apkscan.core.web_supplement_report import SupplementRefusal, supplement_report
+from fxapk.core.web_supplement_report import SupplementRefusal, supplement_report
 
 _MAX_CHAIN = 32
 
@@ -108,8 +108,8 @@ def _forbid_stages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         called.append("called")
         raise AssertionError("lineage failure reached a later stage")
 
-    monkeypatch.setattr("apkscan.core.web_supplement_report._reverify_trees", forbid)
-    monkeypatch.setattr("apkscan.core.web_supplement_report.apply_static", forbid)
+    monkeypatch.setattr("fxapk.core.web_supplement_report._reverify_trees", forbid)
+    monkeypatch.setattr("fxapk.core.web_supplement_report.apply_static", forbid)
     return called
 
 
@@ -279,7 +279,7 @@ def test_cyclic_snapshot_pointers_refuse(
             return _Pinned()
         return real_sha256(blob)
 
-    monkeypatch.setattr("apkscan.core.web_supplement_report.hashlib.sha256", pinned_sha256)
+    monkeypatch.setattr("fxapk.core.web_supplement_report.hashlib.sha256", pinned_sha256)
     base = tmp_path / "case"
     for digest, blob in ((left_digest, left_blob), (right_digest, right_blob)):
         path = base / "input_report" / digest / "report.json"
@@ -305,7 +305,7 @@ def test_aggregate_history_bytes_refuse_without_output(
     base = tmp_path / "case"
     report, stored = _chain(base, 2)
     monkeypatch.setattr(
-        "apkscan.core.web_supplement_report._MAX_BYTES",
+        "fxapk.core.web_supplement_report._MAX_BYTES",
         sum(len(blob) for blob in stored.values()) - 1,
     )
     out = tmp_path / "out"

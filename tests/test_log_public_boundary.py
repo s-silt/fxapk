@@ -17,7 +17,7 @@ import logging
 
 import pytest
 
-from apkscan.core.logsetup import (
+from fxapk.core.logsetup import (
     EVIDENCE_ONLY_FLAG,
     PUBLIC_EXCEPTION_PLACEHOLDER,
     EvidenceOnlyFilter,

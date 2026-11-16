@@ -8,9 +8,9 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core import corpus, linkage
-from apkscan.core.linkage import collapse_manifest_entries, rank_link_candidates
+from fxapk import cli
+from fxapk.core import corpus, linkage
+from fxapk.core.linkage import collapse_manifest_entries, rank_link_candidates
 
 
 _SIGN = "a" * 64

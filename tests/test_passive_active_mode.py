@@ -14,15 +14,15 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core import pipeline
-from apkscan.core.models import (
+from fxapk import cli
+from fxapk.core import pipeline
+from fxapk.core.models import (
     ANALYSIS_MODE_AUTHORIZED_ACTIVE,
     ANALYSIS_MODE_PASSIVE,
     Endpoint,
     EnrichmentResult,
 )
-from apkscan.core.registry import BaseEnricher
+from fxapk.core.registry import BaseEnricher
 
 
 class _SpyEnricher(BaseEnricher):
@@ -115,7 +115,7 @@ def test_run_enrichment_no_gate_defaults_passive_fail_closed() -> None:
 def test_all_enrichers_are_passive() -> None:
     # 防回归：自动发现的富化器**全部**应是被动（active 为假）。若将来新增主动富化器，
     # 必须显式 active=True 并在此更新白名单——强制作者对"是否碰目标"表态。
-    from apkscan.core.registry import discover_enrichers
+    from fxapk.core.registry import discover_enrichers
 
     active_names = {
         e.name for e in discover_enrichers() if getattr(e, "active", False)
@@ -130,7 +130,7 @@ def test_pipeline_canonicalizes_ctx_config_to_run_config(fake_ctx, monkeypatch) 
     # ★分析器读 ctx.config、pipeline 门控/报告读 config 参数——二者不一致时以 pipeline 的 config 为准
     #   对齐 ctx，防"报告标 passive 但分析器（contacts getMe）按 ctx.config 的 authorized-active 主动
     #   探测"的错配。
-    from apkscan.core.models import AnalysisConfig
+    from fxapk.core.models import AnalysisConfig
 
     monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [])
     monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
@@ -160,7 +160,7 @@ class _FakeCtx:
 
 def test_getme_skipped_in_passive_mode_even_online(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     # ★passive（默认）：即便 online 也不发 getMe（用接料人 token 触其 live bot=主动侦察）。
-    from apkscan.analyzers.contacts import ContactsAnalyzer
+    from fxapk.analyzers.contacts import ContactsAnalyzer
 
     called = {"getme": False}
 
@@ -175,7 +175,7 @@ def test_getme_skipped_in_passive_mode_even_online(monkeypatch) -> None:  # type
 
 
 def test_getme_runs_in_authorized_active(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    from apkscan.analyzers.contacts import ContactsAnalyzer
+    from fxapk.analyzers.contacts import ContactsAnalyzer
 
     monkeypatch.setattr(ContactsAnalyzer, "_getme_username", lambda _self, _token: "fraudbot")
     note = ContactsAnalyzer()._maybe_getme(

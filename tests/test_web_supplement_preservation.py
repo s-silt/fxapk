@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from apkscan.core.models import (
+from fxapk.core.models import (
     AnalysisConfig,
     Confidence,
     Endpoint,
@@ -21,10 +21,10 @@ from apkscan.core.models import (
     Report,
     Severity,
 )
-from apkscan.core import web_supplement as ws
-from apkscan.core.web_supplement_preservation import commit_supplement, union_evidence
-from apkscan.core.web_supplement_runtime import _remember_runtime
-from apkscan.report.digest import build_digest
+from fxapk.core import web_supplement as ws
+from fxapk.core.web_supplement_preservation import commit_supplement, union_evidence
+from fxapk.core.web_supplement_runtime import _remember_runtime
+from fxapk.report.digest import build_digest
 
 
 def _report() -> Report:
@@ -154,7 +154,7 @@ def test_bad_incoming_does_not_mark_raw_seen() -> None:
 
 
 def test_runtime_finding_collision_keeps_grade(monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory) -> None:
-    from apkscan.core.web_supplement_runtime import apply_verified
+    from fxapk.core.web_supplement_runtime import apply_verified
 
     report = _report()
     old = Finding(
@@ -178,7 +178,7 @@ def test_runtime_finding_collision_keeps_grade(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_failed_parse_does_not_enter_seen(monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory) -> None:
-    from apkscan.core.web_supplement_runtime import apply_verified
+    from fxapk.core.web_supplement_runtime import apply_verified
 
     def boom(_: object) -> dict[str, object]:
         raise RuntimeError("parse")
@@ -193,7 +193,7 @@ def test_failed_parse_does_not_enter_seen(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 
 def test_static_then_runtime_then_failure_keeps_success() -> None:
-    from apkscan.core.web_supplement_runtime import _publish_canonical
+    from fxapk.core.web_supplement_runtime import _publish_canonical
 
     raw_a, raw_b = "a" * 64, "b" * 64
     meta: dict[str, object] = {}

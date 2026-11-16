@@ -7,8 +7,8 @@ from time import perf_counter
 
 import pytest
 
-from apkscan.core import linkage_review
-from apkscan.core.linkage_review import (
+from fxapk.core import linkage_review
+from fxapk.core.linkage_review import (
     LinkageReviewError,
     build_review_groups,
     explain_link_candidate,

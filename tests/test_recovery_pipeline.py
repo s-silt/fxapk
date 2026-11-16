@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.offline_review import acquisition, dex, jni, recover, runner
-from apkscan.dynamic import recovery
+from fxapk.core.offline_review import acquisition, dex, jni, recover, runner
+from fxapk.dynamic import recovery
 
 
 def plan_task(identifier, kind, path, **options):
@@ -121,7 +121,7 @@ def test_same_vectors_do_not_count_as_distinct_validation(tmp_path):
 
 
 def test_native_worker_crash_becomes_terminal_receipt(monkeypatch, tmp_path):
-    from apkscan.core import proctree
+    from fxapk.core import proctree
     monkeypatch.setattr(proctree, "run_owned", lambda *a, **k: proctree.OwnedRun(
         returncode=7, stdout="", stderr="", timed_out=False, ownership_complete=True,
         termination_complete=True, forced_tree_kill=False, reason_codes=()))
@@ -225,8 +225,8 @@ def test_recovery_failure_receipt_publishes_report(monkeypatch, tmp_path):
 @pytest.mark.parametrize("process_failed", [False, True])
 @pytest.mark.parametrize("extra_loaded", [True, False])
 def test_reanalysis_status_reaches_recovery_and_report(monkeypatch, tmp_path, analysis_status, process_failed, extra_loaded):
-    from apkscan.core.models import Report
-    from apkscan.report.json import to_dict
+    from fxapk.core.models import Report
+    from fxapk.report.json import to_dict
 
     apk = tmp_path / "synthetic.apk"
     apk.write_bytes(b"synthetic-original")
@@ -297,7 +297,7 @@ def test_public_cli_runs_real_review_workers_and_publishes_states(tmp_path):
                   plan_task("dependent", "emulate", code, depends_on=["dex"], **emu_options())],
     }), encoding="utf-8")
     output = tmp_path / "review"
-    run = subprocess.run([sys.executable, "-m", "apkscan.cli", "evidence-review", str(plan),
+    run = subprocess.run([sys.executable, "-m", "fxapk.cli", "evidence-review", str(plan),
                           "--out", str(output)], capture_output=True, timeout=90)
     assert run.returncode == 5, run.stderr.decode("utf-8", errors="replace")
     receipt = json.loads((output / "review.json").read_text(encoding="utf-8"))
@@ -328,7 +328,7 @@ def test_public_recovery_cli_retains_unavailable_device_stage(tmp_path):
     toolchain = tmp_path / "tools.json"
     toolchain.write_text(json.dumps({"schema": 1, "tools": {"adb": str(tmp_path / "missing-adb")}}), encoding="utf-8")
     output = tmp_path / "recovery"
-    run = subprocess.run([sys.executable, "-m", "apkscan.cli", "recover-runtime", str(plan),
+    run = subprocess.run([sys.executable, "-m", "fxapk.cli", "recover-runtime", str(plan),
                           "--out", str(output)], env={**os.environ, "FXAPK_TOOLCHAIN_FILE": str(toolchain)},
                          capture_output=True, timeout=90)
     assert run.returncode == 6, run.stderr.decode("utf-8", errors="replace")
@@ -341,8 +341,8 @@ def test_public_recovery_cli_retains_unavailable_device_stage(tmp_path):
 
 
 def test_memory_limit_unavailable_is_explicit_unsupported(monkeypatch, tmp_path):
-    from apkscan.core import proctree
-    from apkscan.core.fetch_intake import _process
+    from fxapk.core import proctree
+    from fxapk.core.fetch_intake import _process
     import time
 
     monkeypatch.setattr(proctree, "run_owned", lambda *a, **k: proctree.OwnedRun(
@@ -350,7 +350,7 @@ def test_memory_limit_unavailable_is_explicit_unsupported(monkeypatch, tmp_path)
     value = runner.isolated_review(b"test", {"id": "platform", "kind": "emulate"}, tmp_path)
     assert value["state"] == "unsupported"
     assert value["reason_codes"] == ["platform_memory_limit_unavailable"]
-    monkeypatch.setattr("apkscan.core.fetch_intake.run_owned", proctree.run_owned)
+    monkeypatch.setattr("fxapk.core.fetch_intake.run_owned", proctree.run_owned)
     process = _process(["synthetic"], tmp_path / "process", time.monotonic() + 5)
     assert process["state"] == "unsupported"
 
@@ -372,7 +372,7 @@ def test_standalone_failed_review_has_failed_report_health(tmp_path):
 
 def test_intake_deadline_stops_tasks_and_bounds_worker(monkeypatch, tmp_path):
     import time
-    from apkscan.core import proctree
+    from fxapk.core import proctree
 
     source = tmp_path / "data.bin"
     source.write_bytes(b"synthetic")

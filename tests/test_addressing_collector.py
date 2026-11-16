@@ -6,7 +6,7 @@ from tests.test_addressing_runtime import CONTEXT, events
 
 
 def test_observer_events_are_archived_with_host_scope_and_exact_links(tmp_path):
-    from apkscan.dynamic.addressing_events import AddressingEventCollector, verify_event_record
+    from fxapk.dynamic.addressing_events import AddressingEventCollector, verify_event_record
     collector = AddressingEventCollector(tmp_path, {**CONTEXT, "script_sha256": "b" * 64})
     for event in events():
         collector.on_message({"type": "send", "payload": {**event, "type": "fxapk-addressing-event-v1",
@@ -27,7 +27,7 @@ def test_observer_events_are_archived_with_host_scope_and_exact_links(tmp_path):
 
 
 def test_observer_missing_records_and_budget_exhaustion_fail_closed(tmp_path, monkeypatch):
-    from apkscan.dynamic import addressing_events as ae
+    from fxapk.dynamic import addressing_events as ae
     assert not ae.verify_event_record(events()[0], tmp_path)
     monkeypatch.setattr(ae, "MAX_EVENTS", 1)
     collector = ae.AddressingEventCollector(tmp_path, CONTEXT)
@@ -39,15 +39,15 @@ def test_observer_missing_records_and_budget_exhaustion_fail_closed(tmp_path, mo
 
 
 def test_runtime_report_persists_explicit_event_channel(tmp_path):
-    from apkscan.dynamic.capture import _write_runtime_report
+    from fxapk.dynamic.capture import _write_runtime_report
     path = _write_runtime_report("test.example.app", tmp_path, [], addressing_events=events(), capture_context=CONTEXT)
     assert {r["event_id"] for r in json.loads(Path(path).read_text())["addressing_events"]} == {"read-1", "call-1"}
     assert json.loads(Path(path).read_text())["capture_context"]["sample_sha256"] == CONTEXT["sample_sha256"]
 
 
 def test_process_scope_requires_observed_identity(monkeypatch):
-    from apkscan.dynamic.capture import _addressing_context
-    from apkscan.dynamic import recovery
+    from fxapk.dynamic.capture import _addressing_context
+    from fxapk.dynamic import recovery
     monkeypatch.setattr(recovery, "_identity", lambda *a: {"start_ticks": "12345"})
     scope = _addressing_context({"pid": 123, "package": "test.example.app"}, "test-device", modified=False)
     assert scope["process_start"] == "12345" and scope["target_attributed"] is True
@@ -60,7 +60,7 @@ def test_process_scope_requires_observed_identity(monkeypatch):
 
 def test_frida_device_serial_validates_usb_handle():
     from types import SimpleNamespace
-    from apkscan.dynamic.capture import _frida_device_serial
+    from fxapk.dynamic.capture import _frida_device_serial
 
     assert _frida_device_serial(SimpleNamespace(type="usb", id="emulator-5554")) == "emulator-5554"
     assert _frida_device_serial(SimpleNamespace(type="local", id="local")) is None

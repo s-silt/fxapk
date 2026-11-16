@@ -156,10 +156,10 @@ def _build_sdist(dist_dir: Path) -> Path:
 
 @pytest.mark.slow
 def test_wheel_version_consistent(tmp_path: Any) -> None:
-    """wheel 安装后 importlib.metadata 版本 == apkscan.__version__。
+    """wheel 安装后 importlib.metadata 版本 == fxapk.__version__。
 
     ★故意改坏：
-    - 把 apkscan/__init__.py 里 _FALLBACK_VERSION 改成不同字串，不动 pyproject——
+    - 把 fxapk/__init__.py 里 _FALLBACK_VERSION 改成不同字串，不动 pyproject——
       wheel 打进去的 __version__ 优先取元数据，仍等于 pyproject，两者相等不报错；
       但本测试还额外断言 metadata_ver == module_ver，若 __version__ 不再读元数据
       而走错分支，两者将不等 → 本测试红。
@@ -179,8 +179,8 @@ def test_wheel_version_consistent(tmp_path: Any) -> None:
         venv_python,
         "from importlib.metadata import version; print(version('fxapk'))",
     )
-    # apkscan.__version__ 在 wheel 环境下应优先取元数据，与上面相等
-    module_ver = _run(venv_python, "import apkscan; print(apkscan.__version__)")
+    # fxapk.__version__ 在 wheel 环境下应优先取元数据，与上面相等
+    module_ver = _run(venv_python, "import fxapk; print(fxapk.__version__)")
 
     assert metadata_ver == module_ver, (
         f"wheel 安装后元数据版本({metadata_ver!r}) != 模块 __version__({module_ver!r})；"
@@ -218,7 +218,7 @@ def test_sdist_version_consistent(tmp_path: Any) -> None:
         venv_python,
         "from importlib.metadata import version; print(version('fxapk'))",
     )
-    module_ver = _run(venv_python, "import apkscan; print(apkscan.__version__)")
+    module_ver = _run(venv_python, "import fxapk; print(fxapk.__version__)")
 
     # 从 sdist 解包读 pyproject 版本（验证打包时的源版本与安装后一致）
     import tarfile
@@ -266,7 +266,7 @@ def test_editable_version_consistent(tmp_path: Any) -> None:
         venv_python,
         "from importlib.metadata import version; print(version('fxapk'))",
     )
-    module_ver = _run(venv_python, "import apkscan; print(apkscan.__version__)")
+    module_ver = _run(venv_python, "import fxapk; print(fxapk.__version__)")
 
     assert metadata_ver == module_ver, (
         f"editable 安装后 metadata({metadata_ver!r}) != __version__({module_ver!r})"
@@ -286,7 +286,7 @@ def test_frozen_fallback_matches_pyproject_and_is_not_silent(monkeypatch: Any) -
     """dist-info 缺失时回落版本与 pyproject 一致，且回落本身不静默假装成功。
 
     「不静默」的定义：
-    - apkscan.__version__ 必须等于 _FALLBACK_VERSION（而非某个空字串或魔法默认值）；
+    - fxapk.__version__ 必须等于 _FALLBACK_VERSION（而非某个空字串或魔法默认值）；
     - _FALLBACK_VERSION 必须等于 pyproject version（test_fallback_version_contract_holds
       覆盖了这条，此处作额外的产物级确认）。
 
@@ -300,10 +300,10 @@ def test_frozen_fallback_matches_pyproject_and_is_not_silent(monkeypatch: Any) -
     """
     import importlib.metadata as md
 
-    import apkscan
+    import fxapk
 
     # 验证 _FALLBACK_VERSION 是非空字串
-    fallback_ver = getattr(apkscan, "_FALLBACK_VERSION", None)
+    fallback_ver = getattr(fxapk, "_FALLBACK_VERSION", None)
     assert isinstance(fallback_ver, str) and fallback_ver, (
         "_FALLBACK_VERSION 被清空或改名——dist-info 缺失时将回落到空字串，静默失败"
     )
@@ -327,7 +327,7 @@ def test_frozen_fallback_matches_pyproject_and_is_not_silent(monkeypatch: Any) -
     try:
         module_ver = md.version("fxapk")
     except md.PackageNotFoundError:
-        module_ver = apkscan._FALLBACK_VERSION  # type: ignore[attr-defined]
+        module_ver = fxapk._FALLBACK_VERSION  # type: ignore[attr-defined]
 
     assert module_ver == fallback_ver, (
         f"dist-info 缺失时版本初始化产生 {module_ver!r}，不等于 _FALLBACK_VERSION({fallback_ver!r})；"

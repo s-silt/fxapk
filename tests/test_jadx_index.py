@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.jadx_index import (
+from fxapk.core.jadx_index import (
     INDEX_SCHEMA_VERSION,
     CacheMiss,
     CacheUnavailable,
@@ -28,7 +28,7 @@ from apkscan.core.jadx_index import (
     derive_shard_key,
     verify_dex_inputs,
 )
-from apkscan.core.recognition_codec import canonical_json_v1
+from fxapk.core.recognition_codec import canonical_json_v1
 
 _OPTS = "sha256:" + "a" * 64
 
@@ -503,7 +503,7 @@ def test_key_fixed_vector() -> None:
 # Task 3：存储层——cache root 安全
 # ---------------------------------------------------------------------------
 
-from apkscan.core.jadx_index import (  # noqa: E402
+from fxapk.core.jadx_index import (  # noqa: E402
     IndexBuildResult,
     IndexBuildState,
     JadxIndexStore,
@@ -719,7 +719,7 @@ def test_symlinked_index_dir_rejected(tmp_path: Path) -> None:
 # Task 4：查询层——确定性枚举、bounded postings、find_value_usage
 # ---------------------------------------------------------------------------
 
-from apkscan.core.jadx_index import (  # noqa: E402
+from fxapk.core.jadx_index import (  # noqa: E402
     Limits,
     find_value_usage,
     scan_java_sources,

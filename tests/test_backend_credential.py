@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import base64
 
-from apkscan.analyzers.backend_credential import BackendCredentialAnalyzer
-from apkscan.core.models import Confidence, LeadCategory
-from apkscan.report.letters import build_letters
+from fxapk.analyzers.backend_credential import BackendCredentialAnalyzer
+from fxapk.core.models import Confidence, LeadCategory
+from fxapk.report.letters import build_letters
 
 
 class _Ctx:

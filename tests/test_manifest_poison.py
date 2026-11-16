@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import struct
 
-from apkscan.analyzers.manifest import ManifestAnalyzer
-from apkscan.core import apk as apk_mod
+from fxapk.analyzers.manifest import ManifestAnalyzer
+from fxapk.core import apk as apk_mod
 from tests.conftest import FakeContext
 
 

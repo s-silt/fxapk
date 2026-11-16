@@ -8,10 +8,10 @@ import shutil
 
 import pytest
 
-from apkscan.commands.phase2 import main
-from apkscan.core.case_package import create_case_package
-from apkscan.core.phase2.inventory import build_inventory
-from apkscan.core.phase2.link import GateReceiptError, load_receipt_for_package
+from fxapk.commands.phase2 import main
+from fxapk.core.case_package import create_case_package
+from fxapk.core.phase2.inventory import build_inventory
+from fxapk.core.phase2.link import GateReceiptError, load_receipt_for_package
 from tests.phase2_fixtures import write_verified_package
 
 
@@ -265,7 +265,7 @@ def test_review_rejects_malformed_survey_assessment(tmp_path: Path, assessment: 
 ])
 def test_survey_read_and_collection_limits(tmp_path: Path, field: str, limit: int) -> None:
     from dataclasses import replace
-    from apkscan.core.phase2.survey import SurveyError, SurveyLimits, load_survey
+    from fxapk.core.phase2.survey import SurveyError, SurveyLimits, load_survey
 
     case_dir, _, survey = _case(tmp_path)
     survey["endpoints"] = [{"ip": "100.64.1.1", "observations": [{"state": "syn_only"}]}]
@@ -278,7 +278,7 @@ def test_survey_read_and_collection_limits(tmp_path: Path, field: str, limit: in
 
 @pytest.mark.parametrize("change", ["manifest", "capture"])
 def test_loaded_inventory_does_not_authorize_changed_package(tmp_path: Path, change: str) -> None:
-    from apkscan.core.phase2.survey import SurveyError, load_survey
+    from fxapk.core.phase2.survey import SurveyError, load_survey
 
     case_dir, _, survey = _case(tmp_path)
     inventory = build_inventory(case_dir)
@@ -295,7 +295,7 @@ def test_loaded_inventory_does_not_authorize_changed_package(tmp_path: Path, cha
 
 @pytest.mark.parametrize("ip", ["2001:db8:0:0::1", "[2001:db8::1]:443", "100.64.1.1:443"])
 def test_legacy_ip_normalization_preserves_positive_observation(tmp_path: Path, ip: str) -> None:
-    from apkscan.core.phase2.survey import load_survey
+    from fxapk.core.phase2.survey import load_survey
 
     case_dir, _, _ = _case(tmp_path)
     source = tmp_path / "survey.json"

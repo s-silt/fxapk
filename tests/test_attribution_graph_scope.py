@@ -7,9 +7,9 @@ import re
 import subprocess
 import sys
 
-import apkscan
-import apkscan.attribution as attribution
-import apkscan.attribution.graph as graph_mod
+import fxapk
+import fxapk.attribution as attribution
+import fxapk.attribution.graph as graph_mod
 
 _GRAPH_SOURCE = pathlib.Path(graph_mod.__file__)
 
@@ -28,7 +28,7 @@ def test_attribution_exports_are_sorted_and_additive() -> None:
 
 
 _BAD_IMPORT = re.compile(
-    r"^\s*(?:from|import)\s+.*\b(?:kuzu|sqlite3)\b|^\s*(?:from|import)\s+apkscan\.graph\b",
+    r"^\s*(?:from|import)\s+.*\b(?:kuzu|sqlite3)\b|^\s*(?:from|import)\s+fxapk\.graph\b",
     re.MULTILINE,
 )
 
@@ -40,7 +40,7 @@ def test_graph_module_imports_no_legacy_or_db() -> None:
     text = _GRAPH_SOURCE.read_text(encoding="utf-8")
     assert _BAD_IMPORT.search(text) is None
     # no relation is named after the legacy Kuzu OBSERVED table
-    from apkscan.attribution.graph import GraphRelation
+    from fxapk.attribution.graph import GraphRelation
 
     assert "OBSERVED" not in {r.name for r in GraphRelation}
     assert "observed" not in {r.value for r in GraphRelation}
@@ -48,8 +48,8 @@ def test_graph_module_imports_no_legacy_or_db() -> None:
 
 def test_importing_graph_loads_no_kuzu_or_legacy_graph() -> None:
     code = (
-        "import apkscan.attribution.graph, sys;"
-        "bad=[m for m in sys.modules if m=='kuzu' or m=='sqlite3' or m.startswith('apkscan.graph')];"
+        "import fxapk.attribution.graph, sys;"
+        "bad=[m for m in sys.modules if m=='kuzu' or m=='sqlite3' or m.startswith('fxapk.graph')];"
         "print(sorted(bad))"
     )
     out = subprocess.run(
@@ -64,7 +64,7 @@ _GRAPH_SYMBOLS = re.compile(
 
 
 def test_no_runtime_module_references_the_graph() -> None:
-    root = pathlib.Path(apkscan.__file__).parent
+    root = pathlib.Path(fxapk.__file__).parent
     attribution_dir = root / "attribution"
     offenders = []
     for path in root.rglob("*.py"):
@@ -83,7 +83,7 @@ def test_import_touches_no_network() -> None:
         "def _boom(*a, **k):\n"
         "    raise AssertionError('network at import time')\n"
         "socket.socket = _boom\n"
-        "import apkscan.attribution.graph\n"
+        "import fxapk.attribution.graph\n"
         "print('ok')\n"
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)

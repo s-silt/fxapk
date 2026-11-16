@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from apkscan.dynamic import capture
+from fxapk.dynamic import capture
 from tests.test_capture import _set_capabilities, _stub_orchestration
 
 

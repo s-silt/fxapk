@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from apkscan.core.case_package import create_case_package
+from fxapk.core.case_package import create_case_package
 
 
 def write_verified_package(

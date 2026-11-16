@@ -16,8 +16,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.packing import PackingAnalyzer
-from apkscan.core.models import (
+from fxapk.analyzers.packing import PackingAnalyzer
+from fxapk.core.models import (
     AnalyzerResult,
     Confidence,
     LeadCategory,
@@ -77,7 +77,7 @@ def test_no_packing_yields_empty():
 
 def test_meta_packers_present_on_no_rules_branch(monkeypatch):
     # "无可用规则"早退分支也应显式置 meta["packers"]=[]（键齐全、is_hardened=False）。
-    from apkscan.analyzers import packing as packing_mod
+    from fxapk.analyzers import packing as packing_mod
 
     monkeypatch.setattr(
         PackingAnalyzer,

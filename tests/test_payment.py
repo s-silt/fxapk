@@ -1,12 +1,12 @@
 """PaymentAnalyzer 测试：支付 SDK 指纹 + 资金关键字 → PAYMENT 线索。
 
-用 FakeContext 喂合成数据，配真实 apkscan/rules/payment.yaml 规则验证命中/不命中。
+用 FakeContext 喂合成数据，配真实 fxapk/rules/payment.yaml 规则验证命中/不命中。
 """
 
 from __future__ import annotations
 
-from apkscan.analyzers.payment import PaymentAnalyzer
-from apkscan.core.models import Confidence, LeadCategory
+from fxapk.analyzers.payment import PaymentAnalyzer
+from fxapk.core.models import Confidence, LeadCategory
 
 from tests.conftest import FakeContext
 

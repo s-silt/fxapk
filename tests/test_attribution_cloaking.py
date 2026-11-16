@@ -12,7 +12,7 @@ import itertools
 
 import pytest
 
-from apkscan.attribution import (
+from fxapk.attribution import (
     AttributionEvidence,
     EvidenceScorer,
     InfrastructureRole as R,
@@ -21,9 +21,9 @@ from apkscan.attribution import (
     RoleFeature,
     RoleSignal as S,
 )
-from apkscan.attribution.roles import _CLOAKING_STRONG, _EDGE_SIGNALS, _ROLE_DEFINITIONS
-from apkscan.attribution.scorer import _ROLE_POLICIES
-from apkscan.network import NetworkEntity, NetworkEntityType
+from fxapk.attribution.roles import _CLOAKING_STRONG, _EDGE_SIGNALS, _ROLE_DEFINITIONS
+from fxapk.attribution.scorer import _ROLE_POLICIES
+from fxapk.network import NetworkEntity, NetworkEntityType
 
 
 def _entity(value: str = "1.2.3.4") -> NetworkEntity:
@@ -178,7 +178,7 @@ def test_cloaking_scores_with_correct_arithmetic() -> None:
 
 
 def test_cloaking_rolescore_is_a_valid_graph_annotation() -> None:
-    from apkscan.attribution.graph import build_infrastructure_graph
+    from fxapk.attribution.graph import build_infrastructure_graph
 
     score = _canonical_cloaking_score(_entity("203.0.113.5"))
     graph = build_infrastructure_graph(artifact_id="sample-A", role_scores=[score])

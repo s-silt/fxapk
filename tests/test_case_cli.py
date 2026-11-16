@@ -5,10 +5,10 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.commands import case as case_command
-from apkscan.core.models import Report
-from apkscan.report import json as report_json
+from fxapk import cli
+from fxapk.commands import case as case_command
+from fxapk.core.models import Report
+from fxapk.report import json as report_json
 from tests.test_case_package import _passing_receipt
 
 runner = CliRunner()

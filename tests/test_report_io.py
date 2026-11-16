@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import threading
 
-from apkscan.core.models import (
+from fxapk.core.models import (
     Confidence,
     Endpoint,
     Evidence,
@@ -15,9 +15,9 @@ from apkscan.core.models import (
     Report,
     Severity,
 )
-from apkscan.core.report_io import load_report, report_from_dict, write_report
-from apkscan.report import json as report_json
-from apkscan.report.digest import build_digest
+from fxapk.core.report_io import load_report, report_from_dict, write_report
+from fxapk.report import json as report_json
+from fxapk.report.digest import build_digest
 
 
 def _report() -> Report:

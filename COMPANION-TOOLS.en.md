@@ -16,7 +16,7 @@ adapters and probes. Credentials, devices and external executables require local
 | Corpus, Phase-1 packages and Phase-2 CLI | Case/corpus storage outside the worktree; human review |
 | `intake-fetch`, `evidence-review`, `recover-runtime` and recovery observer scripts | Saved inputs, a compatible fxfetch CLI and the `review` extra; JADX and authorized device tools as required |
 
-The bundled `apkscan/dynamic/frida_probes/` contains `coldstart-config`, `objstore-config`,
+The bundled `fxapk/dynamic/frida_probes/` contains `coldstart-config`, `objstore-config`,
 `native-ssl`, `tls-keylog`, `sms-forward-outbound`, `mqtt-xmpp-im`, `telegram-mtproto` and
 `push-c2-inbound`. Additional probes, MCP servers, custom spreadsheets and messaging bridges
 are not bundled. Bundled scripts do not install host tools or frida-server, or imply that every
@@ -62,7 +62,7 @@ not execution: distinguish `hit/no_record/failed/skipped/disabled`; failure is n
 | Targeted offline review and AArch64 emulation | `python -m pip install "fxapk[review]==1.25.0"`: pyelftools, Capstone 5, cryptography and Unicorn 2; excludes fxfetch/JADX/adb/Frida |
 | Experimental linkage reranker | `python -m pip install "fxapk[ml]"`; independent-label and training gates still apply |
 | jadx, adb, tshark, Frida and frida-dexdump | [Toolchain setup](tools/TOOLCHAIN.en.md) and [Python tool pins](tools/toolchain-requirements.txt) |
-| Android UI plugin | Independent `fxapk-android-ui 0.1.2` (core 1.18.1+); external Android CLI, adb and an authorized device; see the [full guide](ANDROID-UI.en.md) |
+| Android UI plugin | Independent `fxapk-android-ui` (core 2.0.0+); external Android CLI, adb and an authorized device; see the [full guide](ANDROID-UI.en.md) |
 | mitmproxy | A separate environment with explicit executable mappings, as described in the toolchain guide |
 
 Default capture/auto still require Frida. Explicit `capture --mode floor-only` needs no Frida,

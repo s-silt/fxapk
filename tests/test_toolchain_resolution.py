@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import tools
-from apkscan.dynamic import tshark_backend
+from fxapk.core import tools
+from fxapk.dynamic import tshark_backend
 
 
 def configure(monkeypatch, tmp_path, data):
@@ -91,7 +91,7 @@ def test_config_override_location(monkeypatch, tmp_path):
 
 
 def test_doctor_and_backend_share_tshark_selection(monkeypatch):
-    from apkscan.dynamic import doctor
+    from fxapk.dynamic import doctor
     monkeypatch.setattr(tools, "executable_path", lambda _: "")
     assert not tshark_backend.has_tshark()
     item = next(x for x in doctor._check_pcap_capabilities() if x["name"] == doctor._NAME_TSHARK)

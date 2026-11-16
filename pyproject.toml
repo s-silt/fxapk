@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# 发行名 fxapk（PyPI）；CLI 命令 fxapk（保留 apkscan 别名）；内部 import 包仍为 apkscan。
+# 发行名、命令名与导入包名均为 fxapk。
 name = "fxapk"
-version = "1.27.1"
+version = "2.0.0"
 description = "涉诈 APK 调证分析 CLI — 静态分析 + 配置键值/服务归属提取，产出调证线索清单"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -59,18 +59,17 @@ review = ["pyelftools>=0.31,<1", "capstone>=5,<6", "cryptography>=42.0", "unicor
 ml = ["scikit-learn>=1.8,<1.9"]
 
 [project.scripts]
-fxapk = "apkscan.cli:main"
-apkscan = "apkscan.cli:main"
+fxapk = "fxapk.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["apkscan*"]
+include = ["fxapk*"]
 
 [tool.setuptools.package-data]
-apkscan = ["rules/*.yaml", "rules/*.txt", "rules/**/*.yaml", "report/templates/*.j2"]
+fxapk = ["rules/*.yaml", "rules/*.txt", "rules/**/*.yaml", "report/templates/*.j2"]
 # 内置 Frida JS hook 脚本（cryptohook 经 importlib.resources 读取，注入真机）——装后仍可读。
 # frida_probes/：手动 `-l` 注入的独立探针库（首批 8 个，脱敏后入库），随 wheel 分发供 pip 用户取用。
-"apkscan.dynamic" = ["frida_js/*.js", "frida_probes/*.js"]
+"fxapk.dynamic" = ["frida_js/*.js", "frida_probes/*.js"]
 
 [tool.pytest.ini_options]
 # 只收集仓内测试；本地 tmp/、out/ 里的临时检出不得混进来。
@@ -97,7 +96,7 @@ select = ["E4", "E7", "E9", "F"]
 ignore = ["E741"]
 
 [tool.pyright]
-include = ["apkscan"]
+include = ["fxapk"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 # 第三方依赖（androguard 等）无类型存根，缺存根不算错。

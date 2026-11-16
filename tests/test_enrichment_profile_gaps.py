@@ -6,17 +6,17 @@ import time
 
 import pytest
 
-from apkscan.commands.enrich import _append_ndjson, _has_coverage_gaps
-from apkscan.core import batch_enrich as batch
-from apkscan.core.closure.layers import _passive_hosting_evidence
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.enrichers._profile import bounded_profile
-from apkscan.enrichers import shodan
-from apkscan.enrichers.multisource import (
+from fxapk.commands.enrich import _append_ndjson, _has_coverage_gaps
+from fxapk.core import batch_enrich as batch
+from fxapk.core.closure.layers import _passive_hosting_evidence
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.enrichers._profile import bounded_profile
+from fxapk.enrichers import shodan
+from fxapk.enrichers.multisource import (
     CensysPassiveEnricher, QuakePassiveEnricher, HunterPassiveEnricher,
     RipeStatBgpEnricher, VirusTotalPassiveEnricher, OtxPassiveEnricher, ZoomEyePassiveEnricher,
 )
-from apkscan.enrichers.resource_profile import DayDayMapResourceProfileEnricher
+from fxapk.enrichers.resource_profile import DayDayMapResourceProfileEnricher
 
 
 class Response:
@@ -265,7 +265,7 @@ def test_sanitized_preview_hash_name():
 
 
 def test_provider_error_header_redaction():
-    from apkscan.enrichers.multisource import _safe_provider_note
+    from fxapk.enrichers.multisource import _safe_provider_note
     for field in ("message", "errmsg"):
         result = _safe_provider_note({field: "Authorization: Bearer hidden-auth\nCookie: hidden-cookie\nSet-Cookie: hidden-set\nProxy-Authorization: hidden-proxy"})
         assert "hidden" not in result
@@ -273,7 +273,7 @@ def test_provider_error_header_redaction():
 
 @pytest.mark.parametrize("sources", [("fofa_profile",), ("fofa_host",), ("fofa_profile", "fofa_host"), ("daydaymap_profile",)])
 def test_profiles_are_only_hosting_candidates(sources):
-    from apkscan.core.closure.layers import _hosting_layer
+    from fxapk.core.closure.layers import _hosting_layer
     data = {source: ({"profile": {"org": "Example", "product": "Proxy"}} if source == "fofa_host"
                     else {"records": [{"org": "Example", "product": "Proxy"}]}) for source in sources}
     result = _hosting_layer(data)
@@ -286,7 +286,7 @@ def test_profiles_are_only_hosting_candidates(sources):
 
 
 def test_hosting_completion_requires_delivery_and_no_conflicting_profile():
-    from apkscan.core.closure.layers import _hosting_layer
+    from fxapk.core.closure.layers import _hosting_layer
     data = {"ip_rdap": {"org": "Legacy"}, "asn": {"org": "Legacy"},
             "attribution": {"hosting_provider": {"name": "Legacy", "matched_signals": ["rdap_org"]}}}
     assert _hosting_layer(data)["status"] == "partial"
@@ -300,7 +300,7 @@ def test_hosting_completion_requires_delivery_and_no_conflicting_profile():
 
 @pytest.mark.parametrize("adapter", ["fofa", "daydaymap"])
 def test_profile_coverage_counts_raw_rows(adapter):
-    from apkscan.enrichers.resource_profile import FofaResourceProfileEnricher, FOFA_PROFILE_FIELDS
+    from fxapk.enrichers.resource_profile import FofaResourceProfileEnricher, FOFA_PROFILE_FIELDS
     if adapter == "fofa":
         fields = FOFA_PROFILE_FIELDS.split(",")
         row = ["192.0.2.1" if key == "ip" else "" for key in fields]

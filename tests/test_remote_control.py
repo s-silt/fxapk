@@ -28,9 +28,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from apkscan.core import infra
-from apkscan.core.models import Endpoint, Lead, LeadCategory, Report
-from apkscan.dynamic import cryptohook, merge
+from fxapk.core import infra
+from fxapk.core.models import Endpoint, Lead, LeadCategory, Report
+from fxapk.dynamic import cryptohook, merge
 
 # 工行真实包名（命中 bank_packages）。
 _ICBC_PKG = "com.icbc.mobile.android"
@@ -265,7 +265,7 @@ def test_merge_rc_upload_host_source_not_observed_contact(monkeypatch, tmp_path)
 
     无修复即失败（旧钉 ``source="runtime"`` 时 ``"runtime" not in sources`` 断言失败）。
     """
-    from apkscan.attribution import assemble
+    from fxapk.attribution import assemble
 
     report = _make_report()
     events = [{"event": "screen_upload", "host": _C2_HOST}]
@@ -390,7 +390,7 @@ def test_remote_control_lead_category_exists() -> None:
 
 
 def test_remote_control_html_label_registered() -> None:
-    from apkscan.report import html
+    from fxapk.report import html
 
     assert LeadCategory.REMOTE_CONTROL in html.CATEGORY_LABELS
     assert LeadCategory.REMOTE_CONTROL in html.CATEGORY_ORDER

@@ -14,9 +14,9 @@ import json
 
 import pytest
 
-from apkscan.config.fetch import FetchResult, fetch_config_object
-from apkscan.core import pipeline
-from apkscan.core.models import (
+from fxapk.config.fetch import FetchResult, fetch_config_object
+from fxapk.core import pipeline
+from fxapk.core.models import (
     ANALYSIS_MODE_AUTHORIZED_ACTIVE,
     ANALYSIS_MODE_PASSIVE,
     AnalysisConfig,
@@ -175,7 +175,7 @@ def test_fetch_ok_and_status_and_size_cap(monkeypatch) -> None:
 
 
 def test_target_is_safe_blocks_internal_and_metadata() -> None:
-    from apkscan.config.fetch import _target_is_safe
+    from fxapk.config.fetch import _target_is_safe
 
     for bad in (
         "http://169.254.169.254/latest/meta-data/iam/",  # 云元数据（链路本地）
@@ -186,7 +186,7 @@ def test_target_is_safe_blocks_internal_and_metadata() -> None:
 
 
 def test_target_is_safe_blocks_non_global_and_embedded_ipv4() -> None:
-    from apkscan.config.fetch import _target_is_safe
+    from fxapk.config.fetch import _target_is_safe
     from tests.doc_addresses import GLOBAL_FIXTURE_IP, assert_global_fixture_contract
 
     assert_global_fixture_contract()
@@ -241,7 +241,7 @@ def test_fetch_disables_redirects(monkeypatch) -> None:
 def test_fetch_wall_clock_deadline_aborts(monkeypatch) -> None:
     pytest.importorskip("requests")
 
-    from apkscan.config import fetch as fetchmod
+    from fxapk.config import fetch as fetchmod
 
     times = iter([0.0, 1e9, 1e9, 1e9])  # deadline 计算=0 → 30；循环内 monotonic=1e9 远超 → 立即中止
     monkeypatch.setattr(fetchmod.time, "monotonic", lambda: next(times))
@@ -266,7 +266,7 @@ class _FakeSock:
 
 
 def test_assert_peer_public_blocks_internal_and_closes() -> None:
-    from apkscan.config.fetch import _assert_peer_public, _BlockedPeerError
+    from fxapk.config.fetch import _assert_peer_public, _BlockedPeerError
 
     for bad in (
         "169.254.169.254",
@@ -288,7 +288,7 @@ def test_assert_peer_public_blocks_internal_and_closes() -> None:
 
 
 def test_assert_peer_public_tolerates_unresolvable_peer() -> None:
-    from apkscan.config.fetch import _assert_peer_public
+    from fxapk.config.fetch import _assert_peer_public
 
     class _NoPeer:
         def getpeername(self):
@@ -299,7 +299,7 @@ def test_assert_peer_public_tolerates_unresolvable_peer() -> None:
 
 def test_guarded_session_mounts_peer_validating_adapter() -> None:
     pytest.importorskip("requests")
-    from apkscan.config.fetch import _GUARDED_ADAPTER_CLS, _build_guarded_session
+    from fxapk.config.fetch import _GUARDED_ADAPTER_CLS, _build_guarded_session
 
     session = _build_guarded_session()
     assert session is not None
@@ -319,7 +319,7 @@ def test_guarded_session_ignores_environment_proxy(monkeypatch) -> None:
     for name in ("NO_PROXY", "no_proxy", "REQUEST_METHOD"):
         monkeypatch.delenv(name, raising=False)
 
-    from apkscan.config.fetch import _build_guarded_session
+    from fxapk.config.fetch import _build_guarded_session
 
     url = "http://8.8.8.8/x"
     session = _build_guarded_session()
@@ -339,8 +339,8 @@ def test_guarded_session_ignores_environment_proxy(monkeypatch) -> None:
 
 def test_peer_guard_mixin_rejects_before_new_conn(monkeypatch) -> None:
     """Stage C: rejected resolution must never reach a TCP connection."""
-    from apkscan.config import fetch as fetchmod
-    from apkscan.core import pinned_transport
+    from fxapk.config import fetch as fetchmod
+    from fxapk.core import pinned_transport
 
     mixin = getattr(fetchmod, "_PeerGuardMixin", None)
     if mixin is None:  # urllib3 API 不匹配、降级路径
@@ -367,7 +367,7 @@ def test_fetch_deadline_guard_aborts_blocked_stream(monkeypatch) -> None:
     import threading
 
     pytest.importorskip("requests")
-    from apkscan.config import fetch as fetchmod
+    from fxapk.config import fetch as fetchmod
 
     release = threading.Event()
 

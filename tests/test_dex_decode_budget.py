@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from apkscan.core.dex_records import DecodeLimits, collect_dex_records
+from fxapk.core.dex_records import DecodeLimits, collect_dex_records
 
 
 class Item:

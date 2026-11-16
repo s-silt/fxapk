@@ -8,10 +8,10 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core import corpus
-from apkscan.core import corpus_catalog as catalog
-from apkscan.core.case_package import create_case_package
+from fxapk import cli
+from fxapk.core import corpus
+from fxapk.core import corpus_catalog as catalog
+from fxapk.core.case_package import create_case_package
 
 
 runner = CliRunner()

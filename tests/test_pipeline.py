@@ -9,9 +9,9 @@ import logging
 
 import pytest
 
-from apkscan.core import infra, pipeline
-from apkscan.core.meta_contract import META_KEY_REGISTRY, MetaKeyContract
-from apkscan.core.models import (
+from fxapk.core import infra, pipeline
+from fxapk.core.meta_contract import META_KEY_REGISTRY, MetaKeyContract
+from fxapk.core.models import (
     DOWNGRADE_SOURCE_TIER,
     AnalysisConfig,
     AnalyzerResult,
@@ -24,7 +24,7 @@ from apkscan.core.models import (
     LeadCategory,
     Severity,
 )
-from apkscan.core.registry import BaseAnalyzer, BaseEnricher
+from fxapk.core.registry import BaseAnalyzer, BaseEnricher
 
 
 # --- fake 分析器 / 富化器 --------------------------------------------------
@@ -211,7 +211,7 @@ def test_pipeline_atomically_rejects_unregistered_analyzer_meta(
     monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
     monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: set())
 
-    with caplog.at_level(logging.ERROR, logger="apkscan.core.pipeline"):
+    with caplog.at_level(logging.ERROR, logger="fxapk.core.pipeline"):
         report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
 
     assert "packer" not in report.meta, "违规分析器的合法子集被部分合并，原子拒绝失效"
@@ -257,7 +257,7 @@ def test_endpoint_leads_built_from_domains_and_ips(monkeypatch, fake_ctx):
 
 
 def test_online_enrichment_applied_and_failures_recorded(monkeypatch, fake_ctx):
-    from apkscan.core import enrichment
+    from fxapk.core import enrichment
 
     original_ip_advice = enrichment.infra.effective_ip_advice
     monkeypatch.setattr(
@@ -313,7 +313,7 @@ def test_no_record_provider_payload_cannot_raise_domain_lead(monkeypatch, fake_c
 
 
 def test_serialized_non_hit_provider_payloads_cannot_raise_endpoint_leads() -> None:
-    from apkscan.core.leads import _domain_lead, _ip_lead
+    from fxapk.core.leads import _domain_lead, _ip_lead
 
     evidence = Evidence(source="dex", location="classes.dex", snippet="api.example.com")
     domain = Endpoint(
@@ -378,7 +378,7 @@ def test_offline_skips_enrichers(monkeypatch, fake_ctx):
 
 def test_enrichment_targets_only_suspicious(monkeypatch: pytest.MonkeyPatch):
     """联网富化只对"高度可疑"端点（建议调证）：infra 域名 / 私网·回环 IP 一律不查。"""
-    from apkscan.core import enrichment
+    from fxapk.core import enrichment
 
     monkeypatch.setattr(
         enrichment.infra,
@@ -1011,7 +1011,7 @@ def test_domain_lead_dns_hosting_in_evidence_and_notes():
 
 
 def test_domain_lead_uses_hit_cloudfront_cname_as_exact_aws_request_target() -> None:
-    from apkscan.core.leads import _domain_lead
+    from fxapk.core.leads import _domain_lead
 
     custom_hostname = "portal.infra.example"
     distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
@@ -1046,7 +1046,7 @@ def test_domain_lead_uses_hit_cloudfront_cname_as_exact_aws_request_target() -> 
 
 
 def test_domain_lead_does_not_use_non_hit_cloudfront_cname_as_aws_target() -> None:
-    from apkscan.core.leads import _domain_lead
+    from fxapk.core.leads import _domain_lead
 
     distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
     endpoint = Endpoint(
@@ -1066,7 +1066,7 @@ def test_domain_lead_does_not_use_non_hit_cloudfront_cname_as_aws_target() -> No
 
 def test_whois_enricher_not_routed_by_pipeline():
     """避免 whois 双查：独立 WhoisEnricher 的 applies_to 应为空，pipeline 不再路由它。"""
-    from apkscan.enrichers.whois import WhoisEnricher
+    from fxapk.enrichers.whois import WhoisEnricher
 
     assert WhoisEnricher().applies_to == []
 
@@ -1091,10 +1091,10 @@ def test_whois_enricher_not_routed_by_pipeline():
 def test_load_rules_via_importlib_resources_reads_yaml():
     """registry.load_rules 经 importlib.resources 读 rules/*.yaml（非 Path(__file__) 相对）。
 
-    锚顶层包 'apkscan'，读真实存在的规则文件，断言返回非空 dict/list；并确认
+    锚顶层包 'fxapk'，读真实存在的规则文件，断言返回非空 dict/list；并确认
     模块不再保留 __file__ 相对的 _rules_dir 帮助器（exe-ready 改造已落地）。
     """
-    from apkscan.core import registry
+    from fxapk.core import registry
 
     # __file__ 相对定位帮助器已移除。
     assert not hasattr(registry, "_rules_dir")
@@ -1117,7 +1117,7 @@ def test_stage_attribution_writes_five_layers_after_enrich() -> None:
     IP 端点用 asn、域名端点 per-IP 用 dns.hosting；无归属信号的端点不塞空 attribution 键。"""
     from types import SimpleNamespace
 
-    from apkscan.core.pipeline import _stage_attribution
+    from fxapk.core.pipeline import _stage_attribution
 
     eps = [
         Endpoint(value="9.9.9.9", kind="ip", enrichment={"asn": {"asn": "AS45090", "org": "Tencent"}}),
@@ -1140,7 +1140,7 @@ def test_stage_attribution_writes_five_layers_after_enrich() -> None:
 def test_stage_attribution_clears_stale_views_after_non_hit_refresh() -> None:
     from types import SimpleNamespace
 
-    from apkscan.core.pipeline import _stage_attribution
+    from fxapk.core.pipeline import _stage_attribution
 
     endpoint = Endpoint(
         value="api.example.com",
@@ -1274,7 +1274,7 @@ def test_offline_enrichment_records_admission_decisions():
 def test_admission_excluded_endpoint_cannot_reuse_cached_provider_hit(monkeypatch):
     from types import SimpleNamespace
 
-    from apkscan.core.source_status import provider_payload_if_hit
+    from fxapk.core.source_status import provider_payload_if_hit
 
     class _Spy(BaseEnricher):
         name = "rdap"

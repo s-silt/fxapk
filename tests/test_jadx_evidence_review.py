@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from apkscan import cli
-from apkscan.core.jadx_index import JadxIndexStore
-from apkscan.core.jadx_review import compare_structure, load_review_receipts, review_markdown
-from apkscan.core.jadx_sources import capture_sources, query_sources
+from fxapk import cli
+from fxapk.core.jadx_index import JadxIndexStore
+from fxapk.core.jadx_review import compare_structure, load_review_receipts, review_markdown
+from fxapk.core.jadx_sources import capture_sources, query_sources
 from tests import test_jadx_query_cli as fixture
 
 SHA = "ab" * 32
@@ -194,7 +194,7 @@ def test_body_matching_survives_enclosing_class_and_path_rename(tmp_path, monkey
 
 
 def test_partial_capture_preserves_query_limit(tmp_path, monkeypatch):
-    from apkscan.core import jadx_sources
+    from fxapk.core import jadx_sources
     cache, key = fixture._build_index(tmp_path)
     monkeypatch.setattr(jadx_sources, "MAX_FILE_BYTES", 10)
     captured = capture_sources(cache, key, tmp_path / "java", coverage="complete")
@@ -203,7 +203,7 @@ def test_partial_capture_preserves_query_limit(tmp_path, monkeypatch):
 
 
 def test_invalid_query_and_traversal_are_rejected(tmp_path):
-    from apkscan.core.jadx_sources import contained
+    from fxapk.core.jadx_sources import contained
     with pytest.raises(ValueError):
         contained(tmp_path, "../outside")
     cache, key = fixture._build_index(tmp_path)
@@ -214,7 +214,7 @@ def test_invalid_query_and_traversal_are_rejected(tmp_path):
 
 def test_analyzer_preserves_unknown_query_value_before_temp_cleanup(tmp_path, monkeypatch):
     from tests import test_jadx_index_wiring as wiring
-    from apkscan.analyzers.jadx import JadxAnalyzer
+    from fxapk.analyzers.jadx import JadxAnalyzer
     monkeypatch.setattr(wiring, "_JAVA_BODY", wiring._JAVA_BODY + '\n// later_family_key\n')
     wiring._patch(monkeypatch)
     monkeypatch.setattr(wiring.jadx.tools, "resolve_jadx", lambda: (["jadx"], {}))
@@ -228,8 +228,8 @@ def test_analyzer_preserves_unknown_query_value_before_temp_cleanup(tmp_path, mo
 
 def test_analyzer_query_snapshot_failure_keeps_static_findings(tmp_path, monkeypatch):
     from tests import test_jadx_index_wiring as wiring
-    from apkscan.analyzers.jadx import JadxAnalyzer
-    from apkscan.core import jadx_sources
+    from fxapk.analyzers.jadx import JadxAnalyzer
+    from fxapk.core import jadx_sources
     wiring._patch(monkeypatch)
     monkeypatch.setattr(wiring.jadx.tools, "resolve_jadx", lambda: (["jadx"], {}))
     def fail(*args, **kwargs):
@@ -268,7 +268,7 @@ def test_stdout_projects_query_literals_but_receipt_keeps_them(tmp_path, monkeyp
 ])
 def test_malformed_mapping_is_invalid_not_missing(tmp_path, records):
     import typer
-    from apkscan.commands.jadx_query import _selection
+    from fxapk.commands.jadx_query import _selection
     mapping = tmp_path / 'mapping.json'
     mapping.write_text(json.dumps({'records': records}))
     with pytest.raises(typer.BadParameter, match='索引映射格式无效'):
@@ -293,7 +293,7 @@ def test_upstream_partial_reasons_survive_snapshot_query(tmp_path, reasons, expe
 
 
 def test_source_query_exception_preserves_index_hits(tmp_path, monkeypatch):
-    from apkscan.commands import jadx_query
+    from fxapk.commands import jadx_query
     cache, key = fixture._build_index(tmp_path)
     def fail(*args, **kwargs):
         raise OSError('synthetic source failure')
@@ -306,7 +306,7 @@ def test_source_query_exception_preserves_index_hits(tmp_path, monkeypatch):
 
 
 def test_independent_comparisons_state_identity_limit(tmp_path):
-    from apkscan.core.jadx_review import compare_report_features
+    from fxapk.core.jadx_review import compare_report_features
     cache, key = fixture._build_index(tmp_path)
     loaded = JadxIndexStore(cache).load_index(key)
     structure = compare_structure(loaded, loaded)
@@ -323,7 +323,7 @@ def test_independent_comparisons_state_identity_limit(tmp_path):
 @pytest.mark.parametrize('exclude', [False, True])
 def test_analyzer_passes_specific_upstream_coverage_reasons(tmp_path, monkeypatch, exclude):
     from tests import test_jadx_index_wiring as wiring
-    from apkscan.analyzers.jadx import JadxAnalyzer
+    from fxapk.analyzers.jadx import JadxAnalyzer
     wiring._patch(monkeypatch)
     monkeypatch.setattr(wiring.jadx.tools, 'resolve_jadx', lambda: (['jadx'], {}))
     def run(cmd, *, timeout, env=None):
@@ -351,9 +351,9 @@ def test_new_outputs_stable_across_hashseeds(tmp_path):
     script = '''
 import os, sys
 from pathlib import Path
-from apkscan.commands.jadx_query import _emit, _query_one
-from apkscan.core.jadx_sources import capture_sources
-from apkscan.core.jadx_review import compare_report_features
+from fxapk.commands.jadx_query import _emit, _query_one
+from fxapk.core.jadx_sources import capture_sources
+from fxapk.core.jadx_review import compare_report_features
 assert os.environ['PYTHONHASHSEED'] == sys.argv[3]
 cache, key = Path(sys.argv[1]), sys.argv[2]
 receipt = capture_sources(cache, key, cache.parent / 'java', coverage='partial',

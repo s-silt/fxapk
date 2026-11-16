@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest  # noqa: E402
 
-import apkscan.core.phase2.inventory as coverage
-import apkscan.core.phase2.decision as pd
-import apkscan.core.phase2.triage as pt
+import fxapk.core.phase2.inventory as coverage
+import fxapk.core.phase2.decision as pd
+import fxapk.core.phase2.triage as pt
 from tests.phase2_fixtures import write_verified_package
 
 

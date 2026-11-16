@@ -8,9 +8,9 @@ from typing import cast
 
 import pytest
 
-from apkscan.core import recognition_codec
-from apkscan.core.recognition_codec import canonical_json_v1, parse_json_v1
-from apkscan.core.recognition_contract import (
+from fxapk.core import recognition_codec
+from fxapk.core.recognition_codec import canonical_json_v1, parse_json_v1
+from fxapk.core.recognition_contract import (
     ActionAuthorization,
     AuthorizationLevel,
     CanonicalCodecError,
@@ -34,7 +34,7 @@ from apkscan.core.recognition_contract import (
     validate_contract_value,
     validate_coverage_collection,
 )
-from apkscan.core.recognition_codec import (
+from fxapk.core.recognition_codec import (
     build_action_outcome,
     build_evidence_gap,
     build_observation,

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.jadx_index import (
+from fxapk.core.jadx_index import (
     DexLineage,
     DexRole,
     Limits,

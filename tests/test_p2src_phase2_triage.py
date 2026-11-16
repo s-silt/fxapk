@@ -14,9 +14,9 @@ import pytest
 
 
 
-import apkscan.commands.phase2 as cli
-import apkscan.core.phase2.inventory as coverage
-import apkscan.core.phase2.triage as pt
+import fxapk.commands.phase2 as cli
+import fxapk.core.phase2.inventory as coverage
+import fxapk.core.phase2.triage as pt
 from tests.phase2_fixtures import write_verified_package
 
 
@@ -160,7 +160,7 @@ def test_R1规范化后endpoint挂lead(tmp_path: Path) -> None:
 def test_runtime_endpoint_cannot_be_hidden_by_static_mirror(
     tmp_path: Path, same_package: bool, runtime_signal: str
 ) -> None:
-    from apkscan.core.phase2.decision import (
+    from fxapk.core.phase2.decision import (
         build_decisions_from_intents, materialize_snapshot, run_gate,
     )
 
@@ -317,3 +317,69 @@ def test_未登记report_json不参与判据(tmp_path: Path) -> None:
     endpoint = _by_collection(triage, "endpoints")[0]
     assert endpoint.bucket == "human"
     assert endpoint.merged_into == ()
+
+
+# ---------- 重读断点：已登记报告读不回来，必须进结构化结果与退出码 ----------
+def _inventory_then_fault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str):
+    """先让 inventory 正常接纳，再在 triage 重读阶段注入故障。"""
+    _write_package(
+        tmp_path, "pkg-a",
+        leads=[_lead("100.64.9.1", "待核", is_runtime_seen=False,
+                     is_runtime_contact=False, is_c2=False)],
+    )
+    inventory = coverage.build_inventory(tmp_path)
+    assert not inventory.issues
+    if fault == "unreadable":
+        def boom(*_args: object, **_kwargs: object) -> object:
+            raise OSError("injected")
+        monkeypatch.setattr(pt, "read_json_bounded", boom)
+    elif fault == "hash_mismatch":
+        real = pt.read_json_bounded
+
+        def tampered(*args: object, **kwargs: object):
+            report, raw = real(*args, **kwargs)
+            return report, raw + b" "
+        monkeypatch.setattr(pt, "read_json_bounded", tampered)
+    elif fault == "missing":
+        (tmp_path / "pkg-a" / "report.json").unlink()
+    monkeypatch.setattr(cli, "build_inventory", lambda *_a, **_k: inventory)
+    return inventory
+
+
+@pytest.mark.parametrize("fault", ["unreadable", "hash_mismatch", "missing"])
+def test_重读失败进issues而非只写日志(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
+    """突变：_read_parent_versions 里去掉 _blocked(...) 调用 → issues 为空 → 红。"""
+    inventory = _inventory_then_fault(tmp_path, monkeypatch, fault)
+    triage = pt.build_triage(inventory, tmp_path)
+    codes = [issue.code for issue in triage.reread_issues()]
+    assert codes == [f"phase2_report_{fault}"]
+    assert triage.to_dict()["issues"][0]["code"] == f"phase2_report_{fault}"
+    assert f"phase2_report_{fault}" in pt.render_queue_md(triage)
+
+
+@pytest.mark.parametrize("fault", ["unreadable", "hash_mismatch", "missing"])
+def test_重读失败时triage默认非零且不落产物(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """突变：_cmd_triage 去掉 _reread_blocked 检查 → 退出码 0 且写出缺数据的 triage → 红。"""
+    _inventory_then_fault(tmp_path, monkeypatch, fault)
+    assert cli.main(["triage", "--case-dir", str(tmp_path)]) == 1
+    assert not (tmp_path / "phase2" / "triage.json").exists()
+    # 显式诊断模式照常落盘，但阻断写进结构化结果。
+    assert cli.main(["triage", "--case-dir", str(tmp_path), "--allow-inventory-issues"]) == 0
+    payload = json.loads((tmp_path / "phase2" / "triage.json").read_text(encoding="utf-8"))
+    assert [i["code"] for i in payload["issues"]] == [f"phase2_report_{fault}"]
+
+
+def test_重读失败时下游命令同样阻断(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _inventory_then_fault(tmp_path, monkeypatch, "unreadable")
+    assert cli.main(["materialize", "--case-dir", str(tmp_path)]) == 1
+
+
+def test_重读失败使gate的G1阻断(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fxapk.core.phase2.decision import run_gate
+
+    inventory = _inventory_then_fault(tmp_path, monkeypatch, "unreadable")
+    triage = pt.build_triage(inventory, tmp_path)
+    report = run_gate(inventory, triage, [], [], {}, case_id=inventory.case_id)
+    assert any("重读已登记报告失败" in line and line.startswith("G1") for line in report.blockers)

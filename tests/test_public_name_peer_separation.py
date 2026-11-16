@@ -5,10 +5,10 @@ real infrastructure is labelled suspicious by these tests.
 """
 import pytest
 
-from apkscan.core import infra
-from apkscan.core.enrichment import _enrichment_targets
-from apkscan.core.models import Report
-from apkscan.dynamic import merge, pcap_ingest
+from fxapk.core import infra
+from fxapk.core.enrichment import _enrichment_targets
+from fxapk.core.models import Report
+from fxapk.dynamic import merge, pcap_ingest
 
 
 @pytest.mark.parametrize("ports", [(443,), (40001,), (443, 40001)])

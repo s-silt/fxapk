@@ -11,11 +11,11 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.enrichers._cache as _cache
-import apkscan.enrichers.shodan as sh_mod
-from apkscan.core import exposure, forensic, pipeline
-from apkscan.core.closure import ClosureConfig, close_report
-from apkscan.core.models import (
+import fxapk.enrichers._cache as _cache
+import fxapk.enrichers.shodan as sh_mod
+from fxapk.core import exposure, forensic, pipeline
+from fxapk.core.closure import ClosureConfig, close_report
+from fxapk.core.models import (
     AnalysisConfig,
     Confidence,
     Endpoint,
@@ -25,7 +25,7 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
 )
-from apkscan.enrichers.shodan import ShodanEnricher
+from fxapk.enrichers.shodan import ShodanEnricher
 
 
 class _CountingShodan(ShodanEnricher):

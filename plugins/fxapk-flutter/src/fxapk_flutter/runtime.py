@@ -12,13 +12,13 @@ import shutil
 import tempfile
 import uuid
 
-from apkscan.core.proctree import run_owned
+from fxapk.core.proctree import run_owned
 
 from . import __version__
 from .detect import inspect_pair
 from .evidence import SCHEMA, FlutterError, digest, extract, inventory, load, reject_overlapping_paths, save, validate_bundle
 from .index import INDEX_VERSION, build
-from apkscan.core import tools
+from fxapk.core import tools
 
 
 def config_path(path: Path | None = None) -> Path:

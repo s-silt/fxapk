@@ -18,10 +18,10 @@ import json
 
 import pytest
 
-from apkscan.analyzers.config_keys import ConfigKeysAnalyzer
-from apkscan.core import infra
-from apkscan.core.infra import ADVICE_SKIP
-from apkscan.core.models import AnalyzerResult, Confidence, Lead, LeadCategory, Severity
+from fxapk.analyzers.config_keys import ConfigKeysAnalyzer
+from fxapk.core import infra
+from fxapk.core.infra import ADVICE_SKIP
+from fxapk.core.models import AnalyzerResult, Confidence, Lead, LeadCategory, Severity
 from tests.conftest import FakeContext
 
 

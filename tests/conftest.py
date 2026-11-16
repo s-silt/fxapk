@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.enrichers._ipinfo as _ipinfo_mod
-from apkscan.core.context import AnalysisContext
-from apkscan.core.models import (
+import fxapk.enrichers._ipinfo as _ipinfo_mod
+from fxapk.core.context import AnalysisContext
+from fxapk.core.models import (
     AnalysisConfig,
     CertInfo,
     Component,
@@ -104,7 +104,7 @@ def _no_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _isolate_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unit tests must not discover the developer's installed toolchain or console scripts."""
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     missing = Path(__file__).parent / "__absent_toolchain__"
     monkeypatch.delenv("FXAPK_TOOLCHAIN_FILE", raising=False)
@@ -149,7 +149,7 @@ def _no_real_adb(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
     ★``adb_path`` 自身的单测（test_tools.py）要的正是这个函数的真实行为，
       用 ``@pytest.mark.real_adb_path`` 标记即可退出本夹具。
     """
-    from apkscan.core import tools
+    from fxapk.core import tools
 
     if request.node.get_closest_marker("real_adb_path") is not None:
         return

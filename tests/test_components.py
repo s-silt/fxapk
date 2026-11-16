@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.components import ComponentsAnalyzer
-from apkscan.core.models import (
+from fxapk.analyzers.components import ComponentsAnalyzer
+from fxapk.core.models import (
     AnalyzerResult,
     Component,
     ComponentSet,

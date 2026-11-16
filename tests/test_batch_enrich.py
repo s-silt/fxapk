@@ -19,10 +19,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core import batch_enrich
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.core.registry import BaseEnricher
+from fxapk import cli
+from fxapk.core import batch_enrich
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.core.registry import BaseEnricher
 
 runner = CliRunner()
 
@@ -287,7 +287,7 @@ def test_ledger_rejects_nonfinite_constants_and_overflowing_floats(tmp_path: Pat
 
 
 def test_ndjson_writer_refuses_nonfinite_values(tmp_path: Path) -> None:
-    from apkscan.commands import enrich as enrich_cmd
+    from fxapk.commands import enrich as enrich_cmd
 
     ledger = tmp_path / "enrich.ndjson"
 
@@ -329,7 +329,7 @@ def test_enrich_targets_outer_failure_records_typed_status_for_each_pending_prov
     def explode(*_args, **_kwargs):  # noqa: ANN002, ANN003
         raise RuntimeError("synthetic outer failure")
 
-    monkeypatch.setattr("apkscan.core.enrichment.enrich_selected_targets", explode)
+    monkeypatch.setattr("fxapk.core.enrichment.enrich_selected_targets", explode)
 
     records = batch_enrich.enrich_targets([*targets], [first, second])
 
@@ -514,7 +514,7 @@ def test_cli_dry_run_is_the_default_and_sends_no_request(tmp_path: Path, monkeyp
     """★不加参数就是 dry-run；用会抛的 stub 证明它真的没发请求。"""
     exploding = _ExplodingEnricher()
     exploding.name = "counting_stub"
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [exploding])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [exploding])
 
     result = runner.invoke(
         cli.app,
@@ -537,7 +537,7 @@ def test_cli_dry_run_is_the_default_and_sends_no_request(tmp_path: Path, monkeyp
 
 def test_cli_real_run_writes_csv_and_ndjson(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
 
     result = runner.invoke(
         cli.app,
@@ -579,7 +579,7 @@ def test_cli_resume_skips_completed_targets(tmp_path: Path, monkeypatch) -> None
     """★第二次运行必须一个请求都不发（续跑账本生效）。"""
     listing = _write_targets(tmp_path)
     first = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [first])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [first])
     assert runner.invoke(
         cli.app, ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path), "--no-dry-run"]
     ).exit_code == 0
@@ -587,7 +587,7 @@ def test_cli_resume_skips_completed_targets(tmp_path: Path, monkeypatch) -> None
 
     exploding = _ExplodingEnricher()
     exploding.name = "counting_stub"
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [exploding])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [exploding])
     second = runner.invoke(
         cli.app, ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path), "--no-dry-run"]
     )
@@ -616,7 +616,7 @@ def test_cli_tolerates_corrupt_ledger_when_refreshing_csv(tmp_path: Path, monkey
     listing = _write_targets(tmp_path)
     (tmp_path / "enrich.ndjson").write_text("not-json\n", encoding="utf-8")
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
 
     result = runner.invoke(
         cli.app,
@@ -631,7 +631,7 @@ def test_cli_tolerates_corrupt_ledger_when_refreshing_csv(tmp_path: Path, monkey
 def test_cli_no_resume_requeries(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     listing = _write_targets(tmp_path)
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
     args = ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path), "--no-dry-run"]
     runner.invoke(cli.app, args)
     runner.invoke(cli.app, [*args, "--no-resume"])
@@ -641,7 +641,7 @@ def test_cli_no_resume_requeries(tmp_path: Path, monkeypatch) -> None:  # noqa: 
 def test_cli_max_targets_caps_a_single_run(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     """单次运行上限是多数源不自限频时唯一的兜底闸门。"""
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
 
     result = runner.invoke(
         cli.app,
@@ -667,7 +667,7 @@ def test_cli_max_targets_caps_a_single_run(tmp_path: Path, monkeypatch) -> None:
 
 def test_cli_max_targets_cannot_bypass_absolute_batch_cap(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
 
     result = runner.invoke(
         cli.app,
@@ -699,7 +699,7 @@ def test_cli_active_enrichers_are_never_used(tmp_path: Path, monkeypatch) -> Non
         def enrich(self, ep: Endpoint) -> EnrichmentResult:
             raise AssertionError("主动源绝不能被批量入口调用")
 
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [_ActiveEnricher()])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [_ActiveEnricher()])
 
     result = runner.invoke(
         cli.app,
@@ -751,7 +751,7 @@ def test_cli_rebuilds_csv_from_ledger_when_nothing_is_pending(tmp_path: Path, mo
     """
     listing = _write_targets(tmp_path)
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
     args = ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path), "--no-dry-run"]
     assert runner.invoke(cli.app, args).exit_code == 0
     assert len(stub.calls) == 2
@@ -761,7 +761,7 @@ def test_cli_rebuilds_csv_from_ledger_when_nothing_is_pending(tmp_path: Path, mo
 
     exploding = _ExplodingEnricher()
     exploding.name = "counting_stub"
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [exploding])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [exploding])
     result = runner.invoke(cli.app, args)
 
     assert result.exit_code == 0, result.output
@@ -780,7 +780,7 @@ def test_cli_rebuild_skips_bad_ledger_lines_without_failing(tmp_path: Path, monk
     """重建路径必须容错坏行：坏行只被跳过并计数，好行照常进 CSV。"""
     listing = _write_targets(tmp_path)
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
     args = ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path), "--no-dry-run"]
     assert runner.invoke(cli.app, args).exit_code == 0
 
@@ -810,7 +810,7 @@ def test_cli_does_not_create_empty_csv_when_no_ledger_exists(tmp_path: Path, mon
         name = "needs_key_stub"
         required_env = ("APKSCAN_TEST_MISSING_KEY_FOR_BATCH",)
 
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [_Unconfigured()])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [_Unconfigured()])
     monkeypatch.delenv("APKSCAN_TEST_MISSING_KEY_FOR_BATCH", raising=False)
 
     result = runner.invoke(
@@ -829,7 +829,7 @@ def test_csv_write_is_atomic_and_keeps_old_snapshot_on_failure(tmp_path: Path) -
     完整快照截成半截，而重建源里的 ``failed`` 记录下一轮会**重新花配额查**。
     做法用一个序列化时抛 OSError 的行来触发 DictWriter 写入中途失败。
     """
-    from apkscan.commands import enrich as enrich_cmd
+    from fxapk.commands import enrich as enrich_cmd
 
     csv_path = tmp_path / "enrich.csv"
     good = [{"target": "a"}, {"target": "b"}]
@@ -858,7 +858,7 @@ def test_csv_rebuild_merges_provider_events_for_the_same_target(tmp_path: Path) 
     账本是 append-only：补一个新 key 后重跑，同一个 target 会再追加一条只含新 provider 的记录。
     若按行直出 CSV，同一个目标会出现多行、每行各缺一半列 —— 人工台账无法用。
     """
-    from apkscan.commands import enrich as enrich_cmd
+    from fxapk.commands import enrich as enrich_cmd
 
     ledger = tmp_path / "enrich.ndjson"
     csv_path = tmp_path / "enrich.csv"
@@ -984,7 +984,7 @@ def test_csv_no_record_then_hit_adopts_the_new_payload() -> None:
 
 
 def _ledger_line(target: str, provider: str, status: str = "hit") -> bytes:
-    from apkscan.core.enrichment_profiles import CONTRACTS
+    from fxapk.core.enrichment_profiles import CONTRACTS
     return (
         json.dumps({"target": target, "kind": "ip", "source_status": {provider: status},
                     "source_contracts": {provider: CONTRACTS.get(provider, 1)}}).encode(
@@ -1125,7 +1125,7 @@ def test_ledger_over_limit_is_visible_in_the_cli_summary(
         b"".join(_ledger_line(f"198.51.100.{i}", "counting_stub") for i in range(10))
     )
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
 
     result = runner.invoke(
         cli.app,
@@ -1147,7 +1147,7 @@ def test_cli_recovers_from_bad_bytes_without_requerying(
     listing = _write_targets(tmp_path)
     ledger = tmp_path / "enrich.ndjson"
     first = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [first])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [first])
     assert runner.invoke(
         cli.app,
         ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path), "--no-dry-run"],
@@ -1160,7 +1160,7 @@ def test_cli_recovers_from_bad_bytes_without_requerying(
 
     exploding = _ExplodingEnricher()
     exploding.name = "counting_stub"
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [exploding])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [exploding])
     second = runner.invoke(
         cli.app,
         ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path), "--no-dry-run"],
@@ -1242,7 +1242,7 @@ def test_real_run_fails_closed_before_any_network_call_when_ledger_over_record_c
 
     exploding = _ExplodingEnricher()
     exploding.name = "counting_stub"
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [exploding])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [exploding])
 
     result = runner.invoke(
         cli.app,
@@ -1278,7 +1278,7 @@ def test_real_run_fails_closed_when_ledger_over_byte_cap(
 
     exploding = _ExplodingEnricher()
     exploding.name = "counting_stub"
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [exploding])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [exploding])
 
     result = runner.invoke(
         cli.app,
@@ -1305,7 +1305,7 @@ def test_dry_run_reports_over_limit_but_refuses_to_call_the_budget_trustworthy(
     )
     exploding = _ExplodingEnricher()
     exploding.name = "counting_stub"
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [exploding])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [exploding])
 
     result = runner.invoke(
         cli.app, ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path)]
@@ -1336,7 +1336,7 @@ def test_no_resume_is_the_documented_escape_hatch(
         b"".join(_ledger_line(f"198.51.100.{i}", "counting_stub") for i in range(20))
     )
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
 
     result = runner.invoke(
         cli.app,
@@ -1365,7 +1365,7 @@ def test_healthy_ledger_still_skips_completed_targets_without_requerying(
 
     exploding = _ExplodingEnricher()
     exploding.name = "counting_stub"
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [exploding])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [exploding])
 
     result = runner.invoke(
         cli.app,
@@ -1385,7 +1385,7 @@ def test_dry_run_includes_bad_ledger_lines(tmp_path, monkeypatch):
     listing = _write_targets(tmp_path)
     (tmp_path / "enrich.ndjson").write_bytes(b"not-json\n")
     stub = _CountingEnricher()
-    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    monkeypatch.setattr("fxapk.core.registry.discover_enrichers", lambda: [stub])
     result = runner.invoke(cli.app, ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["ledger_bad_lines_skipped"] == 1

@@ -13,13 +13,13 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.cli import app
-from apkscan.core.models import Report
-from apkscan.core.web_observation_plan import project_plan_for_digest
-from apkscan.core.web_supplement import project_for_digest, summary_line
-from apkscan.core.web_supplement_report import SupplementRefusal, supplement_report
-from apkscan.dynamic import auto
-from apkscan.report.digest import build_digest
+from fxapk.cli import app
+from fxapk.core.models import Report
+from fxapk.core.web_observation_plan import project_plan_for_digest
+from fxapk.core.web_supplement import project_for_digest, summary_line
+from fxapk.core.web_supplement_report import SupplementRefusal, supplement_report
+from fxapk.dynamic import auto
+from fxapk.report.digest import build_digest
 from tests.test_rea_attach import _rea_bundle
 from tests.test_rea_native import _elf, _report, _sha
 from tests.test_rea_review_phase2 import _attach_report, _recover
@@ -233,8 +233,8 @@ def _guard_processes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(subprocess, "run", _refuse)
     monkeypatch.setattr(subprocess, "Popen", _refuse)
-    monkeypatch.setattr("apkscan.core.tools.adb_server_running", lambda: True)
-    monkeypatch.setattr("apkscan.core.tools.kill_adb_server", lambda: None)
+    monkeypatch.setattr("fxapk.core.tools.adb_server_running", lambda: True)
+    monkeypatch.setattr("fxapk.core.tools.kill_adb_server", lambda: None)
     return seen
 
 
@@ -276,19 +276,19 @@ def _invoke_analyze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, dynamic:
         }
     config.write_text(json.dumps(body), encoding="utf-8")
     out = tmp_path / "reports"
-    monkeypatch.setattr("apkscan.cli.load_apk", lambda *a, **k: SimpleNamespace(package_name="app.synthetic", extra_dex_report=None))
-    monkeypatch.setattr("apkscan.core.pipeline.run", lambda *a, **k: _synthetic_report())
-    monkeypatch.setattr("apkscan.cli.device.has_device", lambda: device)
+    monkeypatch.setattr("fxapk.cli.load_apk", lambda *a, **k: SimpleNamespace(package_name="app.synthetic", extra_dex_report=None))
+    monkeypatch.setattr("fxapk.core.pipeline.run", lambda *a, **k: _synthetic_report())
+    monkeypatch.setattr("fxapk.cli.device.has_device", lambda: device)
     if dynamic and device:
-        unpack = importlib.import_module("apkscan.dynamic.unpack")
-        capture = importlib.import_module("apkscan.dynamic.capture")
+        unpack = importlib.import_module("fxapk.dynamic.unpack")
+        capture = importlib.import_module("fxapk.dynamic.capture")
         monkeypatch.setattr(unpack, "run", lambda *a, **k: {"status": "skipped"})
         if pre_observer:
             monkeypatch.setattr(capture, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("pre-observer")))
         else:
             monkeypatch.setattr(capture, "run", lambda *a, **k: {"status": "skipped"})
         monkeypatch.setattr(
-            "apkscan.core.web_supplement_runtime.make_capture_observer",
+            "fxapk.core.web_supplement_runtime.make_capture_observer",
             lambda *a, **k: object(),
         )
     args = ["analyze", str(apk), "--offline", "--fmt", "json", "--out", str(out), "--web-supplement", str(config)]
@@ -362,7 +362,7 @@ def test_d1_auto_device_and_pre_observer(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(auto, "_run_unpack", lambda *a, **k: (
         {"name": "unpack", "status": "skipped", "detail": ""}, [], None,
     ))
-    monkeypatch.setattr("apkscan.dynamic.auto.device.select_target_serial", lambda: None)
+    monkeypatch.setattr("fxapk.dynamic.auto.device.select_target_serial", lambda: None)
     unavailable = auto.run(
         str(apk), out_dir=str(tmp_path / "no-device"), online=False, auto_fix=False,
         three_rounds=False, formats=["json"], web_supplement=str(config),
@@ -371,12 +371,12 @@ def test_d1_auto_device_and_pre_observer(tmp_path: Path, monkeypatch: pytest.Mon
     no_device_report = json.loads((tmp_path / "no-device" / "sample.json").read_text(encoding="utf-8"))
     assert no_device_report["meta"]["web_supplement_runtime"][-1]["deferral"] == "device_unavailable"
 
-    capture = importlib.import_module("apkscan.dynamic.capture")
+    capture = importlib.import_module("fxapk.dynamic.capture")
     monkeypatch.setattr(capture, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("pre-observer")))
-    monkeypatch.setattr("apkscan.core.web_supplement_runtime.make_capture_observer", lambda *a, **k: object())
+    monkeypatch.setattr("fxapk.core.web_supplement_runtime.make_capture_observer", lambda *a, **k: object())
     monkeypatch.setattr(auto, "_ensure_root_frida_server", lambda **_k: None)
     monkeypatch.setattr(auto, "_run_install_app", lambda *a, **k: {"name": "install", "status": "skipped", "detail": ""})
-    monkeypatch.setattr("apkscan.dynamic.auto.device.select_target_serial", lambda: "serial-synthetic")
+    monkeypatch.setattr("fxapk.dynamic.auto.device.select_target_serial", lambda: "serial-synthetic")
     failed = auto.run(
         str(apk), out_dir=str(tmp_path / "pre"), online=False, auto_fix=False,
         three_rounds=False, formats=["json"], web_supplement=str(config),
@@ -399,9 +399,9 @@ def test_d2_runtime_coverage_transports_and_latest_missing_does_not_borrow(
     trace = importlib.import_module("fxapk_rea.trace")
     evidence = importlib.import_module("fxapk_rea.evidence")
     supplement = importlib.import_module("fxapk_rea.supplement")
-    from apkscan.core.web_observation_plan import build_plan
-    from apkscan.core.web_supplement_runtime import apply_verified
-    from apkscan.report.json import _to_jsonable
+    from fxapk.core.web_observation_plan import build_plan
+    from fxapk.core.web_supplement_runtime import apply_verified
+    from fxapk.report.json import _to_jsonable
 
     raw = _envelope([
         _ctx(1, "u1", "FRAME-A", 1),

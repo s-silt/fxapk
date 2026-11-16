@@ -10,15 +10,15 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.core.infra import _matched_infra
-from apkscan.core.models import Endpoint, Evidence, Report
-from apkscan.core.native_handoff import project_native_handoff, reconcile_native_history_item
-from apkscan.core.web_observation_plan import build_agent_handoff, build_plan, clean_coverage
-from apkscan.core.web_supplement import _record, project_for_digest
-from apkscan.core.web_supplement_preservation import project_attempts
-from apkscan.core.web_supplement_report import SupplementRefusal, _align_native_history_item
-from apkscan.report.digest import build_digest
-from apkscan.report.json import _to_jsonable
+from fxapk.core.infra import _matched_infra
+from fxapk.core.models import Endpoint, Evidence, Report
+from fxapk.core.native_handoff import project_native_handoff, reconcile_native_history_item
+from fxapk.core.web_observation_plan import build_agent_handoff, build_plan, clean_coverage
+from fxapk.core.web_supplement import _record, project_for_digest
+from fxapk.core.web_supplement_preservation import project_attempts
+from fxapk.core.web_supplement_report import SupplementRefusal, _align_native_history_item
+from fxapk.report.digest import build_digest
+from fxapk.report.json import _to_jsonable
 from tests.test_rea_trace_extended import _call, _ctx, _envelope, _parsed, _request, _source
 
 @pytest.fixture
@@ -421,7 +421,7 @@ def test_url_host_and_private_ip_do_not_cover_native_gap(monkeypatch) -> None:  
 
     from unittest.mock import patch
 
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     with patch.object(infra, "_matched_infra", side_effect=matched):
         for endpoint in (sdk, loopback, private_ip):

@@ -1,4 +1,4 @@
-from apkscan.report.digest import build_digest
+from fxapk.report.digest import build_digest
 
 
 def test_capture_safety_digest_does_not_export_private_artifacts_or_prove_causality():

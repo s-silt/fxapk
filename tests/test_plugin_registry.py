@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from apkscan.plugins import registry
+from fxapk.plugins import registry
 
 
 def test_discovery_ignores_unlisted_entry_point(monkeypatch) -> None:
@@ -209,7 +209,7 @@ def test_register_plugin_clis_and_web_supplement_share_rea_opt_in(monkeypatch, o
     import typer
     from typer.testing import CliRunner
 
-    from apkscan.core.web_supplement import _plugin
+    from fxapk.core.web_supplement import _plugin
 
     calls = {"load": 0, "register": 0, "run": 0}
 

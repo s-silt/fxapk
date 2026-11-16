@@ -11,9 +11,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from apkscan.core.models import Report
-from apkscan.dynamic import merge
-from apkscan.dynamic.capture import _flow_meta, _message_from_flow
+from fxapk.core.models import Report
+from fxapk.dynamic import merge
+from fxapk.dynamic.capture import _flow_meta, _message_from_flow
 
 
 class _Req:

@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from apkscan.core.proctree import run_owned
+from fxapk.core.proctree import run_owned
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="本机只验收 Windows 作业限额")
 

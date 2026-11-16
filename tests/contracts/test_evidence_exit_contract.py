@@ -5,21 +5,21 @@ from __future__ import annotations
 import json
 import base64
 
-from apkscan.analyzers.dns_bypass import DnsBypassAnalyzer
-from apkscan.analyzers.firebase import FirebaseAnalyzer
-from apkscan.analyzers.manifest import ManifestAnalyzer
-from apkscan.analyzers.packing import PackingAnalyzer
-from apkscan.analyzers.re_toolkit import ReToolkitAnalyzer
-from apkscan.analyzers.web_evidence import WebRedirectChainAnalyzer, WebRequestRecipeAnalyzer
-from apkscan.analyzers.webview_jsbridge import WebViewJsBridgeAnalyzer
-from apkscan.config.chain import build_control_chains
-from apkscan.core.evidence_exit_contract import (
+from fxapk.analyzers.dns_bypass import DnsBypassAnalyzer
+from fxapk.analyzers.firebase import FirebaseAnalyzer
+from fxapk.analyzers.manifest import ManifestAnalyzer
+from fxapk.analyzers.packing import PackingAnalyzer
+from fxapk.analyzers.re_toolkit import ReToolkitAnalyzer
+from fxapk.analyzers.web_evidence import WebRedirectChainAnalyzer, WebRequestRecipeAnalyzer
+from fxapk.analyzers.webview_jsbridge import WebViewJsBridgeAnalyzer
+from fxapk.config.chain import build_control_chains
+from fxapk.core.evidence_exit_contract import (
     EVIDENCE_EXITS, EVIDENCE_UNIT_INVENTORY, EXPECTED_GAPS, GapKind,
     SCENARIO_TESTS, SIGNAL_KEYS_OUTSIDE_EVIDENCE_CONTRACT,
     validate_evidence_exit_contract,
 )
-from apkscan.core.models import Evidence, Finding, Report, Severity
-from apkscan.dynamic import merge
+from fxapk.core.models import Evidence, Finding, Report, Severity
+from fxapk.dynamic import merge
 from tests.conftest import FakeContext
 
 
@@ -78,7 +78,7 @@ def test_signal_key_scope_cannot_widen_silently() -> None:
     证据契约因「不在人工清单里」看不见它，三类 gap 仍全零。两道门都过，
     而那个信号其实没到任何人眼前。
     """
-    from apkscan.core.meta_contract import META_CATEGORY_SIGNAL, META_KEY_REGISTRY
+    from fxapk.core.meta_contract import META_CATEGORY_SIGNAL, META_KEY_REGISTRY
 
     signal_keys = {
         key for key, contract in META_KEY_REGISTRY.items()
@@ -167,7 +167,7 @@ def test_digest_names_the_findings_it_omits() -> None:
     本轮补的三条 LOW 出口在默认 digest 里只体现为 omitted 计数——
     按本仓「决策只读 digest」的契约，那等于没到决策面。
     """
-    from apkscan.report.digest import build_digest
+    from fxapk.report.digest import build_digest
 
     report = {
         "meta": {},
@@ -213,7 +213,7 @@ def test_absolute_path_entries_actually_reach_rendered_html() -> None:
     证明的是「值到达了对象」。实测发现 Finding 的 evidences 在 HTML 与 digest
     都不渲染——只放那里的值，任何出口都看不到。本条渲染真 HTML 后查值。
     """
-    from apkscan.report.html import render_to_string
+    from fxapk.report.html import render_to_string
 
     result = PackingAnalyzer().analyze(FakeContext(files={"/tmp/note.txt": b"x"}))
     report = Report(
@@ -245,7 +245,7 @@ def test_finding_evidences_are_rendered_in_html() -> None:
     id/severity/title，letters 只读 Lead——值到了对象、到不了人。
     逐个把值搬进 description 是打地鼠，正解是让这个字段有出口。
     """
-    from apkscan.report.html import (
+    from fxapk.report.html import (
         _FINDING_EVIDENCE_HTML_MAX, _FINDING_EVIDENCE_PREVIEW, render_to_string,
     )
 
@@ -286,7 +286,7 @@ def test_decoy_finding_does_not_promise_a_list_it_does_not_have() -> None:
 
     承诺一份并不存在的清单比不给更坏：分析员会以为自己已经查全了。
     """
-    from apkscan.analyzers.packing import _DECOY_EVIDENCE_CAP
+    from fxapk.analyzers.packing import _DECOY_EVIDENCE_CAP
 
     # ★上限本身要钉住量级，否则下面全按常量取值、把它调回 5 也照样绿。
     #   本文件的 docstring 记着实测样本 153+153+105=411 条——比已知实测量级还小的上限，
@@ -320,12 +320,12 @@ def test_evidence_values_survive_real_pipeline_and_json_roundtrip() -> None:
     """
     import json as _json
 
-    from apkscan.core import pipeline
-    from apkscan.core.models import AnalysisConfig
-    from apkscan.report import json as report_json
-    from apkscan.core.report_io import report_from_dict
-    from apkscan.report.digest import build_digest
-    from apkscan.report.html import render_to_string
+    from fxapk.core import pipeline
+    from fxapk.core.models import AnalysisConfig
+    from fxapk.report import json as report_json
+    from fxapk.core.report_io import report_from_dict
+    from fxapk.report.digest import build_digest
+    from fxapk.report.html import render_to_string
 
     report = pipeline.run(
         FakeContext(files={"/classes2.dex/picture.png": b"x"}), AnalysisConfig(online=False)
@@ -449,7 +449,7 @@ def test_control_chain_relation_reaches_digest() -> None:
     """
     from types import SimpleNamespace
 
-    from apkscan.report.digest import build_digest
+    from fxapk.report.digest import build_digest
 
     endpoint = SimpleNamespace(
         value="backend.example.com",

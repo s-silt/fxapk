@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import apkscan.commands.phase2 as cli
+import fxapk.commands.phase2 as cli
 from tests.phase2_fixtures import write_verified_package
 
 

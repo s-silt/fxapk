@@ -1,4 +1,4 @@
-"""P4-A 红态契约：apkscan/core/recognition_labels.py（多任务标签契约）。
+"""P4-A 红态契约：fxapk/core/recognition_labels.py（多任务标签契约）。
 
 核心不变量（设计见本地 P4 v2 spec §1/§6）：
 - 五种记录 kind、closed-world 字段集、严格 JSONL；
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import recognition_labels as rlabels
+from fxapk.core import recognition_labels as rlabels
 
 HEX_A = "a" * 64
 HEX_B = "b" * 64

@@ -10,7 +10,7 @@ import random
 import re
 import time
 
-from apkscan.config.string_graph import (
+from fxapk.config.string_graph import (
     SUPPRESSION_PARAM_TABLE,
     SUPPRESSION_THIRD_PARTY,
     StringChain,
@@ -319,7 +319,7 @@ def test_full_ciphertext_not_truncated() -> None:
 
 def test_ai_decrypt_lead_finding_and_meta_candidates(tmp_path) -> None:
     """jadx 集成：改名 helper 案例 → 'AI 辅助解密线索' Finding（证据带完整密文）+ meta.decrypt_candidates。"""
-    from apkscan.analyzers.jadx import _FINDING_STRING_CHAIN, JadxAnalyzer
+    from fxapk.analyzers.jadx import _FINDING_STRING_CHAIN, JadxAnalyzer
 
     (tmp_path / "C.java").write_text(
         f'public void run() {{ String u = AbstractC0421d.m1136x("{_CT}"); }}', encoding="utf-8")
@@ -338,8 +338,8 @@ def test_ai_decrypt_lead_finding_and_meta_candidates(tmp_path) -> None:
 
 def test_jadx_scan_java_emits_string_chain_finding(tmp_path) -> None:
     """jadx 集成：喂 .java 给 _scan_java（不跑真 jadx），产 STRING-CHAIN-DECRYPT Finding 且诚实标注。"""
-    from apkscan.analyzers.jadx import _FINDING_STRING_CHAIN, JadxAnalyzer
-    from apkscan.core.models import FINDING_KIND_INFERENCE, Confidence
+    from fxapk.analyzers.jadx import _FINDING_STRING_CHAIN, JadxAnalyzer
+    from fxapk.core.models import FINDING_KIND_INFERENCE, Confidence
 
     (tmp_path / "C.java").write_text(
         f'public class C {{ public String d() {{ String x = "{_SECRET}"; '
@@ -359,9 +359,9 @@ def test_scan_java_scope_budget_counted_in_suppressed(monkeypatch, tmp_path) -> 
 
     analyze 把这份 dict 原样写入 ``result.meta["decrypt_candidates_suppressed"]``。
     """
-    from apkscan.analyzers.jadx import JadxAnalyzer
+    from fxapk.analyzers.jadx import JadxAnalyzer
 
-    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
+    monkeypatch.setattr("fxapk.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
     java = "void big(){" + ("y" * 4_000) + "}" + _aes_method("z", _SECRET)
     (tmp_path / "C.java").write_text(java, encoding="utf-8")
     outcome = JadxAnalyzer()._scan_java(tmp_path)
@@ -589,7 +589,7 @@ def test_transformation_rule_does_not_swallow_base64_payloads() -> None:
     import base64
     import hashlib
 
-    from apkscan.config.string_graph import _is_transformation
+    from fxapk.config.string_graph import _is_transformation
 
     caught = []
     checked = 0
@@ -837,7 +837,7 @@ def test_empty_method_prefix_cannot_crowd_out_decrypt_method() -> None:
 
 def test_byte_budget_keeps_small_method_inside_large_outer(monkeypatch) -> None:
     """大外层包住小解密方法：字节预算按 body 升序，小方法先算，截断记 1。"""
-    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
+    monkeypatch.setattr("fxapk.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
     small = _aes_method("z", _SECRET)
     src = "void outer(){" + ("x" * 4_000) + small + "}"
     stats: dict[str, int] = {}
@@ -850,7 +850,7 @@ def test_byte_budget_keeps_small_method_inside_large_outer(monkeypatch) -> None:
 
 def test_byte_budget_keeps_small_sibling_after_large_block(monkeypatch) -> None:
     """大嵌套块在前、兄弟小解密方法在后：小方法仍被检出，截断记 1。"""
-    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
+    monkeypatch.setattr("fxapk.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
     src = "void big(){" + ("y" * 4_000) + "}" + _aes_method("z", _SECRET)
     stats: dict[str, int] = {}
     chains = scan_java_source(src, "loc", stats=stats)

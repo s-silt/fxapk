@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.remote_config import RemoteConfigAnalyzer
-from apkscan.config.discover import DiscoveryRules, classify_config_url
-from apkscan.core.models import LeadCategory
+from fxapk.analyzers.remote_config import RemoteConfigAnalyzer
+from fxapk.config.discover import DiscoveryRules, classify_config_url
+from fxapk.core.models import LeadCategory
 
 _RULES = DiscoveryRules.load()
 

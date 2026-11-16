@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.analyzers.js_bundle import (
+from fxapk.analyzers.js_bundle import (
     FINDING_AES_KEY,
     FINDING_APPID,
     FINDING_JWT,
@@ -29,7 +29,7 @@ from apkscan.analyzers.js_bundle import (
     FRAMEWORK_UNKNOWN,
     JsBundleAnalyzer,
 )
-from apkscan.core.models import AnalyzerResult, Severity
+from fxapk.core.models import AnalyzerResult, Severity
 
 from tests.conftest import FakeContext
 
@@ -374,7 +374,7 @@ def test_large_bundle_secret_after_8mb_not_dropped() -> None:
 
 def test_url_across_chunk_boundary_not_split() -> None:
     """跨 4MB 块边界的 URL 字面量被块间重叠完整抽到，不被切断。"""
-    from apkscan.analyzers.js_bundle import _SCAN_CHUNK_BYTES
+    from fxapk.analyzers.js_bundle import _SCAN_CHUNK_BYTES
 
     url = "https://boundary-c2.example.test/path"
     lit = f"var u='{url}';"
@@ -388,7 +388,7 @@ def test_url_across_chunk_boundary_not_split() -> None:
 
 def test_overlap_does_not_double_count_endpoint() -> None:
     """落在重叠窗内的端点被相邻两块各扫一次，collector 去重后仍只产 1 个端点。"""
-    from apkscan.analyzers.js_bundle import _SCAN_CHUNK_BYTES, _SCAN_OVERLAP_CHARS
+    from fxapk.analyzers.js_bundle import _SCAN_CHUNK_BYTES, _SCAN_OVERLAP_CHARS
 
     url = "https://dedup-c2.example.test/x"
     lit = f"var u='{url}';"
@@ -406,7 +406,7 @@ def test_large_bundle_no_truncation_warning(caplog) -> None:  # type: ignore[no-
 
     pad = b"y" * (9 * 1024 * 1024)
     blob = pad + b"\nvar u='https://q.fraud.cn/a';\n"
-    with caplog.at_level(logging.WARNING, logger="apkscan.analyzers.js_bundle"):
+    with caplog.at_level(logging.WARNING, logger="fxapk.analyzers.js_bundle"):
         _analyze({_UNIAPP_PATH: blob})
     assert not any("仅扫前段" in r.message or "文件超过上限" in r.message for r in caplog.records)
 
@@ -440,8 +440,8 @@ def test_forged_vendor_filename_cannot_suppress_real_backend() -> None:
     ★必须走 ``_analyze`` → ``build_endpoint_leads`` 真链路：原先那版直接手工构造
       ``advice="建议调证"``，绕开了 tier → advice 这一段，等于没验到本条声称的场景。
     """
-    from apkscan.core import infra
-    from apkscan.core.leads import build_endpoint_leads
+    from fxapk.core import infra
+    from fxapk.core.leads import build_endpoint_leads
 
     js = f'var rpc="https://{_VENDOR_IP_A}:8545/rpc";var bare="{_VENDOR_IP_B}";'.encode()
     forged = {ep.value: ep for ep in _analyze({_VENDOR_PATH: js}).endpoints}
@@ -472,9 +472,9 @@ def test_runtime_observed_ip_not_downgraded_by_vendor_tier() -> None:
     ★这条防的是最贵的那类错：涉诈后端 IP 恰好也被某个第三方库当公共节点写死，或攻击者
       刻意把业务 bundle 命名成 chunk-vendors。只要 pcap 里真有连接，就不该被静态出处压低。
     """
-    from apkscan.core import infra
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
+    from fxapk.core import infra
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
 
     ep = Endpoint(
         value=_VENDOR_IP_A, kind="ip", is_private=False,
@@ -494,9 +494,9 @@ def test_runtime_derived_source_does_not_exempt_ip_tier_downgrade() -> None:
       后者会把「只证明出现在 runtime 报告里」的 runtime-derived 也当实连证据放行。
       复审实测把口径突变回 startswith 后全仓仍绿——本条就是补上的那把锁。
     """
-    from apkscan.core import infra
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
+    from fxapk.core import infra
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
 
     # 前置断言：夹具用的来源必须真的不在严格口径里，否则本条锁的差集不存在
     assert "runtime-derived" not in OBSERVED_CONTACT_SOURCES
@@ -519,9 +519,9 @@ def test_runtime_observed_domain_not_downgraded_by_vendor_tier() -> None:
       「待核」，于是 `is_runtime_contact` 徽标标着实连、advice 却是待核，出口自相矛盾，
       且 runtime-first 的闭环候选被 `targets.py` 的 advice 门直接挡掉。
     """
-    from apkscan.core import infra
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
+    from fxapk.core import infra
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
 
     def _lead(source: str):
         ep = Endpoint(
@@ -544,9 +544,9 @@ def test_runtime_observed_domain_not_downgraded_by_vendor_tier() -> None:
 
 def test_bulk_string_ip_is_tier_demoted_at_lead_level() -> None:
     """bulk-string 档的 IP 同样降待核并留墓碑（超大字符串表里的 IP 常量）。"""
-    from apkscan.core import infra
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import Endpoint, Evidence
+    from fxapk.core import infra
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import Endpoint, Evidence
 
     ep = Endpoint(
         value=_VENDOR_IP_A, kind="ip", is_private=False,
@@ -565,9 +565,9 @@ def test_non_investigate_ip_with_vendor_tier_gets_no_tombstone() -> None:
     删掉 `_ip_lead` 里 `advice == ADVICE_INVESTIGATE` 前置后本条变红：
     无需调证的 lead 会带上 source_tier 墓碑 + LOW，是出口可见的噪音。
     """
-    from apkscan.core import infra
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import Endpoint, Evidence
+    from fxapk.core import infra
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import Endpoint, Evidence
 
     ep = Endpoint(
         value="192.168.10.9", kind="ip", is_private=True,
@@ -587,9 +587,9 @@ def test_tier_demoted_lead_gets_no_forensic_paths() -> None:
       即取证路径追加——差集为空说明降档 lead 也被追加了（突变生效的形态）。
       域名侧同一突变面，一并锁。
     """
-    from apkscan.core import infra
-    from apkscan.core.leads import build_endpoint_leads
-    from apkscan.core.models import Endpoint, Evidence
+    from fxapk.core import infra
+    from fxapk.core.leads import build_endpoint_leads
+    from fxapk.core.models import Endpoint, Evidence
 
     def _lead(kind: str, value: str, tier: str):
         ep = Endpoint(
@@ -620,7 +620,7 @@ def test_flat_vendor_bundle_names_are_hint_only_not_tier() -> None:
       就能让真后端确定性退出闭环——误判方向对对手有利。现由 closure 的同源去拥塞治拥塞
       （不看名字），basename 只在同档内影响排序。见 infra.name_vendor_hint。
     """
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     for loc in ("chunk-vendors.deadbeef.js", "evidence/chunk-vendors.abc.js",
                 "vendors~main.1a2b.js", "vendor.9f8e.js"):
@@ -638,7 +638,7 @@ def test_js_bundle_web_platform_keeps_site_own_minified_code_at_app_tier() -> No
       但判据此前恒用 context="apk"，站点自有的 main.min.js 里的后端会被判 library-file。
       这条锁的是判据语境按 ctx.platform 穿透到 `_scan_literal`。
     """
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     body = f'var api="https://api.fraud-x.cn/a";var n="{_VENDOR_IP_A}";'.encode()
     web_by = {ep.value: ep for ep in _analyze({"web/static/js/main.min.js": body}, platform="web").endpoints}
@@ -660,7 +660,7 @@ def test_web_context_keeps_site_own_minified_code_at_app_tier() -> None:
       资源路径又常含 ``/dist/``。若照搬，涉诈站自有后端会被整批降成待核——不发调证函、
       不进闭环、不做 ICP/WHOIS 富化，是**漏报**方向的误伤，比误报贵得多。
     """
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     # web 语境：站点自有代码保持最高档
     for loc in ("static/js/app.a1b2.min.js", "js/main.min.js",
@@ -677,7 +677,7 @@ def test_web_context_keeps_site_own_minified_code_at_app_tier() -> None:
 
 def test_basename_globs_do_not_traverse_directories() -> None:
     """vendor 文件名判据只比 basename——``fnmatch`` 的 ``*`` 跨 ``/``，写成全路径模式会整树降档。"""
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     for loc in ("assets/vendor.min/app.business.js",  # 目录恰好叫 vendor.min
                 "vendor.abc/deep/path/app.js",

@@ -1,6 +1,6 @@
-from apkscan.core.closure.layers import _request_layer
-from apkscan.core.source_catalog import source_lineage_summary
-from apkscan.core.source_semantics import source_contexts
+from fxapk.core.closure.layers import _request_layer
+from fxapk.core.source_catalog import source_lineage_summary
+from fxapk.core.source_semantics import source_contexts
 
 
 def test_same_publisher_is_not_independent_and_unknown_is_not_assumed():

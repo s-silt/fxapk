@@ -6,10 +6,10 @@ from typing import Any
 
 import pytest
 
-from apkscan.dynamic.pcap_ingest import DnsRecord, Flow, PcapSummary
-from apkscan.dynamic.tshark_backend import HttpRequest
-from apkscan.network import NetworkEntityType
-from apkscan.network.converters import (
+from fxapk.dynamic.pcap_ingest import DnsRecord, Flow, PcapSummary
+from fxapk.dynamic.tshark_backend import HttpRequest
+from fxapk.network import NetworkEntityType
+from fxapk.network.converters import (
     ConversionResult,
     convert_http_requests,
     convert_mitmproxy_flows,

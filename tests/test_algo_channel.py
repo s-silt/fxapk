@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from datetime import date
 
-from apkscan.config.algo_channel import date_window, md5_date_subdomains
+from fxapk.config.algo_channel import date_window, md5_date_subdomains
 
 
 def _md5(s: str) -> str:
@@ -59,7 +59,7 @@ def test_md5_works_under_fips_restricted_hashlib() -> None:
             raise ValueError("[digital envelope routines] unsupported (FIPS mode)")
         return real_md5(data)
 
-    import apkscan.config.algo_channel as mod
+    import fxapk.config.algo_channel as mod
 
     orig = mod.hashlib
     try:
@@ -90,7 +90,7 @@ def test_empty_domain_or_robust() -> None:
 def test_cli_config_channel() -> None:
     from typer.testing import CliRunner
 
-    from apkscan import cli
+    from fxapk import cli
 
     r = CliRunner().invoke(cli.app, [
         "config-channel", "--prefix", "PREFIX-000-", "--domain", "example-synthetic.test",

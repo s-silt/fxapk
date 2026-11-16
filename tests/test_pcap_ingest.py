@@ -1,4 +1,4 @@
-"""apkscan.dynamic.pcap_ingest 的单测。
+"""fxapk.dynamic.pcap_ingest 的单测。
 
 pcap_ingest 吃一个**带外抓的 pcap**（网关 tcpdump / PCAPdroid 免 root 导出），即使 TLS 解不开、
 是 MTProto/native 自建协议，也从裸包里抽出 **接入节点 IP:port + TLS SNI + DNS 查询**，按 LeadCategory
@@ -8,15 +8,15 @@ pcap_ingest 吃一个**带外抓的 pcap**（网关 tcpdump / PCAPdroid 免 root
 """
 
 from __future__ import annotations
-from apkscan.core import atomic as atomic_io
+from fxapk.core import atomic as atomic_io
 
 import json
 import struct
 
 import pytest
 
-from apkscan.core.models import Confidence, LeadCategory
-from apkscan.dynamic import pcap_ingest
+from fxapk.core.models import Confidence, LeadCategory
+from fxapk.dynamic import pcap_ingest
 
 
 # ---------- 按 pcap/Ethernet/IP/TCP/UDP/TLS/DNS 规范 craft 最小有效字节 ----------
@@ -617,7 +617,7 @@ def test_intercept_exclusion_is_reported_separately_from_no_payload() -> None:
       在报告里完全看不出来——名单若哪天收错（某 IP 改作普通业务地址并被后端租用），
       静默丢弃会让人永远发现不了。
     """
-    from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS
+    from fxapk.network.fingerprints import KNOWN_INTERCEPT_IPS
 
     intercept = sorted(KNOWN_INTERCEPT_IPS)[0]
     # 拦截节点带**双向载荷**：证明它不是靠「无载荷」那条判据被滤掉的
@@ -806,7 +806,7 @@ def test_target_attributed_count_is_real_not_endpoint_total(tmp_path) -> None:
 
     这里构造「有归因表、但该端点不属目标」，断言计数是 0 而不是端点数。
     """
-    from apkscan.core import runtime_inventory as inv
+    from fxapk.core import runtime_inventory as inv
 
     p = tmp_path / "report.json"
     p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
@@ -826,7 +826,7 @@ def test_target_attributed_count_is_real_not_endpoint_total(tmp_path) -> None:
 
 def test_target_attributed_count_counts_only_the_real_ones(tmp_path) -> None:
     """归目标的算 1 个，不属目标的不算——两者同时存在时也要分得清。"""
-    from apkscan.core import runtime_inventory as inv
+    from fxapk.core import runtime_inventory as inv
 
     p = tmp_path / "report.json"
     p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
@@ -841,7 +841,7 @@ def test_target_attributed_count_counts_only_the_real_ones(tmp_path) -> None:
 
 def test_no_attribution_keeps_count_zero(tmp_path) -> None:
     """没做归因 → 恒 0（既有语义，闭环上限 partial）。"""
-    from apkscan.core import runtime_inventory as inv
+    from fxapk.core import runtime_inventory as inv
 
     p = tmp_path / "report.json"
     p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
@@ -1313,7 +1313,7 @@ def test_ingest_and_advice_calibers_differ_on_purpose() -> None:
     ★谁要是把 ``_ip_public`` "顺手"改成 ``is_global``，这条会红——那不是笔误，
       是会破坏 pcap/probe 并集口径的改动，须连同 probe 侧一起重新设计。
     """
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     cgnat = "100.64.7.14"
     assert pcap_ingest._ip_public(cgnat) is True, "摄取层：CGNAT 是远端，应被收下"
@@ -1343,8 +1343,8 @@ def test_parse_error_with_zero_flows_reaches_meta_and_closure(tmp_path) -> None:
 
     突变：把 elif 补偿块删掉 → meta 无 inventory → 闭环把空当零流量 → 本测试红。
     """
-    from apkscan.core.closure.gates import evaluate_capture_quality
-    from apkscan.core.runtime_inventory import (
+    from fxapk.core.closure.gates import evaluate_capture_quality
+    from fxapk.core.runtime_inventory import (
         INVENTORY_META_KEY,
         derive_capture_quality,
         read_inventory,

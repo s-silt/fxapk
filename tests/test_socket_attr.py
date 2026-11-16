@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from apkscan.dynamic import socket_attr
+from fxapk.dynamic import socket_attr
 
 # 合成 uid_sockets.txt（capture 抓的格式）：目标 app uid=10234；
 #   /proc/net/tcp 两条：1.2.3.4:443 属 uid 10234（真后端），8.8.8.8:53 属 uid 0（系统 DNS，噪音）。

@@ -1,6 +1,6 @@
 # fxapk 仓库指令（Copilot code review 与 coding agent 通用）
 
-fxapk 是 APK 静态/动态分析 CLI（Python 3.11+，发行包名 `fxapk`，导入包名 `apkscan`）。审查与写代码时按下列
+fxapk 是 APK 静态/动态分析 CLI（Python 3.11+，发行名、命令名和导入包名都是 `fxapk`）。审查与写代码时按下列
 优先级执行；**数据红线 > 正确性 > 工程约定**。
 
 ## 数据红线（逐行严查新增内容）

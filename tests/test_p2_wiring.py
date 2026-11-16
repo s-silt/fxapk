@@ -14,11 +14,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from apkscan.core import corpus, regress, visibility
-from apkscan.core.closure import _refresh_visibility
-from apkscan.core.infra import ADVICE_INVESTIGATE
-from apkscan.core.models import Confidence, Endpoint, Evidence, Lead, LeadCategory, Report
-from apkscan.dynamic import merge
+from fxapk.core import corpus, regress, visibility
+from fxapk.core.closure import _refresh_visibility
+from fxapk.core.infra import ADVICE_INVESTIGATE
+from fxapk.core.models import Confidence, Endpoint, Evidence, Lead, LeadCategory, Report
+from fxapk.dynamic import merge
 
 
 def _report(**meta: Any) -> Report:
@@ -234,7 +234,7 @@ def test_native_obfuscation_finding_and_visibility_agree() -> None:
 
     锁的是分析器产出形状与消费方读法之间的契约，改任一边而不改另一边即红。
     """
-    from apkscan.analyzers.native_obfuscation import NativeObfuscationAnalyzer
+    from fxapk.analyzers.native_obfuscation import NativeObfuscationAnalyzer
 
     analyzer = NativeObfuscationAnalyzer()
     fake_meta = {"native_obfuscation": [{"path": "lib/x/libz.so"}]}

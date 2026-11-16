@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.models import Report
-from apkscan.dynamic import auto, capture, cryptohook
-from apkscan.dynamic.capture_sequence import run_rounds, targeted_hooks
+from fxapk.core.models import Report
+from fxapk.dynamic import auto, capture, cryptohook
+from fxapk.dynamic.capture_sequence import run_rounds, targeted_hooks
 
 
 def report():
@@ -99,7 +99,7 @@ def test_auto_unpacks_then_runs_three_rounds_and_merges_each(tmp_path, monkeypat
 
 
 def test_round_namespace_preserves_same_coordinate_from_different_captures(tmp_path, monkeypatch):
-    from apkscan.dynamic import merge
+    from fxapk.dynamic import merge
 
     observed = []
 
@@ -137,7 +137,7 @@ def test_round_namespace_preserves_same_coordinate_from_different_captures(tmp_p
 
 def test_two_rounds_can_complement_ciphertext_and_recipe_without_editing_raw(tmp_path):
     import hashlib
-    from apkscan.dynamic.capture_sequence import complement_decryption
+    from fxapk.dynamic.capture_sequence import complement_decryption
     from tests.test_merge import _c5b_encrypt_fixed_iv, _C5B_KEY
     key, iv = _C5B_KEY, "abcdefghijklmnop"
     plain = '{"url":"https://api.example.test/v1"}'
@@ -169,7 +169,7 @@ def test_two_rounds_can_complement_ciphertext_and_recipe_without_editing_raw(tmp
 
 
 def test_cross_round_decrypt_requires_original_sample_identity():
-    from apkscan.dynamic.capture_sequence import complement_decryption
+    from fxapk.dynamic.capture_sequence import complement_decryption
     rep = report()
     result = complement_decryption(rep, [])
     assert result["status"] == "not_attempted"

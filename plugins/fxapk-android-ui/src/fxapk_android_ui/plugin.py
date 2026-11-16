@@ -13,10 +13,10 @@ from typing import Any
 
 import typer
 
-from apkscan.core.atomic import atomic_create_bytes
-from apkscan.core.integrity import sha256_file
-from apkscan.dynamic.actions import AndroidActions, validate_action
-from apkscan.plugins.contracts import PLUGIN_API_VERSION, CaptureRoundContext, ExternalEvidenceAttachment
+from fxapk.core.atomic import atomic_create_bytes
+from fxapk.core.integrity import sha256_file
+from fxapk.dynamic.actions import AndroidActions, validate_action
+from fxapk.plugins.contracts import PLUGIN_API_VERSION, CaptureRoundContext, ExternalEvidenceAttachment
 
 from .android_cli import AndroidCli, CommandResult
 

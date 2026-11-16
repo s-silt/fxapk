@@ -6,10 +6,10 @@ infra.classify_domain（离线纯函数）：evilbackend.* → 建议调证、fi
 
 from __future__ import annotations
 
-from apkscan.analyzers.admin_panel import AdminPanelAnalyzer
-from apkscan.core import infra
-from apkscan.core.models import Confidence, LeadCategory
-from apkscan.report.letters import build_letters
+from fxapk.analyzers.admin_panel import AdminPanelAnalyzer
+from fxapk.core import infra
+from fxapk.core.models import Confidence, LeadCategory
+from fxapk.report.letters import build_letters
 
 
 class _Ctx:

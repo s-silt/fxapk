@@ -7,17 +7,17 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core.recognition_evaluation import (
+from fxapk.core.recognition_evaluation import (
     ClueCandidate,
     RecognitionEvaluationError,
     evaluate_clues,
     evaluate_groups,
 )
-from apkscan.core.recognition_labels import (
+from fxapk.core.recognition_labels import (
     RecognitionLabelRecord,
     RecognitionLabelSet,
 )
-from apkscan.core.recognition_training import SplitConfig, build_split_manifest
+from fxapk.core.recognition_training import SplitConfig, build_split_manifest
 
 SHA_A = "aa" * 32
 SHA_B = "bb" * 32

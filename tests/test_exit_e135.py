@@ -14,11 +14,11 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.models import Report
-from apkscan.core.report_delivery import ReportDelivery
-from apkscan.dynamic.cancel import AutoCancelled, CANCEL_EXIT_CODE
-from apkscan.dynamic import auto
+from fxapk import cli
+from fxapk.core.models import Report
+from fxapk.core.report_delivery import ReportDelivery
+from fxapk.dynamic.cancel import AutoCancelled, CANCEL_EXIT_CODE
+from fxapk.dynamic import auto
 
 runner = CliRunner()
 
@@ -44,19 +44,19 @@ def _stub_analyze(monkeypatch: pytest.MonkeyPatch) -> None:
             package_name="invalid.example.synthetic", extra_dex_report=None
         ),
     )
-    monkeypatch.setattr("apkscan.core.pipeline.run", lambda *_a, **_k: _report())
+    monkeypatch.setattr("fxapk.core.pipeline.run", lambda *_a, **_k: _report())
 
 
 def _stub_auto_pipeline(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """静态报告可写出；设备动作与闭环都换成计数桩。"""
-    import apkscan.core.apk as apk_mod
-    import apkscan.core.pipeline as pipeline_mod
-    import apkscan.dynamic.capture as capture_mod
-    import apkscan.dynamic.doctor as doctor_mod
-    import apkscan.dynamic.provision as provision_mod
-    import apkscan.dynamic.repackage as repackage_mod
-    import apkscan.dynamic.unpack as unpack_mod
-    from apkscan.core import closure
+    import fxapk.core.apk as apk_mod
+    import fxapk.core.pipeline as pipeline_mod
+    import fxapk.dynamic.capture as capture_mod
+    import fxapk.dynamic.doctor as doctor_mod
+    import fxapk.dynamic.provision as provision_mod
+    import fxapk.dynamic.repackage as repackage_mod
+    import fxapk.dynamic.unpack as unpack_mod
+    from fxapk.core import closure
 
     counts = {"capture": 0, "closure": 0, "repackage": 0, "merge": 0}
 
@@ -114,7 +114,7 @@ def _stub_auto_pipeline(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
 def test_dynamic_cli_rejects_non_contract_status(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str, payload: object, expected: int
 ) -> None:
-    module = __import__(f"apkscan.dynamic.{command}", fromlist=["run"])
+    module = __import__(f"fxapk.dynamic.{command}", fromlist=["run"])
     monkeypatch.setattr(module, "run", lambda *_a, **_k: payload)
     monkeypatch.setattr(cli, "_adb_owned_at_start", lambda: False)
     cleaned = {"n": 0}
@@ -136,7 +136,7 @@ def test_analyze_json_oserror_is_not_success(
     def _boom(*_a, **_k):
         raise OSError("synthetic-write-error")
 
-    monkeypatch.setattr("apkscan.report.json.dump", _boom)
+    monkeypatch.setattr("fxapk.report.json.dump", _boom)
     out = tmp_path / "out"
     result = runner.invoke(
         cli.app, ["analyze", str(_apk(tmp_path)), "--offline", "--fmt", "json", "--out", str(out)]
@@ -157,8 +157,8 @@ def test_analyze_html_success_does_not_cover_json_failure(
     def _html(report, path, *_a, **_k):
         Path(path).write_text("<html>synthetic</html>", encoding="utf-8")
 
-    monkeypatch.setattr("apkscan.report.json.dump", _boom)
-    monkeypatch.setattr("apkscan.report.html.render", _html)
+    monkeypatch.setattr("fxapk.report.json.dump", _boom)
+    monkeypatch.setattr("fxapk.report.html.render", _html)
     out = tmp_path / "out"
     result = runner.invoke(
         cli.app,
@@ -183,7 +183,7 @@ def test_analyze_partial_temp_keeps_old_json(
         stream.write(data[:3])
         raise OSError("synthetic-temp-write-error")
 
-    monkeypatch.setattr("apkscan.core.atomic._write_text_to_stream", _partial)
+    monkeypatch.setattr("fxapk.core.atomic._write_text_to_stream", _partial)
     result = runner.invoke(
         cli.app, ["analyze", str(_apk(tmp_path)), "--offline", "--fmt", "json", "--out", str(out)]
     )
@@ -208,8 +208,8 @@ def test_analyze_success_control_exits_zero(
 def test_merge_failure_receipt_blocks_without_dropping_written_json(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from apkscan.dynamic import merge
-    from apkscan.report import html as report_html
+    from fxapk.dynamic import merge
+    from fxapk.report import html as report_html
 
     def _boom(*_a, **_k):
         raise OSError("synthetic-html-error")
@@ -228,7 +228,7 @@ def test_merge_failure_receipt_blocks_without_dropping_written_json(
 def test_auto_merge_delivery_failure_is_not_done(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from apkscan.report import html as report_html
+    from fxapk.report import html as report_html
 
     def _boom(*_a, **_k):
         raise OSError("synthetic-html-error")
@@ -303,7 +303,7 @@ def test_auto_run_cancel_stops_capture_and_closure(
 def test_second_round_cancel_keeps_first_round_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from apkscan.dynamic.capture_sequence import run_rounds
+    from fxapk.dynamic.capture_sequence import run_rounds
 
     calls: list[int] = []
 

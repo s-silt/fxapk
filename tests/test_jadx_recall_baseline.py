@@ -78,13 +78,13 @@ from typing import Any
 
 import pytest
 
-from apkscan.core.jadx_callpath import (
+from fxapk.core.jadx_callpath import (
     CallPathEdge,
     CallPathLimits,
     CallPathTrace,
     trace_callpath,
 )
-from apkscan.core.jadx_index import (
+from fxapk.core.jadx_index import (
     INDEX_SCHEMA_VERSION,
     DexInput,
     DexRole,
@@ -911,7 +911,7 @@ def test_replay_corrupted_dump_output_is_exit_2(
 ) -> None:
     """replay 通道（CI 走的那条）对结构损坏同样必须 exit 2：真入口
     ``_cmd_replay`` 从头走到尾，只在进程边界换假 ``subprocess.run``——git
-    探测/导树按原序放行（导出树给一个含 apkscan/__init__.py 的最小 tar），
+    探测/导树按原序放行（导出树给一个含 apkscan/__init__.py 的最小 tar——基线 commit 早于包更名），
     master 树上的 dump 子进程「成功」但输出 ``{}``。防的是 replay 侧绕开
     ``_judge_dump`` 共用通道、让流程失败重新伪装成对账差异的回归。"""
     tar_buf = io.BytesIO()

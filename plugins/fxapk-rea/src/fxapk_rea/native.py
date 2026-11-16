@@ -18,7 +18,7 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-from apkscan.core.atomic import atomic_create_bytes
+from fxapk.core.atomic import atomic_create_bytes
 
 from .evidence import EvidenceError
 from .runtime import SUPPORTED_REA, ReaRuntime, run_bounded
@@ -1258,7 +1258,7 @@ def _require_lists(report: dict[str, Any]) -> None:
 
 def _web_observation_bytes(report_path: Path, report: dict[str, Any]) -> list[tuple[str, dict[str, bytes]]]:
     """Read-only reuse of the core bundle verifier. No path walk of our own."""
-    from apkscan.core.web_supplement_report import (
+    from fxapk.core.web_supplement_report import (
         SupplementRefusal,
         _referenced_trees,
         _reverify_trees,
@@ -1274,7 +1274,7 @@ def _web_observation_bytes(report_path: Path, report: dict[str, Any]) -> list[tu
 
 
 def _place_web_observations(out: Path, trees: list[tuple[str, dict[str, bytes]]]) -> None:
-    from apkscan.core.web_supplement_report import SupplementRefusal, _place_trees
+    from fxapk.core.web_supplement_report import SupplementRefusal, _place_trees
 
     try:
         _place_trees(out, trees)
@@ -1455,7 +1455,7 @@ def attach(bundle: Path, report_path: Path, out: Path) -> dict[str, Any]:
         "source_artifact_base": str(report_path.parent.resolve()),
     }
     preserved = _web_observation_bytes(report_path, report)
-    from apkscan.core.dex_query import DexQueryError, collect_receipt_files
+    from fxapk.core.dex_query import DexQueryError, collect_receipt_files
 
     try:
         dex_receipts = collect_receipt_files(report_path.parent, meta)

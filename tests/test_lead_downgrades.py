@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import infra
-from apkscan.core.models import (
+from fxapk.core import infra
+from fxapk.core.models import (
     DOWNGRADE_EVIDENCE_SCOPE,
     DOWNGRADE_REPACK_IDENTITY,
     DOWNGRADE_SNI_MASQUERADE,
@@ -395,8 +395,8 @@ def test_downgrades_survive_report_roundtrip() -> None:
     """两个新字段必须往返：丢了就等于抑制来源在下一次读盘时全部失忆。"""
     import json
 
-    from apkscan.core import report_io
-    from apkscan.report import json as report_json
+    from fxapk.core import report_io
+    from fxapk.report import json as report_json
 
     lead = _lead(source_refs=[Evidence(source="dex", location="classes.dex")])
     apply_downgrade(lead, DOWNGRADE_REPACK_IDENTITY, "样本判为正版重打包件")
@@ -425,8 +425,8 @@ def test_new_fields_survive_real_disk_roundtrip(tmp_path) -> None:
     `dataclasses.asdict` 自动落盘、靠 loader 手写的分支读回，两边任一处漏掉都只有真实
     文件往返才看得出来。
     """
-    from apkscan.core.models import Report
-    from apkscan.core.report_io import load_report, write_report
+    from fxapk.core.models import Report
+    from fxapk.core.report_io import load_report, write_report
 
     old = Lead(
         category=LeadCategory.DOMAIN,
@@ -478,7 +478,7 @@ def test_illegal_legacy_snapshot_on_disk_is_dropped(bad: object) -> None:
 
     回落的话等于凭空给一条来路不明的数据发**恢复凭证**：撤光来源后它就凭这张凭证进了出口。
     """
-    from apkscan.core import report_io
+    from fxapk.core import report_io
 
     payload = {"leads": [{
         "category": "DOMAIN", "value": "api.example.com", "advice": _REVIEW,
@@ -500,14 +500,14 @@ def test_both_anchors_on_disk_warns_and_keeps_snapshot(caplog) -> None:
     """
     import logging
 
-    from apkscan.core import report_io
+    from fxapk.core import report_io
 
     payload = {"leads": [{
         "category": "DOMAIN", "value": "api.example.com", "advice": _REVIEW,
         "base_advice": _SKIP, "legacy_effective_advice": _INV,
         "downgrades": {DOWNGRADE_SOURCE_TIER: "x"},
     }]}
-    with caplog.at_level(logging.WARNING, logger="apkscan.core.report_io"):
+    with caplog.at_level(logging.WARNING, logger="fxapk.core.report_io"):
         revived = report_io.report_from_dict(payload).leads[0]
 
     assert any("同时带 base_advice" in r.getMessage() for r in caplog.records), "并存必须留下 warning"
@@ -519,7 +519,7 @@ def test_both_anchors_on_disk_warns_and_keeps_snapshot(caplog) -> None:
 
 def test_legacy_report_without_scope_is_quarantined() -> None:
     """★旧报告仍可读，但不得把未声明作用域的材料伪装成当前案件直接证据。"""
-    from apkscan.core import report_io
+    from fxapk.core import report_io
 
     payload = {"leads": [{
         "category": "DOMAIN", "value": "api.example.com",
@@ -544,7 +544,7 @@ def test_legacy_report_without_scope_is_quarantined() -> None:
 ])
 def test_bad_downgrades_payload_is_dropped(bad: object) -> None:
     """坏形状一律丢弃、绝不抛：这份数据来自磁盘，可能被手改或被别的工具写坏。"""
-    from apkscan.core import report_io
+    from fxapk.core import report_io
 
     payload = {"leads": [{
         "category": "DOMAIN", "value": "api.example.com",
@@ -567,7 +567,7 @@ def test_illegal_base_advice_is_treated_as_unknown(bad: object) -> None:
     而一致性校验还判它自洽——凭空造出一个下游谁也不认的档位。
     退回「不可考」是安全的：档位原样沿用报告里的 advice，行为等同旧报告。
     """
-    from apkscan.core import report_io
+    from fxapk.core import report_io
 
     payload = {"leads": [{
         "category": "DOMAIN", "value": "api.example.com",
@@ -585,7 +585,7 @@ def test_illegal_base_advice_is_treated_as_unknown(bad: object) -> None:
 @pytest.mark.parametrize("good", [_INV, _REVIEW, _SKIP])
 def test_legal_base_advice_survives_roundtrip(good: str) -> None:
     """反向：三个合法档位都要能原样读回来（收严不能把合法值一起挡掉）。"""
-    from apkscan.core import report_io
+    from fxapk.core import report_io
 
     payload = {"leads": [{
         "category": "DOMAIN", "value": "api.example.com",

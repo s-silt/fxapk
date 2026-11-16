@@ -1,7 +1,7 @@
 from copy import deepcopy
 import pytest
-from apkscan.core.models import Endpoint, EvidenceScope, Report
-from apkscan.dynamic.capture_provenance import capture_scope, scoped_evidence, retain_observations, project_observations
+from fxapk.core.models import Endpoint, EvidenceScope, Report
+from fxapk.dynamic.capture_provenance import capture_scope, scoped_evidence, retain_observations, project_observations
 
 
 def rep():
@@ -59,14 +59,14 @@ def test_context_is_reset_after_error():
 
 
 def test_loader_preserves_observed_time():
-    from apkscan.dynamic.merge import _evidences_from_jsonable
+    from fxapk.dynamic.merge import _evidences_from_jsonable
     raw=[{'source':'runtime-pcap','location':'frame:1','observed_at':1767225600.25}]
     assert _evidences_from_jsonable(raw, "synthetic")[0].observed_at == raw[0]['observed_at']
 
 
 def test_real_decryption_keeps_both_capture_coordinates(tmp_path):
     import json
-    from apkscan.dynamic import auto
+    from fxapk.dynamic import auto
     from tests.test_merge import _c5b_encrypt, _c5b_recipe_meta, _C5B_TS
     r=rep()
     r.meta['crypto_recipe']=_c5b_recipe_meta()
@@ -85,7 +85,7 @@ def test_real_decryption_keeps_both_capture_coordinates(tmp_path):
 
 
 def test_unverified_identity_cannot_emit_attribution_contact_or_behavior():
-    from apkscan.attribution.assemble import _bridge_endpoint, _runtime_contact_observed
+    from fxapk.attribution.assemble import _bridge_endpoint, _runtime_contact_observed
     r=rep()
     observe(r,'capture:a',{'target_attributed':True,'has_payload':True,
                          'sni':['api.example.invalid'],'remote_endpoints':['192.0.2.10:443']},verified=False)
@@ -97,7 +97,7 @@ def test_unverified_identity_cannot_emit_attribution_contact_or_behavior():
 
 @pytest.mark.parametrize('ledger', [[None], {}, [{'eligible':True}]])
 def test_invalid_ledger_fails_before_merging(tmp_path, ledger):
-    from apkscan.dynamic import auto
+    from fxapk.dynamic import auto
     r=rep()
     r.meta['runtime_observations']=ledger
     p=tmp_path/'runtime.json'
@@ -109,8 +109,8 @@ def test_invalid_ledger_fails_before_merging(tmp_path, ledger):
 
 
 def test_closure_and_attribution_both_reject_unbound_selected_refs():
-    from apkscan.core.closure.targets import _runtime_info
-    from apkscan.attribution.assemble import _runtime_contact_observed
+    from fxapk.core.closure.targets import _runtime_info
+    from fxapk.attribution.assemble import _runtime_contact_observed
     r=rep()
     observe(r,'capture:a',{'target_attributed':True,'has_payload':True})
     ep=r.endpoints[0]
@@ -121,7 +121,7 @@ def test_closure_and_attribution_both_reject_unbound_selected_refs():
 
 @pytest.mark.parametrize('kind',['credentials','jsbridge'])
 def test_derived_lead_round_refs_are_complete_and_replay_idempotent(kind):
-    from apkscan.dynamic import merge
+    from fxapk.dynamic import merge
     r=rep()
     for ref in ['capture:a','capture:b','capture:b']:
         with capture_scope(ref,verified=True):

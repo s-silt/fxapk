@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import apk as apk_mod
-from apkscan.core.apk import ApkContext
-from apkscan.core.models import AnalysisConfig
+from fxapk.core import apk as apk_mod
+from fxapk.core.apk import ApkContext
+from fxapk.core.models import AnalysisConfig
 
 
 class _FakeAndroguardApk:
@@ -160,7 +160,7 @@ class _NoGetFileApk:
 
 def test_repackage_rejects_bomb_entry(tmp_path: Path, monkeypatch) -> None:
     """★回归（codex 全库审计 P1）：重打包逐条目复制前查声明大小，超上限中止，不无界解压致 OOM。"""
-    from apkscan.dynamic import repackage
+    from fxapk.dynamic import repackage
 
     base = tmp_path / "base.apk"
     with zipfile.ZipFile(base, "w") as zf:

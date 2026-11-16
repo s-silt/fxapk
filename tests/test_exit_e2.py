@@ -10,10 +10,10 @@ import time
 import psutil
 import pytest
 
-from apkscan.core.enrichment import enrich_selected_targets
-from apkscan.core.enrichment_budget import EnrichmentBudget
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.core.registry import BaseEnricher
+from fxapk.core.enrichment import enrich_selected_targets
+from fxapk.core.enrichment_budget import EnrichmentBudget
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.core.registry import BaseEnricher
 
 
 class _Blocking(BaseEnricher):
@@ -59,7 +59,7 @@ def _reap(pid: int | None) -> None:
 
 
 def test_cancel_stops_blocking_provider_and_its_child(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("apkscan.core.enrichment.ENRICH_MAX_WORKERS", 1)
+    monkeypatch.setattr("fxapk.core.enrichment.ENRICH_MAX_WORKERS", 1)
     blocking = _Blocking()
     following = _Following()
     endpoints = [Endpoint(kind="domain", value=f"target-{index}.example.invalid") for index in range(2)]
@@ -101,7 +101,7 @@ def test_cancel_stops_blocking_provider_and_its_child(monkeypatch: pytest.Monkey
 
 
 def test_parallel_cancel_stops_each_blocking_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("apkscan.core.enrichment.ENRICH_MAX_WORKERS", 2)
+    monkeypatch.setattr("fxapk.core.enrichment.ENRICH_MAX_WORKERS", 2)
     pids: list[int] = []
     lock = threading.Lock()
     ready = threading.Event()
@@ -150,7 +150,7 @@ def test_parallel_cancel_stops_each_blocking_provider(monkeypatch: pytest.Monkey
 
 
 def test_without_cancel_both_providers_run_and_budget_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("apkscan.core.enrichment.ENRICH_MAX_WORKERS", 1)
+    monkeypatch.setattr("fxapk.core.enrichment.ENRICH_MAX_WORKERS", 1)
 
     class _Quick(BaseEnricher):
         name = "quick-provider"
@@ -182,8 +182,8 @@ def _no_enrich_threads() -> None:
 
 
 def test_late_blocking_result_is_cancelled_not_published(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("apkscan.core.enrichment.ENRICH_MAX_WORKERS", 2)
-    from apkscan.core import enrichment
+    monkeypatch.setattr("fxapk.core.enrichment.ENRICH_MAX_WORKERS", 2)
+    from fxapk.core import enrichment
 
     release = threading.Event()
     started = threading.Event()
@@ -255,8 +255,8 @@ def test_late_blocking_result_is_cancelled_not_published(monkeypatch: pytest.Mon
 def test_cancel_during_payload_normalization_does_not_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("apkscan.core.enrichment.ENRICH_MAX_WORKERS", 1)
-    from apkscan.core import enrichment
+    monkeypatch.setattr("fxapk.core.enrichment.ENRICH_MAX_WORKERS", 1)
+    from fxapk.core import enrichment
 
     def _strict(payload: dict) -> dict:
         enrichment._cancel_sleep.set()
@@ -309,7 +309,7 @@ def test_cancel_during_payload_normalization_does_not_commit(
 
 
 def test_custom_sleep_keyboard_interrupt_is_not_swallowed() -> None:
-    from apkscan.core import enrichment
+    from fxapk.core import enrichment
 
     original = time.sleep
 

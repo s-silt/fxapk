@@ -1,4 +1,4 @@
-"""apkscan.core.report_naming 单测：报告文件名 base 计算 + 文件名清理。
+"""fxapk.core.report_naming 单测：报告文件名 base 计算 + 文件名清理。
 
 覆盖（问题 2「报告按 APK 名命名」的纯函数核心）：
 - report_base：APK stem 作 base（含中文保留）；apk 空/清理后空 → 回退包名 → 再回退 "report"。
@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from apkscan.core.report_naming import report_base, sanitize_base
+from fxapk.core.report_naming import report_base, sanitize_base
 
 
 # --- report_base：APK 名去后缀 -------------------------------------------

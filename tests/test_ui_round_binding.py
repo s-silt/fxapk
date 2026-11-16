@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from apkscan.core.integrity import sha256_file
-from apkscan.core.models import Report
-from apkscan.dynamic import merge
+from fxapk.core.integrity import sha256_file
+from fxapk.core.models import Report
+from fxapk.dynamic import merge
 
 
 def test_ui_observations_accumulate_across_rounds(tmp_path: Path) -> None:

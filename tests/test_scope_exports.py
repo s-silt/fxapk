@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from apkscan.core.evidence_scope import project_serialized_leads
-from apkscan.core.jsonl import report_to_events
-from apkscan.report.digest import build_digest
-from apkscan.report.ioc import leads_to_ioc_rows
-from apkscan.report.letters import build_letters
+from fxapk.core.evidence_scope import project_serialized_leads
+from fxapk.core.jsonl import report_to_events
+from fxapk.report.digest import build_digest
+from fxapk.report.ioc import leads_to_ioc_rows
+from fxapk.report.letters import build_letters
 
 
 def _evidence(scope: str | None, *, source: str = "dex", location: str = "classes.dex") -> dict:

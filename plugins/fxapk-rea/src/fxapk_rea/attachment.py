@@ -13,8 +13,8 @@ from typing import Any
 
 import typer
 
-from apkscan.core.atomic import atomic_create_bytes
-from apkscan.core.web_observations import classify_gaps
+from fxapk.core.atomic import atomic_create_bytes
+from fxapk.core.web_observations import classify_gaps
 
 from .bundlecompat import FLAGS, assess
 from .trace_limits import MAX_RAW_BYTES as _MAX_TRACE
@@ -705,7 +705,7 @@ def _existing(
 def _parsed_web_trees(
     report: Path, payload: dict[str, Any], excluded: set[str], new_sha: str
 ) -> list[tuple[str, dict[str, bytes]]]:
-    from apkscan.core.web_supplement_report import (
+    from fxapk.core.web_supplement_report import (
         SupplementRefusal,
         _accepted_files,
         _bounded_files,
@@ -796,9 +796,9 @@ def attach(
     encoded_report = (
         json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     ).encode("utf-8")
-    from apkscan.core.report_io import report_from_dict
-    from apkscan.report.digest import build_digest
-    from apkscan.report.html import render_to_string
+    from fxapk.core.report_io import report_from_dict
+    from fxapk.report.digest import build_digest
+    from fxapk.report.html import render_to_string
 
     try:
         digest_bytes = (
@@ -830,7 +830,7 @@ def _preserved_dex_receipts(report: Path, payload: dict[str, Any]) -> list[tuple
     meta = payload.get("meta")
     if not isinstance(meta, dict) or "dex_query" not in meta:
         return []
-    from apkscan.core.dex_query import DexQueryError, collect_receipt_files
+    from fxapk.core.dex_query import DexQueryError, collect_receipt_files
 
     try:
         collected = collect_receipt_files(report.parent, meta)
@@ -854,7 +854,7 @@ def _preserved_native(report: Path, payload: dict[str, Any]) -> list[tuple[str, 
 
 def _align_native_history(payload: dict[str, Any], copied: list[tuple[str, bytes]]) -> None:
     """Reject contradictory history flags before any output directory is created."""
-    from apkscan.core.native_handoff import reconcile_native_history_item
+    from fxapk.core.native_handoff import reconcile_native_history_item
 
     meta = payload.get("meta")
     if not isinstance(meta, dict):

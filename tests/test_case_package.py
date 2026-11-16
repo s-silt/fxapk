@@ -12,8 +12,8 @@ import threading
 
 import pytest
 
-from apkscan.core import atomic, case_package
-from apkscan.core.case_package import (
+from fxapk.core import atomic, case_package
+from fxapk.core.case_package import (
     CasePackageErrorCode,
     CasePackageError,
     create_case_package,
@@ -21,8 +21,8 @@ from apkscan.core.case_package import (
     project_case_status,
     verify_case_package,
 )
-from apkscan.core.models import Report
-from apkscan.core.report_io import write_report
+from fxapk.core.models import Report
+from fxapk.core.report_io import write_report
 
 
 def _write_report(root, *, analysis: str = "complete", closure: str = "partial"):  # noqa: ANN001, ANN202
@@ -401,7 +401,7 @@ import errno
 import os
 import sys
 from pathlib import Path
-from apkscan.core import case_package
+from fxapk.core import case_package
 
 real_fdopen = os.fdopen
 real_write = os.write

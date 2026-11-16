@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import recognition_contract as rc
-from apkscan.core.gap_production import (
+from fxapk.core import recognition_contract as rc
+from fxapk.core.gap_production import (
     GAP_PRODUCTION_VERSION,
     GapProductionError,
     build_visibility_gaps,

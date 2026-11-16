@@ -11,9 +11,9 @@ from typing import Any
 
 import pytest
 
-from apkscan.core.models import Report
-from apkscan.dynamic import capture, probe_coverage
-from apkscan.dynamic.merge import merge_capture_quality
+from fxapk.core.models import Report
+from fxapk.dynamic import capture, probe_coverage
+from fxapk.dynamic.merge import merge_capture_quality
 
 
 def _probe_state(*, frida_requested: bool = True) -> dict[str, Any]:
@@ -315,7 +315,7 @@ def test_bundled_crypto_hook_registers_both_mac_init_overloads() -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is unavailable")
-    hook_path = Path(__file__).parents[1] / "apkscan/dynamic/frida_js/crypto_hook.js"
+    hook_path = Path(__file__).parents[1] / "fxapk/dynamic/frida_js/crypto_hook.js"
     bootstrap = json.dumps(probe_coverage.load_bootstrap())
     hook_source = json.dumps(hook_path.read_text(encoding="utf-8"))
     program = f"""

@@ -5,8 +5,8 @@ import pytest
 
 
 def test_resolution_checks_every_answer_before_connect(monkeypatch):
-    from apkscan.core import pinned_transport as pt
-    from apkscan.config import fetch
+    from fxapk.core import pinned_transport as pt
+    from fxapk.config import fetch
     monkeypatch.setattr(fetch, "_ip_is_blocked", lambda ip: str(ip) == "192.0.2.2")
     monkeypatch.setattr(pt.socket, "getaddrinfo", lambda *a, **k: [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443)) for ip in ("192.0.2.1", "192.0.2.2")])
@@ -16,8 +16,8 @@ def test_resolution_checks_every_answer_before_connect(monkeypatch):
 
 
 def test_numeric_connect_never_resolves_again_and_checks_peer(monkeypatch):
-    from apkscan.core import pinned_transport as pt
-    from apkscan.config import fetch
+    from fxapk.core import pinned_transport as pt
+    from fxapk.config import fetch
     monkeypatch.setattr(fetch, "_ip_is_blocked", lambda ip: False)
     monkeypatch.setattr(pt.socket, "getaddrinfo", lambda *a, **k: pytest.fail("numeric pin must not resolve again"))
     class Sock:
@@ -38,14 +38,14 @@ def test_numeric_connect_never_resolves_again_and_checks_peer(monkeypatch):
 
 
 def test_config_guard_unavailable_is_closed(monkeypatch):
-    from apkscan.config import fetch
+    from fxapk.config import fetch
     monkeypatch.setattr(fetch, "_GUARDED_ADAPTER_CLS", None)
     assert fetch._build_guarded_session() is None
 
 
 def test_config_guard_calls_shared_pin_not_original_connection(monkeypatch):
-    from apkscan.core import pinned_transport as pt
-    from apkscan.config import fetch
+    from fxapk.core import pinned_transport as pt
+    from fxapk.config import fetch
     monkeypatch.setattr(pt, "resolve_public", lambda host, port: ["192.0.2.1"])
     class Sock:
         def getpeername(self): return "192.0.2.1", 443
@@ -63,7 +63,7 @@ def test_config_guard_calls_shared_pin_not_original_connection(monkeypatch):
 
 
 def test_resolution_deadline_returns_without_connecting(monkeypatch):
-    from apkscan.core import pinned_transport as pt
+    from fxapk.core import pinned_transport as pt
     import threading
     release, completed = threading.Event(), threading.Event()
     def blocked(*args, **kwargs):
@@ -84,7 +84,7 @@ def test_resolution_deadline_returns_without_connecting(monkeypatch):
 def test_response_reader_caps_headers_and_body_together():
     from io import BytesIO
     import time
-    from apkscan.core.pinned_transport import _DeadlineReader
+    from fxapk.core.pinned_transport import _DeadlineReader
     class Sock:
         def settimeout(self, value): pass
     meter = {"remaining": 5, "consumed": 0}
@@ -97,8 +97,8 @@ def test_response_reader_caps_headers_and_body_together():
 
 
 def test_resolve_public_preserves_getaddrinfo_order(monkeypatch):
-    from apkscan.core import pinned_transport as pt
-    from apkscan.config import fetch
+    from fxapk.core import pinned_transport as pt
+    from fxapk.config import fetch
     monkeypatch.setattr(fetch, "_ip_is_blocked", lambda ip: False)
     monkeypatch.setattr(pt.socket, "getaddrinfo", lambda *a, **k: [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.5", 443)),
@@ -109,8 +109,8 @@ def test_resolve_public_preserves_getaddrinfo_order(monkeypatch):
 
 
 def test_connect_first_fallback_and_non_public_fail_closed(monkeypatch):
-    from apkscan.core import pinned_transport as pt
-    from apkscan.config import fetch
+    from fxapk.core import pinned_transport as pt
+    from fxapk.config import fetch
     monkeypatch.setattr(fetch, "_ip_is_blocked", lambda ip: str(ip) == "192.0.2.99")
     attempts = []
 

@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from apkscan.core import infra
+from fxapk.core import infra
 
 
 def test_flags_long_base64_label() -> None:

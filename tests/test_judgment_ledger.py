@@ -6,8 +6,8 @@ from dataclasses import dataclass, replace
 
 import pytest
 
-from apkscan.core import recognition_codec
-from apkscan.core.judgment_ledger import (
+from fxapk.core import recognition_codec
+from fxapk.core.judgment_ledger import (
     ActionStatus,
     ClaimStatus,
     EventType,
@@ -23,7 +23,7 @@ from apkscan.core.judgment_ledger import (
     replay,
     validate_event_chain,
 )
-from apkscan.core.recognition_contract import (
+from fxapk.core.recognition_contract import (
     ActionAuthorization,
     ActorKind,
     AllowedConclusion,
@@ -56,7 +56,7 @@ from apkscan.core.recognition_contract import (
     SubjectOwnership,
     SubjectRef,
 )
-from apkscan.core.recognition_codec import (
+from fxapk.core.recognition_codec import (
     build_action_outcome,
     build_claim_candidate,
     build_evidence_gap,

@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.analyzers.jadx import JadxAnalyzer
-from apkscan.core import judgment_ledger as jl
-from apkscan.core import pipeline
-from apkscan.core.models import AnalysisConfig
+from fxapk.analyzers.jadx import JadxAnalyzer
+from fxapk.core import judgment_ledger as jl
+from fxapk.core import pipeline
+from fxapk.core.models import AnalysisConfig
 from tests.conftest import FakeContext
 from tests.test_jadx_index_wiring import _apk, _patch
 
@@ -25,7 +25,7 @@ from tests.test_jadx_index_wiring import _apk, _patch
 def _stub_resolve_jadx(monkeypatch: pytest.MonkeyPatch) -> None:
     """CI 机器没有真 jadx——resolve 必须 stub，否则本文件在装了 jadx 的机器上绿、
     CI 上 disabled（环境巧合不是结论；同 conftest 的 adb 教训，P2-C 已犯过一次）。"""
-    from apkscan.analyzers import jadx as jadx_mod
+    from fxapk.analyzers import jadx as jadx_mod
 
     monkeypatch.setattr(jadx_mod.tools, "resolve_jadx", lambda: (["jadx"], {}))
 
@@ -112,7 +112,7 @@ def test_ledger_written_and_replayable(monkeypatch: pytest.MonkeyPatch, tmp_path
     actions = [e.payload for e in events if e.event_type is jl.EventType.ACTION_PROPOSED]
     assert [a.action_type for a in actions] == ["jadx-usage-query"]  # 绝无 callpath
     # 授权契约锁：SYSTEM 自动策略、OFFLINE、policy_pre_authorized。
-    from apkscan.core import recognition_contract as rc2
+    from fxapk.core import recognition_contract as rc2
 
     (auth,) = [e.payload for e in events if e.event_type is jl.EventType.ACTION_AUTHORIZED]
     assert auth.granted_level is rc2.AuthorizationLevel.OFFLINE
@@ -127,7 +127,7 @@ def test_ledger_written_and_replayable(monkeypatch: pytest.MonkeyPatch, tmp_path
     subject = run_event.payload.subjects[0]  # type: ignore[union-attr]
     assert expected_sha in subject.value
     # 具名自动策略 actor：绝不伪装人签。
-    from apkscan.core import recognition_contract as rc
+    from fxapk.core import recognition_contract as rc
 
     for event in events:
         assert event.actor.kind is not rc.ActorKind.HUMAN
@@ -146,7 +146,7 @@ def test_hash_failure_opens_no_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path:
     """★哈希失败 → 不开账本流（绝不发空 subject）：无文件、无 meta 锚。"""
     _patch(monkeypatch)
     ctx = _ctx_with_cache(tmp_path)
-    import apkscan.core.jadx_run_ledger as jrl
+    import fxapk.core.jadx_run_ledger as jrl
 
     monkeypatch.setattr(jrl, "_sample_sha256", lambda path: None)
     report, out_dir = _run(tmp_path, ctx)
@@ -176,7 +176,7 @@ def test_existing_sidecar_never_overwritten(
 
 def test_digest_surfaces_ledger_anchor() -> None:
     """digest 透出：meta 锚 → digest.jadx_index.ledger 段；缺失则无该段。"""
-    from apkscan.report.digest import build_digest
+    from fxapk.report.digest import build_digest
 
     meta = {
         "jadx_index_status": "built",
@@ -253,7 +253,7 @@ def test_ownership_subject_key_mismatch_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """★错配反例：摘要 subject_index_key 指向另一个有效索引 → ownership 动作拒落。"""
-    import apkscan.core.jadx_run_ledger as jrl
+    import fxapk.core.jadx_run_ledger as jrl
     from tests.test_jadx_ownership_wiring import _patch_with_methods
 
     _patch_with_methods(monkeypatch)
@@ -294,7 +294,7 @@ def test_stage_failure_never_degrades_analysis_status(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """★账本 stage 异常 → stage_status 留痕但 analysis_status 不降级（附加消费面）。"""
-    import apkscan.core.jadx_run_ledger as jrl
+    import fxapk.core.jadx_run_ledger as jrl
 
     _patch(monkeypatch)
 
@@ -372,7 +372,7 @@ def test_no_blocked_claims_keeps_single_question(
 ) -> None:
     """L2 无封锁主张 → 不开空 question，事件形态与旧版一致。"""
     _patch(monkeypatch)
-    monkeypatch.setattr("apkscan.core.visibility.assess", _complete_visibility)
+    monkeypatch.setattr("fxapk.core.visibility.assess", _complete_visibility)
     ctx = _ctx_with_cache(tmp_path)
     report, out_dir = _run(tmp_path, ctx)
     events = _read_chain(out_dir / _ledger_name(ctx))
@@ -390,7 +390,7 @@ def test_missing_visibility_meta_skips_with_reason(
     def _boom(*_args: object, **_kw: object) -> dict:
         raise RuntimeError("visibility stage down")
 
-    monkeypatch.setattr("apkscan.core.visibility.assess", _boom)
+    monkeypatch.setattr("fxapk.core.visibility.assess", _boom)
     ctx = _ctx_with_cache(tmp_path)
     report, out_dir = _run(tmp_path, ctx)
     events = _read_chain(out_dir / _ledger_name(ctx))  # 主账本仍可 replay
@@ -405,7 +405,7 @@ def test_invalid_visibility_shape_skips_with_reason(
     """L4 形状非法 → gap 生产 fail-closed 转显式 skip，绝不杀主账本。"""
     _patch(monkeypatch)
     monkeypatch.setattr(
-        "apkscan.core.visibility.assess", lambda *_a, **_k: {"schema_version": "9.9"}
+        "fxapk.core.visibility.assess", lambda *_a, **_k: {"schema_version": "9.9"}
     )
     ctx = _ctx_with_cache(tmp_path)
     report, out_dir = _run(tmp_path, ctx)
@@ -451,7 +451,7 @@ def test_duplicate_claim_never_kills_main_ledger(
     doc = _complete_visibility()
     doc["blocked_claims"] = ["no_sms_interception", "no_sms_interception"]
     doc["sources"]["dex"]["visibility"] = "partial"
-    monkeypatch.setattr("apkscan.core.visibility.assess", lambda *_a, **_k: doc)
+    monkeypatch.setattr("fxapk.core.visibility.assess", lambda *_a, **_k: doc)
     ctx = _ctx_with_cache(tmp_path)
     report, out_dir = _run(tmp_path, ctx)
     events = _read_chain(out_dir / _ledger_name(ctx))  # 主账本可 replay
@@ -466,9 +466,9 @@ def test_append_failure_is_transactional_not_fatal(
     """L7 事务式护栏：gap 绑到不存在的 question（追加层契约异常）→
     回到原事件链 + 稳定 reason，绝不杀主账本。"""
     _patch(monkeypatch)
-    from apkscan.core import gap_production as gp
-    from apkscan.core import recognition_codec as codec
-    from apkscan.core import recognition_contract as rc
+    from fxapk.core import gap_production as gp
+    from fxapk.core import recognition_codec as codec
+    from fxapk.core import recognition_contract as rc
 
     def _rogue_gaps(_visibility, *, question_id, producer):
         rogue = codec.build_evidence_gap(
@@ -502,13 +502,13 @@ def test_e2e_first_nonempty_reanalysis_requests(
     complete，用 visibility monkeypatch 把 java 打成 partial 即可，勿放宽谓词）。"""
     from typer.testing import CliRunner
 
-    from apkscan import cli as apkscan_cli
+    from fxapk import cli as apkscan_cli
 
     _patch(monkeypatch)
     doc = _complete_visibility()
     doc["blocked_claims"] = ["static_endpoint_exhaustive"]
     doc["sources"]["java"]["visibility"] = "partial"
-    monkeypatch.setattr("apkscan.core.visibility.assess", lambda *_a, **_k: doc)
+    monkeypatch.setattr("fxapk.core.visibility.assess", lambda *_a, **_k: doc)
     ctx = _ctx_with_cache(tmp_path)
     _report, out_dir = _run(tmp_path, ctx)
     sidecar = out_dir / _ledger_name(ctx)

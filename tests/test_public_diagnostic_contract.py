@@ -17,17 +17,17 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.case_package import (
+from fxapk.core.case_package import (
     CasePackageError,
     CasePackageErrorCode,
     verify_case_package,
 )
-from apkscan.core.corpus_errors import CorpusRecordError, CorpusRecordErrorCode
-from apkscan.core.json_contract import (
+from fxapk.core.corpus_errors import CorpusRecordError, CorpusRecordErrorCode
+from fxapk.core.json_contract import (
     JsonContractError,
     reject_nonfinite_json_constant,
 )
-from apkscan.core.redact import PublicDiagnosticError, safe_exception_text
+from fxapk.core.redact import PublicDiagnosticError, safe_exception_text
 
 #: 三类不可信/环境值的哨兵，任一出现在公开诊断里都是回显面。
 _CANARY_TOKEN = "1e99999999"
@@ -180,7 +180,7 @@ def test_project_case_status_survives_non_finite_json(tmp_path: Path) -> None:
     投影函数只 catch ``CasePackageError`` 时，含 NaN 的 manifest 会把异常抛给 CLI；
     正确行为是投影成 ``package_integrity=failed``（校验失败 ≠ 命令崩溃）。
     """
-    from apkscan.core.case_package import project_case_status
+    from fxapk.core.case_package import project_case_status
 
     manifest = tmp_path / "case-package.json"
     manifest.write_text('{"bad":' + _CANARY_TOKEN + "}", encoding="utf-8")

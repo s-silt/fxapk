@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import apk as apk_mod
-from apkscan.core import visibility
-from apkscan.core.models import AnalysisConfig
+from fxapk.core import apk as apk_mod
+from fxapk.core import visibility
+from fxapk.core.models import AnalysisConfig
 from tests.conftest import FakeContext
 
 
@@ -268,7 +268,7 @@ def test_invalid_manifest_state_is_machine_checkable_in_report_outputs() -> None
     assert any(note.startswith("[manifest]") for note in reassessed["notes"])
 
     # closure 刷新遇到裁剪掉 apk_validation_ok 的报告时，必须沿用旧确证盲区。
-    from apkscan.core.closure import _preserve_confirmed_gaps
+    from fxapk.core.closure import _preserve_confirmed_gaps
 
     fresh = visibility.assess({"meta": complete_meta})
     preserved = _preserve_confirmed_gaps(assessment, fresh, complete_meta)
@@ -286,7 +286,7 @@ def test_pipeline_run_projects_apk_validation_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """真入口锁：context False 必须经 pipeline.run 落到 meta 与 visibility。"""
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [])
     monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
@@ -304,7 +304,7 @@ def test_pipeline_run_projects_apk_validation_flag(
 
 def test_dex_budget_constants_stay_in_sync_with_jadx_materialization() -> None:
     """apk.py 与 jadx.py 的 DEX 预算常量必须同步（codex 二轮 P2：重复定义漂移风险）。"""
-    from apkscan.analyzers import jadx
+    from fxapk.analyzers import jadx
 
     assert (
         apk_mod._DEX_SINGLE_LIMIT_BYTES,

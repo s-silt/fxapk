@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from apkscan.core import proctree
+from fxapk.core import proctree
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows native Job handles")
 

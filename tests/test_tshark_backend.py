@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import types
 
-from apkscan.dynamic import tshark_backend
+from fxapk.dynamic import tshark_backend
 
 # tshark -T fields 的 TSV（列序：host method uri user_agent ip.dst tcp.dstport；TAB 分隔）。
 _TSV = "\n".join([

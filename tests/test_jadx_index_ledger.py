@@ -10,10 +10,10 @@ import hashlib
 
 import pytest
 
-from apkscan.core import judgment_ledger as jl
-from apkscan.core import recognition_contract as rc
-from apkscan.core.jadx_index import DexLineage, DexRole, JadxIndexError, UsageHit
-from apkscan.core.jadx_index_ledger import (
+from fxapk.core import judgment_ledger as jl
+from fxapk.core import recognition_contract as rc
+from fxapk.core.jadx_index import DexLineage, DexRole, JadxIndexError, UsageHit
+from fxapk.core.jadx_index_ledger import (
     IndexQueryResult,
     IndexQueryState,
     append_jadx_query_projection,

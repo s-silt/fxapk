@@ -16,8 +16,8 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.endpoints import EndpointsAnalyzer
-from apkscan.core.models import AnalyzerResult, Endpoint
+from fxapk.analyzers.endpoints import EndpointsAnalyzer
+from fxapk.core.models import AnalyzerResult, Endpoint
 
 from tests.conftest import FakeContext
 from urllib.parse import urlsplit
@@ -671,7 +671,7 @@ def test_meta_counts_reported():
 
 import logging  # noqa: E402
 
-from apkscan.analyzers import endpoints as _ep_mod  # noqa: E402
+from fxapk.analyzers import endpoints as _ep_mod  # noqa: E402
 
 # 块大小 / 重叠（与实现常量对齐，测试据此定位边界）。
 _CHUNK = _ep_mod._SCAN_CHUNK_BYTES
@@ -822,7 +822,7 @@ def _linear_in_consumed(consumed: list[tuple[int, int]], pos: int) -> bool:
 
 def test_in_consumed_matches_linear_reference() -> None:
     """bisect 版 _in_consumed 对每个位置的判定须与旧线性实现逐点一致。"""
-    from apkscan.analyzers.endpoints import _pos_in_consumed
+    from fxapk.analyzers.endpoints import _pos_in_consumed
 
     # 非重叠、按 start 升序的区间（与 _scan_text 里 consumed 的构造不变量一致）。
     consumed = [(5, 10), (20, 25), (40, 50), (100, 101)]
@@ -833,7 +833,7 @@ def test_in_consumed_matches_linear_reference() -> None:
 
 
 def test_in_consumed_empty_consumed() -> None:
-    from apkscan.analyzers.endpoints import _pos_in_consumed
+    from fxapk.analyzers.endpoints import _pos_in_consumed
 
     assert _pos_in_consumed([], 0) is False
     assert _pos_in_consumed([], 99999) is False
@@ -895,8 +895,8 @@ def test_dex_truncation_flag_false_on_empty_dex() -> None:
 # 组 F #3：ApkContext._read_cache 单文件上限（大 .so 不常驻内存）
 # ---------------------------------------------------------------------------
 
-from apkscan.core.apk import ApkContext, _MAX_READ_CACHE_BYTES  # noqa: E402
-from apkscan.core.models import AnalysisConfig  # noqa: E402
+from fxapk.core.apk import ApkContext, _MAX_READ_CACHE_BYTES  # noqa: E402
+from fxapk.core.models import AnalysisConfig  # noqa: E402
 
 
 class _StubApk:

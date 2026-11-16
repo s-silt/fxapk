@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers._common import (
+from fxapk.analyzers._common import (
     TEXT_RESOURCE_PREFIXES,
     TEXT_RESOURCE_SUFFIXES,
     is_text_resource,

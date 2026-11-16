@@ -1,4 +1,4 @@
-"""链上地址校验+判链（apkscan.core.chainaddr）测试。
+"""链上地址校验+判链（fxapk.core.chainaddr）测试。
 
 核心价值=校验和把随机 hex/base58 误报砍到可用，从而敢把 BTC legacy 等重新纳入。
 全部用公开测试向量：EIP-55 spec / BIP-173 / TRON USDT-TRC20 合约 / BTC 创世地址。
@@ -9,7 +9,7 @@ EIP-55 依赖 Keccak-256（≠ 标准库 sha3_256，padding 不同），故纯 P
 
 from __future__ import annotations
 
-from apkscan.core.chainaddr import ChainAddress, find_addresses, keccak256, validate_address
+from fxapk.core.chainaddr import ChainAddress, find_addresses, keccak256, validate_address
 
 # ---- 公开测试向量 ----
 TRON_OK = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"  # USDT-TRC20 合约，合法 Base58Check

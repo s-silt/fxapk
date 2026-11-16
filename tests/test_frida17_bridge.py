@@ -17,8 +17,8 @@ from typing import Any
 
 import pytest
 
-from apkscan.core import device
-from apkscan.dynamic import capture, doctor
+from fxapk.core import device
+from fxapk.dynamic import capture, doctor
 
 
 # ---------------------------------------------------------------------------

@@ -6,12 +6,12 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from apkscan.cli import app
-from apkscan.core.batch_enrich import Target
-from apkscan.core.closure.layers import _hosting_layer, _request_layer
-from apkscan.core.enrichment_coverage import build_coverage
-from apkscan.core.response_evidence import capture_responses
-from apkscan.enrichers._http import _cap_body
+from fxapk.cli import app
+from fxapk.core.batch_enrich import Target
+from fxapk.core.closure.layers import _hosting_layer, _request_layer
+from fxapk.core.enrichment_coverage import build_coverage
+from fxapk.core.response_evidence import capture_responses
+from fxapk.enrichers._http import _cap_body
 
 
 def test_network_label_and_banner_do_not_establish_hosting() -> None:
@@ -41,7 +41,7 @@ def test_full_denominator_includes_disabled_deferred_and_not_applicable() -> Non
 
 
 def test_disabled_batch_emits_case_bound_coverage_without_network(tmp_path, monkeypatch) -> None:
-    from apkscan.core import registry
+    from fxapk.core import registry
     monkeypatch.setattr(registry, "discover_enrichers", lambda: [SimpleNamespace(
         name="fofa", active=False, applies_to=["domain"], required_env=("UNUSED",))])
     monkeypatch.delenv("UNUSED", raising=False)
@@ -103,7 +103,7 @@ def test_retained_entity_is_exact_and_request_secrets_are_not_in_metadata(tmp_pa
 
 
 def test_raw_write_failure_is_visible_and_does_not_fake_retention(tmp_path) -> None:
-    from apkscan.core.response_evidence import retain_response
+    from fxapk.core.response_evidence import retain_response
     invalid = tmp_path / "file"
     invalid.write_text("exists")
     with capture_responses(invalid) as records:
@@ -112,7 +112,7 @@ def test_raw_write_failure_is_visible_and_does_not_fake_retention(tmp_path) -> N
 
 
 def test_esa_product_is_separate_from_carrier_and_headers_do_not_confirm_origin() -> None:
-    from apkscan.core.attribution import build_ip_attribution, build_endpoint_attribution, score_edge_provider
+    from fxapk.core.attribution import build_ip_attribution, build_endpoint_attribution, score_edge_provider
     headers = {"Server": "ESA", "EagleId": "synthetic-request-id", "Via": "ens-cache1.example[1,0]"}
     edge = score_edge_provider({"response_headers": headers})
     assert edge and edge["name"] == "阿里云 ESA" and edge["tier"] == "probable"
@@ -132,9 +132,9 @@ def test_esa_product_is_separate_from_carrier_and_headers_do_not_confirm_origin(
 
 def test_resume_verifies_retained_response_bytes(tmp_path, monkeypatch):
     from pathlib import Path
-    from apkscan.core import registry
-    from apkscan.core.models import EnrichmentResult
-    from apkscan.core.response_evidence import retain_response
+    from fxapk.core import registry
+    from fxapk.core.models import EnrichmentResult
+    from fxapk.core.response_evidence import retain_response
     calls = []
     class Provider:
         name = "synthetic"

@@ -20,12 +20,12 @@ if ! command -v python >/dev/null 2>&1; then
 fi
 
 # 包不可导入（未 pip install -e .）时跳过而非拒绝提交：hook 不该把环境问题变成提交障碍。
-if ! python -c "import apkscan.core.leakscan" >/dev/null 2>&1; then
-    echo "leak-scan: apkscan 不可导入（先 pip install -e .），跳过扫描（CI 仍会扫 PR diff）。" >&2
+if ! python -c "import fxapk.core.leakscan" >/dev/null 2>&1; then
+    echo "leak-scan: fxapk 不可导入（先 pip install -e .），跳过扫描（CI 仍会扫 PR diff）。" >&2
     exit 0
 fi
 
 if [ -n "$FXAPK_LEAK_SCAN_STRICT" ]; then
-    exec python -m apkscan.cli leak-scan --staged --strict
+    exec python -m fxapk.cli leak-scan --staged --strict
 fi
-exec python -m apkscan.cli leak-scan --staged
+exec python -m fxapk.cli leak-scan --staged

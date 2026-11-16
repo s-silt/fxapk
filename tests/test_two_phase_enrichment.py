@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import threading
 
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.core.enrichment import enrich_selected_targets
-from apkscan.core.pipeline import _run_enrichment
-from apkscan.core.registry import BaseEnricher
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.core.enrichment import enrich_selected_targets
+from fxapk.core.pipeline import _run_enrichment
+from fxapk.core.registry import BaseEnricher
 
 
 class _RecordingEnricher(BaseEnricher):
@@ -134,8 +134,8 @@ def test_plain_selected_enrichment_does_not_run_case_close_only_provider() -> No
 def test_apply_forensic_domestic_flip_suppresses_overseas_evidence() -> None:
     # ★ 回归：shodan country 把端点最终翻成「国内」时，该 Lead 不得再挂任何境外被动定位证据行
     #   （合规呈现自洽、可审计）。
-    from apkscan.core import infra
-    from apkscan.core.leads import _apply_forensic
+    from fxapk.core import infra
+    from fxapk.core.leads import _apply_forensic
 
     ev: list[str] = []
     notes = _apply_forensic(

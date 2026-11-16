@@ -16,8 +16,8 @@ from datetime import datetime
 
 import pytest
 
-from apkscan.core import pipeline
-from apkscan.report.json import to_dict
+from fxapk.core import pipeline
+from fxapk.report.json import to_dict
 
 
 def _meta(report) -> dict:
@@ -96,7 +96,7 @@ def test_local_iso_helper_is_unambiguous() -> None:
 @pytest.fixture(scope="module")
 def analyzed_report():
     """跑一次真流水线拿报告——断言必须落在**真实产出**上，不能自己拼一个 meta 糊弄过去。"""
-    from apkscan.core.models import AnalysisConfig
+    from fxapk.core.models import AnalysisConfig
     from tests.conftest import FakeContext
     from tests.synthetic.samples import SAMPLES
 

@@ -76,7 +76,7 @@ def test_runtime_requires_verified_version(runtime, tmp_path, monkeypatch, versi
 
 
 def test_unverified_tree_does_not_credit_child_payload(runtime, tmp_path, monkeypatch):
-    from apkscan.core.proctree import OwnedRun
+    from fxapk.core.proctree import OwnedRun
 
     monkeypatch.setattr(
         runtime,

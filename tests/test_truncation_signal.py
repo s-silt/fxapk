@@ -7,9 +7,9 @@ endpoints 把这个事实写进 meta——可见性层碰巧靠它感知到，�
 """
 from __future__ import annotations
 
-from apkscan.analyzers._common import DEX_TRUNCATED_META_KEY, collect_dex_strings
-from apkscan.core import visibility
-from apkscan.core.models import AnalyzerResult
+from fxapk.analyzers._common import DEX_TRUNCATED_META_KEY, collect_dex_strings
+from fxapk.core import visibility
+from fxapk.core.models import AnalyzerResult
 
 
 class _Ctx:
@@ -58,10 +58,10 @@ def test_pipeline_merges_truncation_as_or_not_overwrite(monkeypatch):
       ② ``dex_strings_truncated_by`` 记下**是谁**截断的（人要能定位哪块没扫完）；
       ③ 这个事实一路传到 ``visibility``，把 dex 面判成 partial 且理由里带上分析器名。
     """
-    from apkscan.core import pipeline, visibility
-    from apkscan.core.meta_contract import META_KEY_REGISTRY, MetaKeyContract
-    from apkscan.core.models import AnalysisConfig, AnalyzerResult
-    from apkscan.core.registry import BaseAnalyzer
+    from fxapk.core import pipeline, visibility
+    from fxapk.core.meta_contract import META_KEY_REGISTRY, MetaKeyContract
+    from fxapk.core.models import AnalysisConfig, AnalyzerResult
+    from fxapk.core.registry import BaseAnalyzer
 
     class _Truncating(BaseAnalyzer):
         name = "probe_truncated"
@@ -125,8 +125,8 @@ def test_every_dex_reading_analyzer_reports_truncation():
 
     新增分析器若读 DEX 却不上报，这条会红。
     """
-    from apkscan.analyzers import _common
-    from apkscan.core.registry import discover_analyzers
+    from fxapk.analyzers import _common
+    from fxapk.core.registry import discover_analyzers
 
     analyzers = list(discover_analyzers())
 
@@ -169,7 +169,7 @@ def test_every_dex_reading_analyzer_reports_truncation():
     import sys as _sys
     for mod in list(_sys.modules.values()):
         mod_name = getattr(mod, "__name__", "")
-        if not mod_name.startswith("apkscan.analyzers"):
+        if not mod_name.startswith("fxapk.analyzers"):
             continue
         for attr in ("_MAX_DEX_STRINGS", "_MAX_STRINGS"):
             if hasattr(mod, attr):

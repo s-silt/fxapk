@@ -7,8 +7,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.diff import diff_reports
+from fxapk import cli
+from fxapk.core.diff import diff_reports
 
 
 def _report(*, leads=None, endpoints=None, findings=None, meta=None) -> dict:  # type: ignore[no-untyped-def]

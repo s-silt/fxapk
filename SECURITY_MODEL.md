@@ -4,31 +4,31 @@
 
 ## 1. 系统概览与信任边界
 
-fxapk（命令别名 `apkscan`）是 APK 调证取证 CLI（Python ≥3.11，PyPI 发布），分析员/agent 在本机运行 `fxapk analyze|auto|capture|case close|corpus ...`（`apkscan/cli.py`、`apkscan/commands/`）。产物（`report.json`、digest、corpus、phase2 包、文书）用于调证决策。
+fxapk（命令别名 `fxapk`）是 APK 调证取证 CLI（Python ≥3.11，PyPI 发布），分析员/agent 在本机运行 `fxapk analyze|auto|capture|case close|corpus ...`（`fxapk/cli.py`、`fxapk/commands/`）。产物（`report.json`、digest、corpus、phase2 包、文书）用于调证决策。
 
 信任边界：
-1. **恶意 APK 样本 → 分析机**：androguard/apkInspector 解析（`apkscan/core/apk.py`：有界解压 shim `_bounded_extract_file_based_on_header_info`，单文件 500MB / 缓存总量 256MB 上限；AXML 包名交叉校验 `_decide_manifest_package`；nsmap 净化 `_sanitize_nsmap`）、JADX/Ghidra/aapt 子进程（`apkscan/analyzers/jadx.py`、`apkscan/core/tools.py`、`apkscan/core/jadx_index*.py`）、43 个分析器（`apkscan/analyzers/`）、进程池快照（`apkscan/core/snapshot.py`、`pipeline.py`，pickle 只在本机进程间）。
-2. **第三方富化服务 → 分析机**：WHOIS/RDAP/DNS/ASN/ICP/Shodan/crt.sh/FOFA/Hunter/Spamhaus（`apkscan/enrichers/`；`_http.py` `CappedSession` 流式限响应体、自行逐跳跟随重定向并在跟随前拦截）。API 密钥来自项目根 `.env`（`apkscan/core/dotenv.py`、`secrets.py`）。
-3. **分析机 ↔ 测试设备**：adb/Frida/tcpdump/mitmproxy CA（`apkscan/dynamic/`、`apkscan/core/device.py`，subprocess 列表参数 + 超时）；样本在设备上运行，其流量、Frida 回传消息回到主机（`probe_ingest.py`、`pcap_ingest.py`、`tshark_backend.py`、`merge.py`）。
-4. **网页/HAR/CDP → 分析机**：`analyze-web`（默认离线）、`apkscan/analyzers/web_har.py`、`web_evidence.py`；可选 REA 插件（`plugins/fxapk-rea`，默认关闭，需 `FXAPK_ENABLE_REA=1`）。
-5. **DEX 查询隔离进程**：`plugins/fxapk-asc` 由 `apkscan/core/dex_query.py` 以 `python -I -m fxapk_asc.worker` 子进程调用。
-6. **插件加载**：`apkscan/plugins/registry.py` 只加载 `_ALLOWED` 白名单内的 entry point（`android_ui`、`rea`、`flutter`）。
-7. **样本派生数据 → 报告/文书**：Jinja2 HTML（`apkscan/report/html.py`，`select_autoescape`）、PDF（`pdf.py`）、文书（`letters.py`，Markdown 出口 `_md_safe`）、CSV `export`、digest（有限脱敏 `apkscan/core/redact.py`）。
-8. **案件库**：corpus（`apkscan/core/corpus*.py`，库根须在工作树外，fail-closed 哈希校验）、phase2 不可变包（`apkscan/core/phase2/`）、`lead restore|replay`、`regress`。
+1. **恶意 APK 样本 → 分析机**：androguard/apkInspector 解析（`fxapk/core/apk.py`：有界解压 shim `_bounded_extract_file_based_on_header_info`，单文件 500MB / 缓存总量 256MB 上限；AXML 包名交叉校验 `_decide_manifest_package`；nsmap 净化 `_sanitize_nsmap`）、JADX/Ghidra/aapt 子进程（`fxapk/analyzers/jadx.py`、`fxapk/core/tools.py`、`fxapk/core/jadx_index*.py`）、43 个分析器（`fxapk/analyzers/`）、进程池快照（`fxapk/core/snapshot.py`、`pipeline.py`，pickle 只在本机进程间）。
+2. **第三方富化服务 → 分析机**：WHOIS/RDAP/DNS/ASN/ICP/Shodan/crt.sh/FOFA/Hunter/Spamhaus（`fxapk/enrichers/`；`_http.py` `CappedSession` 流式限响应体、自行逐跳跟随重定向并在跟随前拦截）。API 密钥来自项目根 `.env`（`fxapk/core/dotenv.py`、`secrets.py`）。
+3. **分析机 ↔ 测试设备**：adb/Frida/tcpdump/mitmproxy CA（`fxapk/dynamic/`、`fxapk/core/device.py`，subprocess 列表参数 + 超时）；样本在设备上运行，其流量、Frida 回传消息回到主机（`probe_ingest.py`、`pcap_ingest.py`、`tshark_backend.py`、`merge.py`）。
+4. **网页/HAR/CDP → 分析机**：`analyze-web`（默认离线）、`fxapk/analyzers/web_har.py`、`web_evidence.py`；可选 REA 插件（`plugins/fxapk-rea`，默认关闭，需 `FXAPK_ENABLE_REA=1`）。
+5. **DEX 查询隔离进程**：`plugins/fxapk-asc` 由 `fxapk/core/dex_query.py` 以 `python -I -m fxapk_asc.worker` 子进程调用。
+6. **插件加载**：`fxapk/plugins/registry.py` 只加载 `_ALLOWED` 白名单内的 entry point（`android_ui`、`rea`、`flutter`）。
+7. **样本派生数据 → 报告/文书**：Jinja2 HTML（`fxapk/report/html.py`，`select_autoescape`）、PDF（`pdf.py`）、文书（`letters.py`，Markdown 出口 `_md_safe`）、CSV `export`、digest（有限脱敏 `fxapk/core/redact.py`）。
+8. **案件库**：corpus（`fxapk/core/corpus*.py`，库根须在工作树外，fail-closed 哈希校验）、phase2 不可变包（`fxapk/core/phase2/`）、`lead restore|replay`、`regress`。
 9. **本机其他进程**：共享分析机上的低权限用户/进程可读写临时目录、缓存（JADX 索引分片、run ledger）、`.env`。
-10. **供应链**：`.github/workflows/ci.yml`、`release.yml`（顶层只读，publish job 声明 `id-token: write` 用 PyPI Trusted Publishing）、`requirements.lock`、提交前泄漏扫描（`apkscan/core/leakscan.py`、`.githooks/`）。
+10. **供应链**：`.github/workflows/ci.yml`、`release.yml`（顶层只读，publish job 声明 `id-token: write` 用 PyPI Trusted Publishing）、`requirements.lock`、提交前泄漏扫描（`fxapk/core/leakscan.py`、`.githooks/`）。
 11. **已保存材料与恢复回执 → 分析机**：`core/fetch_intake.py` 调用可信本机 fxfetch CLI，读取其 handoff、ZIP 与原 APK；`core/offline_review/` 读取哈希绑定的 DEX/ELF/内存/日志，部分任务交给有界子进程；`dynamic/recovery.py` 接收显式 PID/范围的设备回传。输入哈希不证明来源真实性；详细回执、源码和子进程日志含受控原值。
 
 ## 2. 主要组件
 
 | 组件 | 覆盖代码 |
 |---|---|
-| fxapk-Static | `apkscan/core/apk.py`、`apkscan/analyzers/`、`apkscan/config/`（含远程配置拉取 `fetch.py` 的 SSRF 守卫）、`apkscan/core/`（解析、JADX 索引、快照、pipeline、config-probe、web/HAR 摄入） |
-| fxapk-Dynamic | `apkscan/dynamic/`、`apkscan/core/device.py` |
-| fxapk-Enrich | `apkscan/enrichers/`、`apkscan/core/enrichment*.py`、`apkscan/core/closure/`、`apkscan/attribution/`、`apkscan/network/`、`apkscan/core/dotenv.py`、`secrets.py` |
-| fxapk-Output | `apkscan/cli.py`、`apkscan/commands/`、`apkscan/report/`、`apkscan/core/corpus*.py`、`apkscan/core/phase2/`、`redact.py` |
-| fxapk-Plugins | `plugins/`（rea、asc、android-ui、flutter）、`apkscan/plugins/`、`apkscan/core/dex_query.py` |
-| Build-Release | `.github/workflows/`、`tools/`、`skills/`、`.githooks/`、`apkscan/core/leakscan.py`、`pyproject.toml`、`requirements.lock` |
+| fxapk-Static | `fxapk/core/apk.py`、`fxapk/analyzers/`、`fxapk/config/`（含远程配置拉取 `fetch.py` 的 SSRF 守卫）、`fxapk/core/`（解析、JADX 索引、快照、pipeline、config-probe、web/HAR 摄入） |
+| fxapk-Dynamic | `fxapk/dynamic/`、`fxapk/core/device.py` |
+| fxapk-Enrich | `fxapk/enrichers/`、`fxapk/core/enrichment*.py`、`fxapk/core/closure/`、`fxapk/attribution/`、`fxapk/network/`、`fxapk/core/dotenv.py`、`secrets.py` |
+| fxapk-Output | `fxapk/cli.py`、`fxapk/commands/`、`fxapk/report/`、`fxapk/core/corpus*.py`、`fxapk/core/phase2/`、`redact.py` |
+| fxapk-Plugins | `plugins/`（rea、asc、android-ui、flutter）、`fxapk/plugins/`、`fxapk/core/dex_query.py` |
+| Build-Release | `.github/workflows/`、`tools/`、`skills/`、`.githooks/`、`fxapk/core/leakscan.py`、`pyproject.toml`、`requirements.lock` |
 
 ## 3. 入口点与可达者
 - 输入文件：APK/目录/HAR/report.json/corpus/phase2 包/web-supplement JSON —— 样本作者可控（APK 及其派生内容），或经他人转交的案件材料。

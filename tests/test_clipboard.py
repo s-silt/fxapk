@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from apkscan.core.models import Confidence, Evidence, EvidenceScope, Lead, LeadCategory, Report
-from apkscan.dynamic import cryptohook, merge
+from fxapk.core.models import Confidence, Evidence, EvidenceScope, Lead, LeadCategory, Report
+from fxapk.dynamic import cryptohook, merge
 
 # 测试用合法链上地址（过 chainaddr 校验和）。
 # TRON（Base58Check，0x41 前缀）：USDT-TRC20 常见收款地址。

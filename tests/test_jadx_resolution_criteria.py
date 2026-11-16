@@ -32,13 +32,13 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.jadx_callpath import (
+from fxapk import cli
+from fxapk.core.jadx_callpath import (
     CallPathEdge,
     CallPathLimits,
     trace_callpath,
 )
-from apkscan.core.jadx_index import (
+from fxapk.core.jadx_index import (
     DexInput,
     DexLineage,
     DexRole,

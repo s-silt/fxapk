@@ -96,7 +96,7 @@ def scan_source(source: str, rel: str) -> Counter[str]:
 
 def compute_silent_excepts(root: Path) -> dict[str, int]:
     total: Counter[str] = Counter()
-    for path in sorted((root / "apkscan").rglob("*.py")):
+    for path in sorted((root / "fxapk").rglob("*.py")):
         rel = path.relative_to(root).as_posix()
         total.update(scan_source(path.read_text(encoding="utf-8"), rel))
     return dict(sorted(total.items()))

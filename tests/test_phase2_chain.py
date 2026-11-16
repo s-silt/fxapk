@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from apkscan.core.phase2.chain import (
+from fxapk.core.phase2.chain import (
     CHAIN_LINKS,
     ENVELOPE_LINKS,
     chain_link,
@@ -65,7 +65,7 @@ def test_each_link_schema_names_its_previous_link() -> None:
 def test_written_inventory_records_manifest_bytes(tmp_path: Path) -> None:
     from typer.testing import CliRunner
 
-    import apkscan.cli as cli
+    import fxapk.cli as cli
     from tests.phase2_fixtures import write_verified_package
 
     case_dir = tmp_path / "case"
@@ -84,7 +84,7 @@ def test_written_inventory_records_manifest_bytes(tmp_path: Path) -> None:
 def test_triage_previous_hash_is_inventory_file_bytes(tmp_path: Path) -> None:
     from typer.testing import CliRunner
 
-    import apkscan.cli as cli
+    import fxapk.cli as cli
     from tests.phase2_fixtures import write_verified_package
 
     case_dir = tmp_path / "case"
@@ -106,8 +106,8 @@ def test_triage_previous_hash_is_inventory_file_bytes(tmp_path: Path) -> None:
 def test_multi_package_previous_hash_is_manifest_bytes_not_a_new_fingerprint(tmp_path: Path) -> None:
     from typer.testing import CliRunner
 
-    import apkscan.cli as cli
-    from apkscan.core.integrity import sha256_hex
+    import fxapk.cli as cli
+    from fxapk.core.integrity import sha256_hex
     from tests.phase2_fixtures import write_verified_package
 
     case_dir = tmp_path / "case"
@@ -130,7 +130,7 @@ def test_multi_package_previous_hash_is_manifest_bytes_not_a_new_fingerprint(tmp
 def test_triage_refuses_partial_inventory_file(tmp_path: Path) -> None:
     from typer.testing import CliRunner
 
-    import apkscan.cli as cli
+    import fxapk.cli as cli
     from tests.phase2_fixtures import write_verified_package
 
     case_dir = tmp_path / "case"
@@ -149,7 +149,7 @@ def test_triage_refuses_partial_inventory_file(tmp_path: Path) -> None:
 def test_triage_writes_inventory_file_when_missing(tmp_path: Path) -> None:
     from typer.testing import CliRunner
 
-    import apkscan.cli as cli
+    import fxapk.cli as cli
     from tests.phase2_fixtures import write_verified_package
 
     case_dir = tmp_path / "case"
@@ -162,7 +162,7 @@ def test_triage_writes_inventory_file_when_missing(tmp_path: Path) -> None:
 
 
 def test_missing_coverage_is_not_hashed_as_empty_bytes(tmp_path: Path) -> None:
-    from apkscan.core.phase2.link import build_gate_receipt
+    from fxapk.core.phase2.link import build_gate_receipt
 
     class _Package:
         package_id = "ab" * 32
@@ -196,7 +196,7 @@ def test_human_queue_without_ledger_is_not_auto_closed(tmp_path: Path) -> None:
     """有人判队列且从未落账本时，gate 也不能把缺失读成空账本。"""
     from typer.testing import CliRunner
 
-    import apkscan.cli as cli
+    import fxapk.cli as cli
     from tests.phase2_fixtures import write_verified_package
 
     case_dir = tmp_path / "case"
@@ -223,9 +223,9 @@ def test_deleted_decision_ledger_is_not_an_empty_ledger(tmp_path: Path) -> None:
     """物化已落空账本后，删掉它不能再被 gate 补成同一份 PASS。"""
     from typer.testing import CliRunner
 
-    import apkscan.cli as cli
-    from apkscan.core.integrity import sha256_hex
-    from apkscan.core.phase2.chain import file_sha256
+    import fxapk.cli as cli
+    from fxapk.core.integrity import sha256_hex
+    from fxapk.core.phase2.chain import file_sha256
     from tests.phase2_fixtures import write_verified_package
 
     case_dir = tmp_path / "case"

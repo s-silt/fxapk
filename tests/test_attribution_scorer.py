@@ -6,15 +6,15 @@ from collections.abc import Mapping
 
 import pytest
 
-from apkscan.attribution.models import AttributionEvidence
-from apkscan.attribution.roles import (
+from fxapk.attribution.models import AttributionEvidence
+from fxapk.attribution.roles import (
     InfrastructureRole,
     RoleAssessment,
     RoleClassifier,
     RoleFeature,
     RoleSignal,
 )
-from apkscan.attribution.scorer import (
+from fxapk.attribution.scorer import (
     MAX_SCORE,
     MIN_SCORE,
     EvidenceScorer,
@@ -24,7 +24,7 @@ from apkscan.attribution.scorer import (
     _ROLE_POLICIES,
     _RolePolicy,
 )
-from apkscan.network import NetworkEntity, NetworkEntityType
+from fxapk.network import NetworkEntity, NetworkEntityType
 
 
 def _entity(value: str = "1.2.3.4") -> NetworkEntity:
@@ -1027,7 +1027,7 @@ def test_scorer_preserves_canonical_signal_omitted_from_policy_as_zero_context(
     # its evidence intact and leaves the score unchanged. We prove this by
     # monkeypatching the edge policy to drop public_cdn entirely; the exact
     # production policy is untouched (it still weights public_cdn at 0).
-    import apkscan.attribution.scorer as scorer_mod
+    import fxapk.attribution.scorer as scorer_mod
 
     target = _entity()
     features = (

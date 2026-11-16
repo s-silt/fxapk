@@ -11,18 +11,18 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
-from apkscan.core import apk as apk_module, parallel, parser_worker
-from apkscan.core.models import (
+from fxapk.core import apk as apk_module, parallel, parser_worker
+from fxapk.core.models import (
     AnalysisConfig,
     AnalyzerResult,
     CertInfo,
     Component,
     ComponentSet,
 )
-from apkscan.core.observations import DexStringRecord
-from apkscan.core.parser_limits import ParserLimits
-from apkscan.core.proctree import OwnedRun, run_owned
-from apkscan.core.snapshot import SnapshotContext
+from fxapk.core.observations import DexStringRecord
+from fxapk.core.parser_limits import ParserLimits
+from fxapk.core.proctree import OwnedRun, run_owned
+from fxapk.core.snapshot import SnapshotContext
 
 
 def _limits() -> ParserLimits:
@@ -257,7 +257,7 @@ def test_configured_loader_errors_never_fall_back(
     _set_limits(monkeypatch)
     apk_path = tmp_path / "synthetic.apk"
     _make_apk(apk_path)
-    monkeypatch.setattr("apkscan.core.proctree.run_owned", lambda *_a, **_kw: run)
+    monkeypatch.setattr("fxapk.core.proctree.run_owned", lambda *_a, **_kw: run)
     monkeypatch.setattr(
         apk_module,
         "_load_apk_inprocess",
@@ -293,7 +293,7 @@ def test_isolated_late_read_uses_child_policy_and_rejects_changed_input(
     worker_copy = pickle.loads(pickle.dumps(context))
     assert worker_copy.declared_size("lib/arm64-v8a/libsample.so") == declared_size
     monkeypatch.setattr(
-        "apkscan.core.snapshot.zipfile.ZipFile",
+        "fxapk.core.snapshot.zipfile.ZipFile",
         lambda *_a, **_kw: pytest.fail(
             "isolated declared-size lookup reopened the ZIP in parent"
         ),
@@ -498,8 +498,8 @@ def test_parser_load_rejects_snapshot_with_changed_policy(
 
 
 def test_parser_execution_flows_through_pipeline_contract_and_digest() -> None:
-    from apkscan.core import meta_contract, pipeline
-    from apkscan.report.digest import build_digest
+    from fxapk.core import meta_contract, pipeline
+    from fxapk.report.digest import build_digest
 
     receipt = {"status": "completed_under_limits", "policy": {"memory_bytes": 1}}
     state = pipeline._PipelineState(
@@ -603,8 +603,8 @@ def test_run_owned_enforces_timeout_output_and_address_space() -> None:
 def test_cli_writes_parser_failure_sidecar_and_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from apkscan import cli
-    from apkscan.core.apk import ApkParseError
+    from fxapk import cli
+    from fxapk.core.apk import ApkParseError
 
     apk_path = tmp_path / "blocked.apk"
     apk_path.write_bytes(b"synthetic")

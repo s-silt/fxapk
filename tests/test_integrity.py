@@ -1,4 +1,4 @@
-"""apkscan.core.integrity 单测：取证完整性元数据（可采性背书层）。
+"""fxapk.core.integrity 单测：取证完整性元数据（可采性背书层）。
 
 覆盖：
 - ``sample_fingerprint``：真临时文件 → sha256/sha1/md5/size 与标准库交叉核对、
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.integrity import evidence_id, sample_fingerprint, web_evidence_fingerprint
+from fxapk.core.integrity import evidence_id, sample_fingerprint, web_evidence_fingerprint
 
 
 # --------------------------- sample_fingerprint ---------------------------
@@ -124,7 +124,7 @@ def test_sample_fingerprint_missing_file_does_not_raise(tmp_path: Path) -> None:
 
 def test_current_build_provenance_returns_a_copy(monkeypatch) -> None:  # noqa: ANN001
     """兼容检查可读构建坐标，但不得拿到并修改 integrity 的进程缓存本体。"""
-    from apkscan.core import integrity
+    from fxapk.core import integrity
 
     monkeypatch.setattr(
         integrity,
@@ -193,7 +193,7 @@ def test_evidence_id_ignores_snippet() -> None:
 # --------------------------- build_provenance（取证复现：git commit） ---------------------------
 def test_build_provenance_graceful_when_no_git(monkeypatch, tmp_path: Path) -> None:
     """★取证复现：无 git / 非源码树（pip 包）→ build_commit=None、build_dirty=None，绝不抛。"""
-    from apkscan.core import integrity
+    from fxapk.core import integrity
 
     monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)  # 清进程内缓存
 
@@ -211,7 +211,7 @@ def test_build_provenance_returns_commit_and_dirty(monkeypatch, tmp_path: Path) 
     """源码树运行：git rev-parse → commit SHA；git status 非空 → build_dirty=True（锁定"哪版代码产的报告"）。"""
     import types
 
-    from apkscan.core import integrity
+    from fxapk.core import integrity
 
     monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)
 
@@ -225,7 +225,7 @@ def test_build_provenance_returns_commit_and_dirty(monkeypatch, tmp_path: Path) 
         if "rev-parse" in args:
             return types.SimpleNamespace(returncode=0, stdout="abc123def456\n", stderr="")
         return types.SimpleNamespace(
-            returncode=0, stdout=" M apkscan/x.py\n", stderr=""
+            returncode=0, stdout=" M fxapk/x.py\n", stderr=""
         )  # status → dirty
 
     monkeypatch.setattr(integrity.subprocess, "run", _fake_run)
@@ -242,10 +242,10 @@ def test_build_provenance_rejects_enclosing_repository_for_wheel(
     """仓库内 .venv 的 wheel 不能把外层 checkout HEAD 冒充自身构建修订。"""
     import types
 
-    from apkscan.core import integrity
+    from fxapk.core import integrity
 
     outer_repo = tmp_path / "checkout"
-    installed = outer_repo / ".venv/Lib/site-packages/apkscan/core/integrity.py"
+    installed = outer_repo / ".venv/Lib/site-packages/fxapk/core/integrity.py"
     monkeypatch.setattr(integrity, "__file__", str(installed))
     monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)
     calls: list[list[str]] = []
@@ -271,7 +271,7 @@ def test_build_provenance_failure_not_cached_reprobes(monkeypatch, tmp_path: Pat
     """★codex 复核 #1：git 首次失败不缓存 → 同进程内 git 恢复后重探仍能取到 commit（不被 None 永久钉住）。"""
     import types
 
-    from apkscan.core import integrity
+    from fxapk.core import integrity
 
     monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)
     apk = tmp_path / "x.apk"

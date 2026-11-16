@@ -8,14 +8,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from apkscan.analyzers.web_evidence import (
+from fxapk.analyzers.web_evidence import (
     WebInlineConfigAnalyzer,
     WebRedirectChainAnalyzer,
     WebRequestRecipeAnalyzer,
 )
-from apkscan.analyzers.web_har import WebHarAnalyzer
-from apkscan.core.models import AnalysisConfig
-from apkscan.core.webctx import WebContext
+from fxapk.analyzers.web_har import WebHarAnalyzer
+from fxapk.core.models import AnalysisConfig
+from fxapk.core.webctx import WebContext
 
 BODY = (
     '<html><script>window.api="https://config.example.test/v1";'
@@ -78,7 +78,7 @@ def test_body_provenance_binds_source_entry_and_exact_decoded_bytes():
 
 @pytest.mark.parametrize("analyzer", ANALYZERS)
 def test_body_budget_omission_is_visible_to_semantic_coverage(analyzer, monkeypatch):
-    import apkscan.analyzers.web_har as har
+    import fxapk.analyzers.web_har as har
     monkeypatch.setattr(har, "MAX_BODY_BYTES", 4)
     result = analyzer().analyze(make_context())
     assert result.meta.get(analyzer.name + "_content_truncated") is True
@@ -112,9 +112,9 @@ def test_unusable_bodies_do_not_enter_semantic_analysis(body, encoding, content_
 
 def test_public_body_inputs_are_immutable_and_do_not_change_fingerprint(monkeypatch):
     from dataclasses import FrozenInstanceError
-    from apkscan.analyzers.web_har import decode_har_evidence
-    from apkscan.core import integrity
-    from apkscan.core.webctx import WebBodyInput
+    from fxapk.analyzers.web_har import decode_har_evidence
+    from fxapk.core import integrity
+    from fxapk.core.webctx import WebBodyInput
 
     monkeypatch.setattr(integrity, "_build_provenance", lambda: {})
     ctx = make_context(truncated=True)
@@ -141,7 +141,7 @@ def test_public_body_inputs_are_immutable_and_do_not_change_fingerprint(monkeypa
 
 
 def test_bom_normalization_keeps_decoded_body_and_analysis_hashes_distinct():
-    from apkscan.analyzers.web_har import decode_har_evidence
+    from fxapk.analyzers.web_har import decode_har_evidence
 
     raw = BODY.encode("utf-16")
     ctx = make_context(body=base64.b64encode(raw).decode(), encoding="base64")
@@ -154,7 +154,7 @@ def test_bom_normalization_keeps_decoded_body_and_analysis_hashes_distinct():
 
 
 def test_explicit_javascript_mime_uses_existing_script_semantics():
-    from apkscan.analyzers.web_har import decode_har_evidence
+    from fxapk.analyzers.web_har import decode_har_evidence
 
     ctx = make_context(body=BODY.removeprefix("<html><script>").removesuffix("</script></html>"))
     payload = json.loads(ctx.read_file("web/synthetic.har"))
@@ -168,7 +168,7 @@ def test_explicit_javascript_mime_uses_existing_script_semantics():
 
 
 def test_real_pipeline_keeps_semantic_signals_and_har_provenance(monkeypatch):
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [
         analyzer() for analyzer in (*ANALYZERS, WebHarAnalyzer)

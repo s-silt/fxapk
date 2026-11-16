@@ -5,8 +5,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from apkscan.core.proctree import run_owned
-from apkscan.core import tools
+from fxapk.core.proctree import run_owned
+from fxapk.core import tools
 
 
 @dataclass(frozen=True)

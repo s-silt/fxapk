@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-import apkscan.enrichers.certs as certs_mod
-from apkscan.core import forensic
-from apkscan.core.models import Endpoint
-from apkscan.enrichers.certs import CertsEnricher
+import fxapk.enrichers.certs as certs_mod
+from fxapk.core import forensic
+from fxapk.core.models import Endpoint
+from fxapk.enrichers.certs import CertsEnricher
 
 # 取自真实 crt.sh ?output=json 响应形态的精简样例（name_value 可多行含通配，含一条无关 SAN）。
 _CRTSH_PAYLOAD = [

@@ -23,12 +23,12 @@ from pathlib import Path
 from typing import Any, Callable
 from unittest import mock
 
-from apkscan.analyzers.packing import _STUB_MAX_DEX_STRINGS
-from apkscan.core import corpus, pipeline
-from apkscan.core.closure import ClosureConfig, close_report
-from apkscan.core.models import AnalysisConfig, Report
-from apkscan.report.digest import build_digest
-from apkscan.report.json import to_dict
+from fxapk.analyzers.packing import _STUB_MAX_DEX_STRINGS
+from fxapk.core import corpus, pipeline
+from fxapk.core.closure import ClosureConfig, close_report
+from fxapk.core.models import AnalysisConfig, Report
+from fxapk.report.digest import build_digest
+from fxapk.report.json import to_dict
 from tests.conftest import FakeContext
 from tests.synthetic.samples import SAMPLES, SyntheticSample
 

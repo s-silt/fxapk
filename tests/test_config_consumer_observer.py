@@ -14,7 +14,7 @@ def run_observer(scenario):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js unavailable")
-    source = ROOT / "apkscan/dynamic/frida_js/config_consumer_hook.js"
+    source = ROOT / "fxapk/dynamic/frida_js/config_consumer_hook.js"
     assert source.is_file(), "consumer observer not implemented"
     result = subprocess.run([node, str(ROOT / "tests/fixtures/config_consumer_harness.js"), str(source), scenario],
                             text=True, capture_output=True, timeout=10)
@@ -46,8 +46,8 @@ def test_observer_preserves_original_objects_and_requires_direct_origin(scenario
 
 
 def test_config_consumer_is_opt_in_and_requires_body_observer():
-    from apkscan.dynamic.capture import _build_injection_source
-    from apkscan.dynamic.probe_coverage import new_probe_state
+    from fxapk.dynamic.capture import _build_injection_source
+    from fxapk.dynamic.probe_coverage import new_probe_state
     assert "fxapk-config-consumer-v1" not in _build_injection_source(enable_tls_unpinning=False)
     with pytest.raises(ValueError, match="config_consumer_requires_config_body"):
         _build_injection_source(selected_hooks=("config_consumer",), enable_tls_unpinning=False)
@@ -59,7 +59,7 @@ def test_config_consumer_is_opt_in_and_requires_body_observer():
 
 
 def test_invalid_consumer_profile_fails_before_any_device_work(monkeypatch):
-    from apkscan.dynamic import capture
+    from fxapk.dynamic import capture
     def unexpected(*args, **kwargs):
         pytest.fail("invalid profile reached capture setup")
     monkeypatch.setattr(capture, "decide_capture", unexpected)
@@ -97,12 +97,12 @@ def test_http_coordinates_require_observed_host_and_applicable_sni(protocol):
 
 
 def test_real_observer_script_to_archive_projection_and_digest(tmp_path):
-    from apkscan.core.models import Endpoint, Report
-    from apkscan.dynamic.addressing import project_addressing
-    from apkscan.dynamic.addressing_events import AddressingEventCollector
-    from apkscan.dynamic.config_artifacts import ConfigBodyCollector
-    from apkscan.dynamic.event_origin import RuntimePayload
-    from apkscan.report.digest import build_digest
+    from fxapk.core.models import Endpoint, Report
+    from fxapk.dynamic.addressing import project_addressing
+    from fxapk.dynamic.addressing_events import AddressingEventCollector
+    from fxapk.dynamic.config_artifacts import ConfigBodyCollector
+    from fxapk.dynamic.event_origin import RuntimePayload
+    from fxapk.report.digest import build_digest
     from tests.test_addressing_runtime import ART, BODY, CONTEXT, SAMPLE
     collector = AddressingEventCollector(tmp_path, CONTEXT)
     for event in run_observer("direct")["events"]:

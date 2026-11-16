@@ -1,4 +1,4 @@
-"""apkscan.dynamic.repackage 单测：去壳重打包（zip 替 DEX + 重签 + 装回 + 四联判活 + 降级）。
+"""fxapk.dynamic.repackage 单测：去壳重打包（zip 替 DEX + 重签 + 装回 + 四联判活 + 降级）。
 
 铁律呼应：返回 DynamicResult 五字段、绝不抛、subprocess 文件重定向不用 PIPE。
 全 mock：不碰真机、不调真 apksigner/zipalign/keytool、不开真 frida。
@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from apkscan.dynamic import STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
-from apkscan.dynamic import repackage
+from fxapk.dynamic import STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
+from fxapk.dynamic import repackage
 
 
 def _make_apk(path: Path, *, dex: bytes = b"dex\n035\x00orig") -> None:
@@ -52,7 +52,7 @@ def _patch_build_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _patch_provision(monkeypatch: pytest.MonkeyPatch, *, install_ok: bool = True) -> list[str]:
     """桩 provision.uninstall_app/install_apk，记录调用顺序。"""
-    import apkscan.dynamic.provision as prov
+    import fxapk.dynamic.provision as prov
 
     order: list[str] = []
     monkeypatch.setattr(prov, "uninstall_app", lambda p, serial=None: (order.append("uninstall"), {"ok": True})[1])

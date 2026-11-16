@@ -1,4 +1,4 @@
-"""apkscan.dynamic.probe_ingest 的单测。
+"""fxapk.dynamic.probe_ingest 的单测。
 
 probe_ingest 把独立 frida 探针(自备，`-l` 注入)吐到 console 的 `[tag][LEAD-...]` 散点输出，
 解析→按 LeadCategory 分类→去重→聚成调证台账(md/json)，并可追加进 report.json。
@@ -6,7 +6,7 @@ probe_ingest 把独立 frida 探针(自备，`-l` 注入)吐到 console 的 `[ta
 """
 
 from __future__ import annotations
-from apkscan.core import atomic as atomic_io
+from fxapk.core import atomic as atomic_io
 
 import json
 import pathlib as _pathlib
@@ -16,11 +16,11 @@ import subprocess
 
 import pytest
 
-from apkscan.core import infra
-from apkscan.core import runtime_inventory as _inv
-from apkscan.core.closure import CLOSURE_PARTIAL, evaluate_capture_quality
-from apkscan.core.models import LeadCategory
-from apkscan.dynamic import probe_ingest
+from fxapk.core import infra
+from fxapk.core import runtime_inventory as _inv
+from fxapk.core.closure import CLOSURE_PARTIAL, evaluate_capture_quality
+from fxapk.core.models import LeadCategory
+from fxapk.dynamic import probe_ingest
 from tests.doc_addresses import (
     DOC_BACKEND_IP,
     DOC_IPV6,
@@ -383,7 +383,7 @@ def test_probe_infra_domain_produces_no_letter_even_with_evidence_filled(tmp_pat
     一段都不许绕：``push-c2`` 经 ``_TAG_MAP`` 映射成 SELF_HOSTED_IM，手搓
     ``ProbeLead(category=DOMAIN, ...)`` 的测试会全绿而真实链路照旧出文书。
     """
-    from apkscan.report import letters
+    from fxapk.report import letters
 
     infra_host = sorted(infra.KNOWN_INFRA_EXACT)[0]
     report_path = tmp_path / "report.json"
@@ -434,7 +434,7 @@ def test_ledger_md_includes_coverage_section() -> None:
 def test_build_ledger_md_escapes_injection_in_value() -> None:
     """★回归（codex 全库审计 P1）：探针 value/probe 样本可控，markdown 台账须转义反引号/HTML/链接，
     不裸包 inline-code 让载荷逃逸注入（主 HTML 报告另走 Jinja 自动转义、不受此路径影响）。"""
-    from apkscan.core.models import LeadCategory
+    from fxapk.core.models import LeadCategory
 
     payload = "x` <img src=x onerror=alert(document.domain)> `"
     lead = probe_ingest.ProbeLead(category=LeadCategory.PAYMENT, value=payload, probe="pay", raw=payload)
@@ -618,7 +618,7 @@ def test_probe_address_values_only_takes_real_addresses() -> None:
 
 def test_probe_address_values_matches_pcap_caliber_on_private_ips() -> None:
     """口径必须与 pcap 路径一致：两条路径的贡献集合取并集，口径不同 = 同一后端算两次。"""
-    from apkscan.dynamic import pcap_ingest
+    from fxapk.dynamic import pcap_ingest
 
     for private in ("192.168.1.9", "10.0.0.5", "127.0.0.1", "169.254.1.1"):
         line = f"[netstat] [LEAD->接入节点] {private}:8080  ESTABLISHED"
@@ -683,7 +683,7 @@ def test_url_host_is_reportable_agrees_with_pcap_caliber(
       ②定向放行后，同一个占位值两侧同判 True——否则「一侧收下、另一侧不收」的漂移
         会让同一个后端在并集里被算两次，而单看任一侧都自洽。
     """
-    from apkscan.dynamic import pcap_ingest
+    from fxapk.dynamic import pcap_ingest
 
     restore_real_address_calipers(monkeypatch)
     for ip, should_be_public in public_and_non_public_probe_cases():
@@ -982,7 +982,7 @@ def test_probe_merge_refreshes_the_visibility_snapshot(tmp_path) -> None:
     断言比对「落盘快照 == 对该 payload 现场重算」，所以它不针对某个写方：
     将来谁往 meta 写信号却忘了刷新，这条就会红。
     """
-    from apkscan.core import visibility
+    from fxapk.core import visibility
 
     log = "[netstat] [LEAD->接入节点] 198.51.100.44:8443  ESTABLISHED"
     path = tmp_path / "report.json"
@@ -1014,7 +1014,7 @@ def test_probe_ipv6_caliber_agrees_with_pcap(monkeypatch: pytest.MonkeyPatch) ->
     """
     import ipaddress
 
-    from apkscan.dynamic import pcap_ingest
+    from fxapk.dynamic import pcap_ingest
 
     restore_real_address_calipers(monkeypatch)
     for value, expected in (
@@ -1153,7 +1153,7 @@ def test_probe_merge_keeps_a_real_capture_quality_untouched(tmp_path) -> None:
 
 # ---------------------------------------------------------------------------
 # P1-a：入库探针补 LEAD / 对齐 tag 后，合成 log 能回灌成正确 LeadCategory
-#   （探针 .js 本身入 apkscan/dynamic/frida_probes/，此处以其 console 格式的合成 log 验解析）
+#   （探针 .js 本身入 fxapk/dynamic/frida_probes/，此处以其 console 格式的合成 log 验解析）
 # ---------------------------------------------------------------------------
 
 
@@ -1229,7 +1229,7 @@ def test_p1a_telegram_and_pushc2_still_ingest() -> None:
 
 def test_p1b_single_source_probe_never_high() -> None:
     """探针单源（未 merge）永不 HIGH——这是取消一律 HIGH 的核心语义。"""
-    from apkscan.core.models import Confidence
+    from fxapk.core.models import Confidence
 
     leads = probe_ingest.to_report_leads(probe_ingest.parse_probe_log(_SAMPLE_LOG))
     assert leads, "样本应产出线索"
@@ -1239,7 +1239,7 @@ def test_p1b_single_source_probe_never_high() -> None:
 
 def test_p1b_review_advice_maps_low_investigate_maps_medium() -> None:
     """advice==待核→LOW；advice==建议调证→MEDIUM（confidence 是 advice 的纯投影）。"""
-    from apkscan.core.models import Confidence
+    from fxapk.core.models import Confidence
 
     # 被判据链压到「待核」的（已知基础设施域）→ REVIEW → LOW
     infra_domain = sorted(infra.KNOWN_INFRA_EXACT)[0]
@@ -1512,7 +1512,7 @@ def _seed_report(tmp_path, lead_dict: dict) -> str:
 
 def test_p1b_merge_upgrades_to_high_on_two_source_corroboration(tmp_path) -> None:
     """静态已有 (SELF_HOSTED_IM, ip:port, 建议调证) + runtime 探针同值命中 + 有网络锚点 → 升 HIGH。"""
-    from apkscan.core.models import Confidence
+    from fxapk.core.models import Confidence
 
     val = "100.64.9.9:8443"  # 纯净 ip:port，_network_target 认得（探针带描述尾巴的 value 不算网络锚点）
     seed = {
@@ -1541,7 +1541,7 @@ def test_p1b_merge_upgrades_to_high_on_two_source_corroboration(tmp_path) -> Non
 
 def test_p1b_merge_no_upgrade_when_advice_not_investigate(tmp_path) -> None:
     """★缺 INVESTIGATE 这一条件 → 不升 HIGH（删该条件即红）。"""
-    from apkscan.core.models import Confidence
+    from fxapk.core.models import Confidence
 
     val = "100.64.9.9:8443"
     seed = {
@@ -1559,7 +1559,7 @@ def test_p1b_merge_no_upgrade_when_advice_not_investigate(tmp_path) -> None:
 
 def test_p1b_merge_no_upgrade_when_value_lacks_network_anchor(tmp_path) -> None:
     """★缺网络锚点这一条件 → 不升 HIGH（value 不是干净网络标的）。"""
-    from apkscan.core.models import Confidence
+    from fxapk.core.models import Confidence
 
     val = "chat_key"  # CRYPTO_RECIPE 类，非网络锚点；抽出干净 chat_key 以确保 merge 真命中既有键
     seed = {
@@ -1582,7 +1582,7 @@ def test_p1b_merge_no_upgrade_when_no_new_evidence(tmp_path) -> None:
 
     把生产码的 `if ev_merged:` 变恒真，本测试红。
     """
-    from apkscan.core.models import Confidence
+    from fxapk.core.models import Confidence
 
     val = "100.64.9.9:8443"
     # 预置的既有 lead 已含与探针将产的**完全相同**的 runtime 证据（source/location/snippet/scope 全同）
@@ -1611,7 +1611,7 @@ def test_p1b_confidence_is_pure_projection_of_advice() -> None:
     随 advice 走、不带独立状态。这是"不产生撤不回降档"的基础——硬门读 advice（可撤销），
     confidence 只读 advice、不自持降档账本。（注：merge 不重算持久 lead 的 confidence，
     是已登记的 处置A 残留，恢复发生在重新 ingest 产出 fresh lead 时。）"""
-    from apkscan.core.models import Confidence
+    from fxapk.core.models import Confidence
 
     infra_domain = sorted(infra.KNOWN_INFRA_EXACT)[0]
     low = probe_ingest.to_report_leads(probe_ingest.parse_probe_log(f"[push-c2] [LEAD->穿透] {infra_domain}"))[0]

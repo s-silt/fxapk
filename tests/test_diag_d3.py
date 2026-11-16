@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from apkscan.analyzers.runtime_diagnostics import RuntimeDiagnosticsAnalyzer
+from fxapk.analyzers.runtime_diagnostics import RuntimeDiagnosticsAnalyzer
 from tests.conftest import FakeContext
 
 _NS = "xmlns:android='http://schemas.android.com/apk/res/android'"

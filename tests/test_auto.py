@@ -1,4 +1,4 @@
-"""apkscan.dynamic.auto 单测：全 mock，无设备也能锁定行为。
+"""fxapk.dynamic.auto 单测：全 mock，无设备也能锁定行为。
 
 monkeypatch auto 模块内引用 / 惰性 import 的 doctor.run / unpack.run / capture.run /
 merge.* / load_apk / pipeline.run / device.has_device，覆盖：
@@ -22,17 +22,17 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import cli
-from apkscan.core.models import Endpoint, Report
-from apkscan.dynamic import STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
-from apkscan.dynamic import auto
+from fxapk import cli
+from fxapk.core.models import Endpoint, Report
+from fxapk.dynamic import STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
+from fxapk.dynamic import auto
 
 runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
 def _avoid_case_close_disk_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from apkscan.core import report_io
+    from fxapk.core import report_io
 
     monkeypatch.setattr(
         report_io,
@@ -81,11 +81,11 @@ def _patch_static_ok(
 ) -> Report:
     """打桩静态分析：load_apk + pipeline.run 不碰 androguard，写报告替换为 no-op 返回固定路径。
 
-    注意：auto._run_static 惰性 import ``apkscan.core.apk.load_apk`` 与
-    ``apkscan.core.pipeline``，故在源模块处打桩。
+    注意：auto._run_static 惰性 import ``fxapk.core.apk.load_apk`` 与
+    ``fxapk.core.pipeline``，故在源模块处打桩。
     """
-    import apkscan.core.apk as apk_mod
-    import apkscan.core.pipeline as pipeline_mod
+    import fxapk.core.apk as apk_mod
+    import fxapk.core.pipeline as pipeline_mod
 
     report = _make_report(package_name)
     monkeypatch.setattr(apk_mod, "load_apk", lambda *a, **k: _FakeCtx(package_name))
@@ -101,8 +101,8 @@ def _patch_static_ok(
 
 def test_analyze_static_threads_mode_to_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # 网络模式经 analyze_static → _run_static → AnalysisConfig 透传（默认 passive；可开 authorized-active）。
-    import apkscan.core.apk as apk_mod
-    import apkscan.core.pipeline as pipeline_mod
+    import fxapk.core.apk as apk_mod
+    import fxapk.core.pipeline as pipeline_mod
 
     captured: dict[str, str] = {}
     report = _make_report("com.x")
@@ -129,7 +129,7 @@ def test_analyze_static_threads_mode_to_config(monkeypatch: pytest.MonkeyPatch) 
 
 def _patch_doctor(monkeypatch: pytest.MonkeyPatch, ok: bool = True) -> dict[str, Any]:
     """打桩 doctor.run，记录被调与 on_progress 透传。"""
-    import apkscan.dynamic.doctor as doctor_mod
+    import fxapk.dynamic.doctor as doctor_mod
 
     calls: dict[str, Any] = {"called": False, "on_progress": None, "serial": None}
 
@@ -147,7 +147,7 @@ def _patch_doctor(monkeypatch: pytest.MonkeyPatch, ok: bool = True) -> dict[str,
 
 
 def _patch_unpack(monkeypatch: pytest.MonkeyPatch, result: dict) -> dict[str, Any]:
-    import apkscan.dynamic.unpack as unpack_mod
+    import fxapk.dynamic.unpack as unpack_mod
 
     calls: dict[str, Any] = {"called": False}
 
@@ -162,7 +162,7 @@ def _patch_unpack(monkeypatch: pytest.MonkeyPatch, result: dict) -> dict[str, An
 
 
 def _patch_capture(monkeypatch: pytest.MonkeyPatch, result: dict) -> dict[str, Any]:
-    import apkscan.dynamic.capture as capture_mod
+    import fxapk.dynamic.capture as capture_mod
 
     calls: dict[str, Any] = {"called": False}
 
@@ -177,7 +177,7 @@ def _patch_capture(monkeypatch: pytest.MonkeyPatch, result: dict) -> dict[str, A
 
 
 def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    import apkscan.dynamic.merge as merge_mod
+    import fxapk.dynamic.merge as merge_mod
 
     calls: dict[str, Any] = {"rerender_called": False, "rerender_args": None}
 
@@ -221,7 +221,7 @@ def _set_device(monkeypatch: pytest.MonkeyPatch, present: bool) -> None:
     )
     # 有设备时 auto 会在脱壳/抓包前调 provision.ensure_frida_server / install_apk；mock 掉
     # 避免单测触发真 adb / frida-ps -U（无设备 → 数秒超时，拖慢测试）。
-    import apkscan.dynamic.provision as _prov
+    import fxapk.dynamic.provision as _prov
 
     monkeypatch.setattr(
         _prov, "ensure_frida_server", lambda *a, **k: {"ok": True, "action": "already_running"}
@@ -296,7 +296,7 @@ def _patch_unpack_reanalyzing(
     monkeypatch: pytest.MonkeyPatch, unpacked: Report, dex_count: int = 3
 ) -> None:
     """打桩 unpack.run：模拟脱壳成功并回灌，通过 on_reanalyzed 交出回灌后的报告。"""
-    import apkscan.dynamic.unpack as unpack_mod
+    import fxapk.dynamic.unpack as unpack_mod
 
     def _fake_run(apk_path: str, *a: Any, **k: Any) -> dict:
         unpacked.meta["unpacked"] = True
@@ -472,7 +472,7 @@ def test_no_device_skips_unpack_and_capture_static_still_done(
 
 
 def test_doctor_exception_does_not_stop_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
-    import apkscan.dynamic.doctor as doctor_mod
+    import fxapk.dynamic.doctor as doctor_mod
 
     def _boom(**kwargs: Any) -> dict:
         raise RuntimeError("doctor exploded")
@@ -491,7 +491,7 @@ def test_doctor_exception_does_not_stop_pipeline(monkeypatch: pytest.MonkeyPatch
 
 
 def test_unpack_exception_does_not_stop_capture(monkeypatch: pytest.MonkeyPatch) -> None:
-    import apkscan.dynamic.unpack as unpack_mod
+    import fxapk.dynamic.unpack as unpack_mod
 
     _patch_doctor(monkeypatch, ok=True)
     _patch_static_ok(monkeypatch, "com.fraud.app")
@@ -514,7 +514,7 @@ def test_unpack_exception_does_not_stop_capture(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_capture_exception_does_not_stop_merge_skip(monkeypatch: pytest.MonkeyPatch) -> None:
-    import apkscan.dynamic.capture as capture_mod
+    import fxapk.dynamic.capture as capture_mod
 
     _patch_doctor(monkeypatch, ok=True)
     _patch_static_ok(monkeypatch, "com.fraud.app")
@@ -537,7 +537,7 @@ def test_capture_exception_does_not_stop_merge_skip(monkeypatch: pytest.MonkeyPa
 
 
 def test_merge_exception_marks_error_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
-    import apkscan.dynamic.merge as merge_mod
+    import fxapk.dynamic.merge as merge_mod
 
     _patch_doctor(monkeypatch, ok=True)
     _patch_static_ok(monkeypatch, "com.fraud.app")
@@ -602,7 +602,7 @@ def test_confirm_callback_failure_is_not_consent(
 def test_load_apk_failure_static_error_run_does_not_crash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import apkscan.core.apk as apk_mod
+    import fxapk.core.apk as apk_mod
 
     _patch_doctor(monkeypatch, ok=True)
 
@@ -626,7 +626,7 @@ def test_load_apk_failure_with_device_still_unpacks_but_capture_skips_no_package
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """有设备但 load_apk 失败：静态 error、无包名 → 脱壳照跑、抓包因无包名 skipped。"""
-    import apkscan.core.apk as apk_mod
+    import fxapk.core.apk as apk_mod
 
     _patch_doctor(monkeypatch, ok=True)
     monkeypatch.setattr(
@@ -653,8 +653,8 @@ def test_load_apk_failure_with_device_still_unpacks_but_capture_skips_no_package
 def test_report_paths_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
     """静态与重渲产出相同路径时，report_paths 去重保持顺序。"""
     _patch_doctor(monkeypatch, ok=True)
-    import apkscan.core.apk as apk_mod
-    import apkscan.core.pipeline as pipeline_mod
+    import fxapk.core.apk as apk_mod
+    import fxapk.core.pipeline as pipeline_mod
 
     report = _make_report("com.fraud.app")
     monkeypatch.setattr(apk_mod, "load_apk", lambda *a, **k: _FakeCtx("com.fraud.app"))
@@ -668,7 +668,7 @@ def test_report_paths_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch, _dynamic_result(STATUS_DONE, report_paths=["out/runtime_report.json"])
     )
 
-    import apkscan.dynamic.merge as merge_mod
+    import fxapk.dynamic.merge as merge_mod
 
     # merge 重渲返回与静态相同的 out/report.json → 应去重。
     monkeypatch.setattr(
@@ -784,8 +784,8 @@ def test_cli_auto_module_missing_graceful_exit(monkeypatch: pytest.MonkeyPatch) 
     import sys
     import tempfile
 
-    monkeypatch.delitem(sys.modules, "apkscan.dynamic.auto", raising=False)
-    import apkscan.dynamic as _dyn
+    monkeypatch.delitem(sys.modules, "fxapk.dynamic.auto", raising=False)
+    import fxapk.dynamic as _dyn
 
     monkeypatch.delattr(_dyn, "auto", raising=False)
 
@@ -793,8 +793,8 @@ def test_cli_auto_module_missing_graceful_exit(monkeypatch: pytest.MonkeyPatch) 
 
     def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
         fromlist = args[2] if len(args) >= 3 else kwargs.get("fromlist")
-        if name == "apkscan.dynamic.auto" or (
-            name == "apkscan.dynamic" and fromlist and "auto" in fromlist
+        if name == "fxapk.dynamic.auto" or (
+            name == "fxapk.dynamic" and fromlist and "auto" in fromlist
         ):
             raise ImportError("simulated missing auto")
         return real_import(name, *args, **kwargs)
@@ -886,7 +886,7 @@ def test_run_repackage_invokes_repackage_run_with_serial(monkeypatch: pytest.Mon
         seen["kw"] = kw
         return {"status": "done", "reason": "去壳成功", "artifacts": ["x.apk"], "playbook": [], "report_paths": []}
 
-    monkeypatch.setattr("apkscan.dynamic.repackage.run", _fake)
+    monkeypatch.setattr("fxapk.dynamic.repackage.run", _fake)
     step, _paths = auto._run_repackage(
         "a.apk", "com.x", out_dir="o", has_device=True, serial="emulator-5554", on_progress=None
     )
@@ -904,9 +904,9 @@ def test_analyze_static_runs_only_static_not_doctor_or_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """analyze_static 只跑静态：不调 doctor / 不探测设备 / 不调 unpack/capture。"""
-    import apkscan.dynamic.capture as capture_mod
-    import apkscan.dynamic.doctor as doctor_mod
-    import apkscan.dynamic.unpack as unpack_mod
+    import fxapk.dynamic.capture as capture_mod
+    import fxapk.dynamic.doctor as doctor_mod
+    import fxapk.dynamic.unpack as unpack_mod
 
     _patch_static_ok(monkeypatch, "com.fraud.app")
 
@@ -942,7 +942,7 @@ def test_analyze_static_runs_only_static_not_doctor_or_device(
 def test_analyze_static_load_failure_returns_error_step_not_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import apkscan.core.apk as apk_mod
+    import fxapk.core.apk as apk_mod
 
     def _boom(*a: Any, **k: Any) -> Any:
         raise apk_mod.ApkParseError("无法解析 APK")
@@ -966,8 +966,8 @@ _ = Path
 
 
 def test_run_install_app_done_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    import apkscan.dynamic.provision as _prov
-    from apkscan.dynamic import auto as _auto
+    import fxapk.dynamic.provision as _prov
+    from fxapk.dynamic import auto as _auto
 
     monkeypatch.setattr(_prov, "install_apk", lambda apk, serial=None: {"ok": True, "detail": "已安装"})
     step = _auto._run_install_app("x.apk", on_progress=None)
@@ -975,8 +975,8 @@ def test_run_install_app_done_on_success(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_run_install_app_error_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    import apkscan.dynamic.provision as _prov
-    from apkscan.dynamic import auto as _auto
+    import fxapk.dynamic.provision as _prov
+    from fxapk.dynamic import auto as _auto
 
     monkeypatch.setattr(_prov, "install_apk", lambda apk, serial=None: {"ok": False, "detail": "失败"})
     step = _auto._run_install_app("x.apk", on_progress=None)
@@ -992,9 +992,9 @@ def test_auto_selects_serial_and_threads_to_all_downstream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """select_target_serial 返回某 serial → ensure_frida_server/install_apk/unpack/capture 全收到该 serial。"""
-    import apkscan.dynamic.provision as _prov
-    import apkscan.dynamic.unpack as unpack_mod
-    import apkscan.dynamic.capture as capture_mod
+    import fxapk.dynamic.provision as _prov
+    import fxapk.dynamic.unpack as unpack_mod
+    import fxapk.dynamic.capture as capture_mod
 
     _patch_doctor(monkeypatch, ok=True)
     _patch_static_ok(monkeypatch, "com.fraud.app")
@@ -1041,7 +1041,7 @@ def test_auto_threads_static_report_into_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """静态 report 被透传给 capture.run(report=...)，让 decide_capture 的四律决策驱动引擎。"""
-    import apkscan.dynamic.capture as capture_mod
+    import fxapk.dynamic.capture as capture_mod
 
     _patch_doctor(monkeypatch, ok=True)
     report = _patch_static_ok(monkeypatch, "com.fraud.app")
@@ -1088,7 +1088,7 @@ def test_auto_records_target_serial_in_meta(monkeypatch: pytest.MonkeyPatch) -> 
     _patch_merge(monkeypatch)
     monkeypatch.setattr(auto.device, "select_target_serial", lambda: "emulator-5554")
 
-    import apkscan.dynamic.provision as _prov
+    import fxapk.dynamic.provision as _prov
 
     monkeypatch.setattr(
         _prov, "ensure_frida_server", lambda *a, **k: {"ok": True, "action": "already_running"}
@@ -1142,7 +1142,7 @@ def _patch_capture_multi(monkeypatch: pytest.MonkeyPatch, results: list[dict]) -
 
     results 按调用序依次返回；用尽后重复最后一个。
     """
-    import apkscan.dynamic.capture as capture_mod
+    import fxapk.dynamic.capture as capture_mod
 
     calls: list[dict] = []
 
@@ -1560,7 +1560,7 @@ def test_install_failure_marks_apk_identity_unknown(
     rr = _write_pass1_report(out, endpoint_total=3)
     _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_DONE, report_paths=[rr])])
     # 装原包失败（签名冲突）
-    import apkscan.dynamic.provision as _prov
+    import fxapk.dynamic.provision as _prov
 
     monkeypatch.setattr(
         _prov, "install_apk",
@@ -1578,9 +1578,9 @@ def test_install_failure_marks_apk_identity_unknown(
 def test_capture_degraded_still_yields_baseline(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """★degraded 判据必须在生产链路可达（codex 复审 P1）：capture 返回 degraded 时
     _run_capture 应保留该状态并照常解析报告路径，否则旁路判据里的 degraded 分支永远走不到。"""
-    from apkscan.dynamic import STATUS_DEGRADED
+    from fxapk.dynamic import STATUS_DEGRADED
 
-    import apkscan.dynamic.capture as capture_mod
+    import fxapk.dynamic.capture as capture_mod
 
     rr = tmp_path / "runtime_report.json"
     rr.write_text(json.dumps({"endpoint_total": 0}), encoding="utf-8")
@@ -1628,7 +1628,7 @@ def test_unknown_identity_reaches_quality_gate(monkeypatch: pytest.MonkeyPatch, 
     Path(rr).write_text(json.dumps(payload), encoding="utf-8")
     _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_DONE, report_paths=[rr])])
     # 装原包失败（遗留 wrapper 签名冲突）
-    import apkscan.dynamic.provision as _prov
+    import fxapk.dynamic.provision as _prov
 
     monkeypatch.setattr(
         _prov, "install_apk",

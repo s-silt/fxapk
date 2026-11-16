@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 
-from apkscan.core.report_io import report_from_dict
+from fxapk.core.report_io import report_from_dict
 
 
 def _contact(scope: str | None) -> dict:

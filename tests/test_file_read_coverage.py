@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from apkscan.core import parallel, pipeline
-from apkscan.core.apk import ApkContext
-from apkscan.core.file_read import FileReadLedger
-from apkscan.core.models import AnalysisConfig, AnalyzerResult
-from apkscan.core.snapshot import SnapshotContext
-from apkscan.core.visibility import (
+from fxapk.core import parallel, pipeline
+from fxapk.core.apk import ApkContext
+from fxapk.core.file_read import FileReadLedger
+from fxapk.core.models import AnalysisConfig, AnalyzerResult
+from fxapk.core.snapshot import SnapshotContext
+from fxapk.core.visibility import (
     VIS_PARTIAL,
     _native_visibility,
     _resource_visibility,
@@ -24,7 +24,7 @@ def test_cached_declared_limit_read_repeats_original_safe_gap(monkeypatch) -> No
     apk = APK()
     ctx = ApkContext(apk, [], AnalysisConfig(online=False))
     ctx._declared_sizes = {"assets/large.json": 5}
-    monkeypatch.setattr("apkscan.core.apk._MAX_DECOMPRESSED_FILE_BYTES", 4)
+    monkeypatch.setattr("fxapk.core.apk._MAX_DECOMPRESSED_FILE_BYTES", 4)
 
     ctx.file_read_ledger.begin_scope()
     assert ctx.read_file("assets/large.json") is None

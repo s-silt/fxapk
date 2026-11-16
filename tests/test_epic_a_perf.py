@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from apkscan.core.registry import discover_analyzers
+from fxapk.core.registry import discover_analyzers
 
 # 宽松预算: 实测各分析器 <0.3s; 仅用于捕获 ReDoS / O(n²) 量级退化, 非性能门禁。
 _BUDGET_SECONDS = 20.0

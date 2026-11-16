@@ -5,7 +5,7 @@ import copy
 
 import pytest
 
-from apkscan.config import string_graph
+from fxapk.config import string_graph
 
 SHA = "a" * 64
 FIELDS = [{"path": "$.api.hosts[0]", "value": "api.example.test", "kind": "domain"}]
@@ -75,11 +75,11 @@ def test_budget_gap_is_not_a_negative_result(monkeypatch):
 def test_pipeline_uses_verified_snapshot_and_projection_survives_refresh(tmp_path):
     import json
     from types import SimpleNamespace
-    from apkscan.core import pipeline
-    from apkscan.core.jadx_sources import capture_sources
-    from apkscan.core.models import AnalysisConfig, Endpoint
-    from apkscan.config.chain import build_control_chains
-    from apkscan.report.digest import build_digest
+    from fxapk.core import pipeline
+    from fxapk.core.jadx_sources import capture_sources
+    from fxapk.core.models import AnalysisConfig, Endpoint
+    from fxapk.config.chain import build_control_chains
+    from fxapk.report.digest import build_digest
 
     cache, source = tmp_path / "cache", tmp_path / "source"
     (cache / SHA).mkdir(parents=True)

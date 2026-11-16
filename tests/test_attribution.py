@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from typing import Any, cast
 
-from apkscan.core import attribution as A
+from fxapk.core import attribution as A
 
 # 自造规则（不依赖 rules/providers.yaml，测引擎逻辑本身）。
 _RULES = {

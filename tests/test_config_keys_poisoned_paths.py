@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from apkscan.analyzers.config_keys import ConfigKeysAnalyzer, _match_extra_config
+from fxapk.analyzers.config_keys import ConfigKeysAnalyzer, _match_extra_config
 
 
 class _Ctx:

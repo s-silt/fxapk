@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from apkscan.core.attribution import build_domain_control
-from apkscan.core.closure.sources import _set_attribution
-from apkscan.core.models import Endpoint
+from fxapk.core.attribution import build_domain_control
+from fxapk.core.closure.sources import _set_attribution
+from fxapk.core.models import Endpoint
 
 
 def _enrichment() -> dict:

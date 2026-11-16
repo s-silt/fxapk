@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from apkscan.core.provider_review import build_provider_review_plan, source_family
+from fxapk.core.provider_review import build_provider_review_plan, source_family
 
 
 def target():
@@ -98,8 +98,8 @@ def test_registration_prefers_organization_over_network_label():
 
 def test_cli_plan_binds_exact_input_and_does_not_overwrite(tmp_path):
     from typer.testing import CliRunner
-    from apkscan.cli import app
-    from apkscan.core.integrity import sha256_hex
+    from fxapk.cli import app
+    from fxapk.core.integrity import sha256_hex
 
     report = tmp_path / "input.json"
     content = b'{"schema_version":"1.0","meta":{},"leads":[],"endpoints":[]}'
@@ -119,7 +119,7 @@ def test_cli_plan_binds_exact_input_and_does_not_overwrite(tmp_path):
 
 
 def test_report_loader_diagnostics_do_not_leak_case_values(caplog):
-    from apkscan.core.report_io import report_from_dict
+    from fxapk.core.report_io import report_from_dict
 
     report_from_dict({"schema_version": "1.0", "leads": [
         {"category": "SECRET CATEGORY CANARY", "value": "SECRET VALUE CANARY",
@@ -140,7 +140,7 @@ def test_malformed_layer_status_never_becomes_complete():
 
 
 def test_source_worklist_deduplicates_roles_and_keeps_budget():
-    from apkscan.core.provider_review import build_source_worklist
+    from fxapk.core.provider_review import build_source_worklist
     plan = build_provider_review_plan([target()])
     work = build_source_worklist(plan, query_budget=1)
     assert work["proposed_query_count"] == 1 and work["deferred_query_count"] > 0
@@ -162,7 +162,7 @@ def test_source_worklist_does_not_requery_hits_or_access_failures():
 
 
 def test_pure_role_projection_and_standalone_plan_are_equivalent():
-    from apkscan.core.provider_review import project_provider_review, build_source_worklist
+    from fxapk.core.provider_review import project_provider_review, build_source_worklist
     projected = project_provider_review([target()])
     assert "source_worklist" not in projected
     assert build_provider_review_plan([target()]) == {
@@ -184,10 +184,10 @@ def test_pure_role_projection_and_standalone_plan_are_equivalent():
 def test_worklist_prerequisites_match_current_ip_only_adapters(
         provider, adapter, kind, value, requires_ip, expected_state):
     # Check the current CLI adapter contract, not the broader provider product catalog.
-    from apkscan.enrichers.asn import AsnEnricher
-    from apkscan.enrichers.infrastructure import CymruEnricher
-    from apkscan.enrichers.ip_rdap import IpRdapEnricher
-    from apkscan.enrichers.multisource import CensysPassiveEnricher, RipeStatBgpEnricher
+    from fxapk.enrichers.asn import AsnEnricher
+    from fxapk.enrichers.infrastructure import CymruEnricher
+    from fxapk.enrichers.ip_rdap import IpRdapEnricher
+    from fxapk.enrichers.multisource import CensysPassiveEnricher, RipeStatBgpEnricher
 
     adapters = {cls.__name__: cls for cls in (
         AsnEnricher, CymruEnricher, IpRdapEnricher, CensysPassiveEnricher, RipeStatBgpEnricher)}
@@ -247,7 +247,7 @@ def test_ip_only_worklist_preserves_existing_outcomes(
 ])
 def test_worklist_budget_counts_only_ready_source_queries(
         kind, budget, proposed, deferred, first_provider):
-    from apkscan.core.provider_review import build_source_worklist
+    from fxapk.core.provider_review import build_source_worklist
 
     values = {"domain": "example.invalid", "url": "https://example.invalid/api", "ip": "192.0.2.1"}
     plan = build_provider_review_plan([{"kind": kind, "value": values[kind]}])
@@ -265,7 +265,7 @@ def test_worklist_budget_counts_only_ready_source_queries(
     ("url", "https://example.invalid/api"),
 ])
 def test_censys_prerequisite_keeps_shared_budget_for_ready_queries(kind, value):
-    from apkscan.core.provider_review import build_source_worklist
+    from fxapk.core.provider_review import build_source_worklist
 
     plan = build_provider_review_plan([
         {"kind": kind, "value": value}, {"kind": "ip", "value": "192.0.2.1"}])
@@ -316,7 +316,7 @@ def test_censys_requires_explicit_ip_kind_without_changing_other_unknown_sources
 
 @pytest.mark.parametrize("kind_fields", [{}, {"kind": "unknown"}, {"kind": "unsupported"}])
 def test_unknown_censys_target_does_not_take_shared_budget_from_explicit_ip(kind_fields):
-    from apkscan.core.provider_review import build_source_worklist
+    from fxapk.core.provider_review import build_source_worklist
 
     source_status = {provider: "hit" for provider in (
         "ip_rdap", "ripestat_bgp", "cymru", "asn", "shodan", "quake", "dns_records", "dns", "certs")}

@@ -2,8 +2,8 @@
 
 ★两次真实踩坑，对应两条判据：
 
-1. 遮蔽：editable 安装是 1.3.0，但在旧源码目录下跑 ``python -m apkscan.cli`` 时，
-   当前目录的 apkscan 包遮蔽了已安装那份，报告写成 ``tool_version=0.10.0.dev0``，
+1. 遮蔽：editable 安装是 1.3.0，但在旧源码目录下跑 ``python -m fxapk.cli`` 时，
+   当前目录的 fxapk 包遮蔽了已安装那份，报告写成 ``tool_version=0.10.0.dev0``，
    而 ``fxapk --version`` 与 ``pip show`` 都显示 1.3.0。
 2. 元数据滞后：editable 安装后 pyproject 升到 1.6.1 没重装，元数据停在 1.5.2；
    ``__version__`` 优先取元数据 → imported 恒等于 dist，第一条判据永远沉默，
@@ -24,8 +24,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from apkscan import selfcheck
-from apkscan.cli import app
+from fxapk import selfcheck
+from fxapk.cli import app
 
 runner = CliRunner()
 
@@ -47,10 +47,10 @@ def _pin_versions(monkeypatch: Any, *, imported: str, fallback: str, dist: str |
     """
     import importlib.metadata as md
 
-    import apkscan
+    import fxapk
 
-    monkeypatch.setattr(apkscan, "__version__", imported, raising=False)
-    monkeypatch.setattr(apkscan, "_FALLBACK_VERSION", fallback, raising=False)
+    monkeypatch.setattr(fxapk, "__version__", imported, raising=False)
+    monkeypatch.setattr(fxapk, "_FALLBACK_VERSION", fallback, raising=False)
     if dist is None:
         def _raise(_name: str) -> Any:
             raise md.PackageNotFoundError("fxapk")
@@ -67,9 +67,9 @@ def _project_root() -> str:
     """
     from pathlib import Path
 
-    import apkscan
+    import fxapk
 
-    return str(Path(apkscan.__file__).resolve().parent.parent)
+    return str(Path(fxapk.__file__).resolve().parent.parent)
 
 
 def test_version_component_reports_all_fields(monkeypatch: Any) -> None:
@@ -142,7 +142,7 @@ def test_uninstalled_source_tree_is_not_an_error(monkeypatch: Any) -> None:
 
 def test_stale_metadata_wiring_survives_rename(monkeypatch: Any) -> None:
     """★P2-1：判据二真接线测试——只钉 imported+dist（哨兵、彼此相等），**不钉 fallback**，
-    让判据二走生产的真 `getattr(apkscan, "_FALLBACK_VERSION", "")` 读真值。
+    让判据二走生产的真 `getattr(fxapk, "_FALLBACK_VERSION", "")` 读真值。
 
     这是唯一能抓住"改 __init__ 的 _FALLBACK_VERSION 名 + 顺手改契约测试字面量、
     漏改 selfcheck.py"这条两步错误链的测试：其余测试都 monkeypatch 钉死 fallback
@@ -151,10 +151,10 @@ def test_stale_metadata_wiring_survives_rename(monkeypatch: Any) -> None:
     """
     import importlib.metadata as md
 
-    import apkscan
+    import fxapk
 
     sentinel = "0.0.0+wiring-sentinel"  # 与真实 _FALLBACK_VERSION（1.6.x）必不相等
-    monkeypatch.setattr(apkscan, "__version__", sentinel, raising=False)
+    monkeypatch.setattr(fxapk, "__version__", sentinel, raising=False)
     monkeypatch.setattr(md, "distribution", lambda _name: _FakeDist(sentinel))
     # ★刻意不碰 _FALLBACK_VERSION：判据二必须靠真 getattr 读到真值才会触发
     item = selfcheck.build_version_component()
@@ -172,11 +172,11 @@ def test_fallback_version_contract_holds() -> None:
     import tomllib
     from pathlib import Path
 
-    import apkscan
+    import fxapk
 
-    fallback = getattr(apkscan, "_FALLBACK_VERSION", None)
+    fallback = getattr(fxapk, "_FALLBACK_VERSION", None)
     assert isinstance(fallback, str) and fallback, "_FALLBACK_VERSION 被改名或清空"
-    pyproject = Path(apkscan.__file__).resolve().parent.parent / "pyproject.toml"
+    pyproject = Path(fxapk.__file__).resolve().parent.parent / "pyproject.toml"
     if pyproject.exists():  # 只有源码树才有 pyproject；安装形态下退化为只锁存在性
         declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
         assert declared == fallback, "发版时 _FALLBACK_VERSION 未与 pyproject 同步"
@@ -206,9 +206,9 @@ def test_pyproject_version_is_pep440_canonical() -> None:
     # 硬依赖：缺失即 ImportError（测试失败），不静默跳过
     from packaging.utils import canonicalize_version
 
-    import apkscan
+    import fxapk
 
-    pyproject = Path(apkscan.__file__).resolve().parent.parent / "pyproject.toml"
+    pyproject = Path(fxapk.__file__).resolve().parent.parent / "pyproject.toml"
     if not pyproject.exists():          # 安装形态下确无 pyproject 可查，跳过是正确语义
         pytest.skip("非源码树，无 pyproject.toml")
     declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
@@ -272,14 +272,14 @@ def test_fix_does_not_offer_editable_reinstall_for_non_source_tree(
     """
     import importlib.metadata as md
 
-    import apkscan
+    import fxapk
 
-    # 造一个「site-packages/apkscan/」形态：父目录下没有 pyproject.toml
+    # 造一个「site-packages/fxapk/」形态：父目录下没有 pyproject.toml
     fake_site = tmp_path / "site-packages"
-    (fake_site / "apkscan").mkdir(parents=True)
-    monkeypatch.setattr(apkscan, "__file__", str(fake_site / "apkscan" / "__init__.py"))
-    monkeypatch.setattr(apkscan, "__version__", "1.5.2", raising=False)
-    monkeypatch.setattr(apkscan, "_FALLBACK_VERSION", "1.6.1", raising=False)
+    (fake_site / "fxapk").mkdir(parents=True)
+    monkeypatch.setattr(fxapk, "__file__", str(fake_site / "fxapk" / "__init__.py"))
+    monkeypatch.setattr(fxapk, "__version__", "1.5.2", raising=False)
+    monkeypatch.setattr(fxapk, "_FALLBACK_VERSION", "1.6.1", raising=False)
     monkeypatch.setattr(md, "distribution", lambda _name: _FakeDist("1.5.2"))
 
     item = selfcheck.build_version_component()

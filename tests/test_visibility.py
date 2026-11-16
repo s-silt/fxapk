@@ -1,8 +1,8 @@
 """证据可见性求值：壳桩样本的「未发现」不得被读成「不存在」。零真实数据。"""
 from __future__ import annotations
 
-from apkscan.core import visibility as V
-from apkscan.report.digest import build_digest
+from fxapk.core import visibility as V
+from fxapk.report.digest import build_digest
 
 
 def _report(**meta) -> dict:
@@ -441,7 +441,7 @@ def test_pipeline_stage_registered():
     """可见性阶段必须在 pipeline 里真的被调用（只写模块不接线 = 没做）。"""
     import inspect
 
-    from apkscan.core import pipeline
+    from fxapk.core import pipeline
 
     src = inspect.getsource(pipeline)
     assert '_run_stage(state, "visibility"' in src

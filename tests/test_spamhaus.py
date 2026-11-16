@@ -15,9 +15,9 @@ from typing import Any
 
 import pytest
 
-from apkscan.core.models import Endpoint, EnrichmentResult
-from apkscan.enrichers import spamhaus
-from apkscan.enrichers.spamhaus import SpamhausDropEnricher
+from fxapk.core.models import Endpoint, EnrichmentResult
+from fxapk.enrichers import spamhaus
+from fxapk.enrichers.spamhaus import SpamhausDropEnricher
 
 
 def _lines(*records: dict[str, Any], timestamp: int = 1700000000) -> str:

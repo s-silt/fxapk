@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from apkscan.core.models import LeadCategory, Report
-from apkscan.dynamic import cryptohook, merge
+from fxapk.core.models import LeadCategory, Report
+from fxapk.dynamic import cryptohook, merge
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +285,7 @@ def test_merge_credentials_okhttp_host_merged_as_endpoint_via_infra(tmp_path: An
     values = {ep.value for ep in report.endpoints}
     assert "c2.fraud-gw.cn" in values
     # 走 infra 分级：疑似 App 自有服务 → 建议调证（DOMAIN lead）
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     domain_leads = [
         lead for lead in report.leads if lead.category == LeadCategory.DOMAIN
@@ -329,7 +329,7 @@ def test_merge_credentials_known_infra_host_marked_skip(tmp_path: Any) -> None:
     report = _make_report()
     merge.merge_runtime_credentials(report, rr)
 
-    from apkscan.core import infra
+    from fxapk.core import infra
 
     lead = next(
         (lead for lead in report.leads if lead.value == "res.myqcloud.com"), None

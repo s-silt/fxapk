@@ -53,10 +53,10 @@ def test_every_lead_production_path_runs_all_four_steps() -> None:
 #: 出现第 4 条路径时这里红，作者更新登记表的那一下就是「我知道我在新接一条
 #: 进出口的 Lead 路径」的显式确认。
 _KNOWN_PATHS = {
-    ("apkscan/core/pipeline.py", "_stage_build_leads"),      # 静态主链
-    ("apkscan/dynamic/merge.py", "_build_runtime_leads"),    # 动态回灌
-    ("apkscan/cli.py", "_merge_config_probe_into_report"),   # config-probe 跨轮回灌
-    ("apkscan/core/web_supplement_runtime.py", "apply_verified"),  # 动态网页补采回灌
+    ("fxapk/core/pipeline.py", "_stage_build_leads"),      # 静态主链
+    ("fxapk/dynamic/merge.py", "_build_runtime_leads"),    # 动态回灌
+    ("fxapk/cli.py", "_merge_config_probe_into_report"),   # config-probe 跨轮回灌
+    ("fxapk/core/web_supplement_runtime.py", "apply_verified"),  # 动态网页补采回灌
 }
 
 
@@ -93,7 +93,7 @@ def path(eps, meta, leads):
 
 
 def _violations(src: str) -> ChainScan:
-    return scan_source(src, "apkscan/x.py")
+    return scan_source(src, "fxapk/x.py")
 
 
 def test_full_chain_is_clean() -> None:

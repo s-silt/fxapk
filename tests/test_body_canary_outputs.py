@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core.models import Report
-from apkscan.dynamic.merge import load_runtime_endpoints, merge_and_rerender
+from fxapk.core.models import Report
+from fxapk.dynamic.merge import load_runtime_endpoints, merge_and_rerender
 
 
 BODY_CANARY = "APKS_CANARY_RUNTIME_HTTP_BODY_7f9d4c2a"

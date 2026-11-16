@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import pipeline
-from apkscan.core.models import AnalysisConfig
+from fxapk.core import pipeline
+from fxapk.core.models import AnalysisConfig
 from tests.synthetic.samples import SAMPLES, SyntheticSample
 from tests.synthetic.snapshot import build_context
 

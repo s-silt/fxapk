@@ -8,14 +8,14 @@ from typer.testing import CliRunner
 
 
 def report():
-    from apkscan.core.models import Endpoint, Report
-    from apkscan.report.json import to_dict
+    from fxapk.core.models import Endpoint, Report
+    from fxapk.report.json import to_dict
     return to_dict(Report("test.example.app", {"sample_sha256": "a" * 64}, [],
                           [Endpoint("192.0.2.1", "ip"), Endpoint("api.example.test", "domain")], [], []))
 
 
 def test_plan_default_zero_dns_and_no_writes(tmp_path, monkeypatch):
-    from apkscan.cli import app
+    from fxapk.cli import app
     import socket
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: pytest.fail("plan resolved"))
     path = tmp_path / "report.json"
@@ -30,7 +30,7 @@ def test_plan_default_zero_dns_and_no_writes(tmp_path, monkeypatch):
 @pytest.mark.parametrize("change", [{"checks": ["resource"]}, {"max_requests": 0}, {"max_requests": 7},
                                     {"max_bytes": 0}, {"window": 601}, {"business_host": "api.example.test/path"}])
 def test_plan_rejects_unsupported_or_unbounded_requests(change):
-    from apkscan.core.probe_target import build_plan
+    from fxapk.core.probe_target import build_plan
     args = {"target": "192.0.2.1", "business_host": "api.example.test", "allow": ["192.0.2.1"],
             "checks": ["tls"], "max_requests": 6, "max_bytes": 2 * 1024 * 1024, "window": 600}
     args.update(change)
@@ -39,7 +39,7 @@ def test_plan_rejects_unsupported_or_unbounded_requests(change):
 
 
 def test_allowlist_is_required_before_any_dns(tmp_path, monkeypatch):
-    from apkscan.core import probe_target as pt
+    from fxapk.core import probe_target as pt
     monkeypatch.setattr(pt, "probe_tls", lambda *a, **k: pytest.fail("unallowed target accessed"))
     plan = pt.build_plan(report(), target="192.0.2.1", business_host="api.example.test", allow=[])
     result = pt.run_plan(plan, tmp_path, report(), authorized=True)
@@ -47,8 +47,8 @@ def test_allowlist_is_required_before_any_dns(tmp_path, monkeypatch):
 
 
 def test_tls_binding_and_archive_do_not_become_app_contact_or_origin(tmp_path, monkeypatch):
-    from apkscan.core import probe_target as pt
-    from apkscan.core.models import OBSERVED_CONTACT_SOURCES
+    from fxapk.core import probe_target as pt
+    from fxapk.core.models import OBSERVED_CONTACT_SOURCES
     base = report()
     before = deepcopy(base)
     der = b"synthetic-certificate"
@@ -74,7 +74,7 @@ def test_tls_binding_and_archive_do_not_become_app_contact_or_origin(tmp_path, m
 def test_certificate_ownership_requires_signature_bound_to_der_and_host(tmp_path):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives import serialization
-    from apkscan.core.probe_target import verify_certificate_ownership
+    from fxapk.core.probe_target import verify_certificate_ownership
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
     claim = {"schema": "fxapk-certificate-ownership-1", "certificate_sha256": "a" * 64,
@@ -92,11 +92,11 @@ def test_certificate_ownership_requires_signature_bound_to_der_and_host(tmp_path
 def test_active_receipt_only_licenses_certificate_signal_with_independent_material(tmp_path, monkeypatch):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives import serialization
-    from apkscan.core import probe_target as pt
-    from apkscan.core.report_io import report_from_dict
-    from apkscan.core.closure.layers import assemble_target_closure
-    from apkscan.attribution.assemble import _ip_signal_features, _ip_entity
-    from apkscan.attribution.roles import RoleSignal
+    from fxapk.core import probe_target as pt
+    from fxapk.core.report_io import report_from_dict
+    from fxapk.core.closure.layers import assemble_target_closure
+    from fxapk.attribution.assemble import _ip_signal_features, _ip_entity
+    from fxapk.attribution.roles import RoleSignal
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
     der = b"synthetic certificate"
@@ -131,7 +131,7 @@ def test_active_receipt_only_licenses_certificate_signal_with_independent_materi
 
 
 def test_execute_is_explicit_and_report_binding_cannot_change(tmp_path, monkeypatch):
-    from apkscan.core import probe_target as pt
+    from fxapk.core import probe_target as pt
     monkeypatch.setattr(pt, "probe_tls", lambda *a, **k: pytest.fail("must not execute"))
     base = report()
     plan = pt.build_plan(base, target="192.0.2.1", business_host="api.example.test", allow=["192.0.2.1"])
@@ -144,7 +144,7 @@ def test_execute_is_explicit_and_report_binding_cannot_change(tmp_path, monkeypa
 
 
 def test_cli_accepts_documented_budget_units(tmp_path):
-    from apkscan.cli import app
+    from fxapk.cli import app
     path = tmp_path / "report.json"
     path.write_text(json.dumps(report()), encoding="utf-8")
     result = CliRunner().invoke(app, ["probe-target", str(path), "--target", "192.0.2.1", "--business-host", "api.example.test",
@@ -157,7 +157,7 @@ def test_cli_accepts_documented_budget_units(tmp_path):
 @pytest.mark.parametrize("failure", [None, "tls_rejected", "oversized", "san_mismatch"])
 def test_tls_probe_preserves_sni_verification_and_limits_material(monkeypatch, failure):
     from types import SimpleNamespace
-    from apkscan.core import probe_target as pt
+    from fxapk.core import probe_target as pt
     closed = []
     class Sock:
         def getpeername(self): return ("192.0.2.1", 443)
@@ -192,7 +192,7 @@ def test_tls_probe_preserves_sni_verification_and_limits_material(monkeypatch, f
 
 
 def test_future_report_schema_is_not_written():
-    from apkscan.core import probe_target as pt
+    from fxapk.core import probe_target as pt
     base = report()
     base["schema_version"] = "999.0"
     with pytest.raises(ValueError):
@@ -200,7 +200,7 @@ def test_future_report_schema_is_not_written():
 
 
 def test_followup_projection_preserves_each_active_receipt_and_certificate(tmp_path, monkeypatch):
-    from apkscan.core import probe_target as pt
+    from fxapk.core import probe_target as pt
     base = report()
     result = None
     for index in (1, 2):
@@ -227,7 +227,7 @@ def test_followup_projection_preserves_each_active_receipt_and_certificate(tmp_p
 
 
 def test_run_plan_upgrades_report_mode_to_authorized_active(tmp_path, monkeypatch):
-    from apkscan.core import probe_target as pt
+    from fxapk.core import probe_target as pt
     base = report()
     base["meta"]["mode"] = "passive"
     der = b"synthetic-certificate"

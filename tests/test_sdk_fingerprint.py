@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from apkscan.analyzers.sdk_fingerprint import SdkFingerprintAnalyzer
-from apkscan.core.models import AnalyzerResult, Confidence, Lead, LeadCategory
+from fxapk.analyzers.sdk_fingerprint import SdkFingerprintAnalyzer
+from fxapk.core.models import AnalyzerResult, Confidence, Lead, LeadCategory
 from tests.conftest import FakeContext
 
 

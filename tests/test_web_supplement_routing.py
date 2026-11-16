@@ -10,9 +10,9 @@ from typing import BinaryIO
 
 import pytest
 
-from apkscan.core.models import AnalysisConfig
-from apkscan.core.web_observation_plan import build_agent_handoff, parse_config
-from apkscan.core.web_supplement_runtime import make_capture_observer
+from fxapk.core.models import AnalysisConfig
+from fxapk.core.web_observation_plan import build_agent_handoff, parse_config
+from fxapk.core.web_supplement_runtime import make_capture_observer
 
 
 def _body(**extra: object) -> dict[str, object]:
@@ -344,7 +344,7 @@ def test_collect_keeps_partial_failure_reason(monkeypatch: pytest.MonkeyPatch, t
 
 
 def test_run_plugin_forwards_related_targets(monkeypatch: pytest.MonkeyPatch) -> None:
-    from apkscan.core import web_supplement as supplement
+    from fxapk.core import web_supplement as supplement
 
     seen: dict[str, object] = {}
 

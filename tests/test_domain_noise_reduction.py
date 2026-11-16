@@ -16,7 +16,7 @@ import pathlib
 
 import pytest
 
-from apkscan.core import infra
+from fxapk.core import infra
 
 #: 仓库根（起子进程验确定性时要把它放进 sys.path）。
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -126,7 +126,7 @@ def test_matched_infra_is_deterministic_across_hash_seeds() -> None:
     code = (
         "import json,sys;"
         "sys.path.insert(0, %r);"
-        "from apkscan.core import infra;"
+        "from fxapk.core import infra;"
         "print(json.dumps([infra._matched_infra(d) for d in %r]))"
         % (str(_REPO_ROOT), probes)
     )

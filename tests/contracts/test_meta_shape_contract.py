@@ -47,8 +47,8 @@ def _repo_scan() -> meta_scan.ScanResult:
 _PROTECTED: dict[str, tuple[set[tuple[str, str]], dict[frozenset[str], str]]] = {
     "remote_config_artifacts": (
         {
-            ("apkscan/core/pipeline.py", "_stage_remote_config_fetch"),
-            ("apkscan/cli.py", "_merge_config_probe_into_report"),
+            ("fxapk/core/pipeline.py", "_stage_remote_config_fetch"),
+            ("fxapk/cli.py", "_merge_config_probe_into_report"),
         },
         {
             # pipeline._fetch_decode_one 未取到字节时的占位记录：如实入账失败本身，
@@ -61,9 +61,9 @@ _PROTECTED: dict[str, tuple[set[tuple[str, str]], dict[frozenset[str], str]]] = 
     ),
     "repack_quarantine": (
         {
-            ("apkscan/core/pipeline.py", "_stage_build_leads"),
-            ("apkscan/dynamic/merge.py", "_quarantine_leads"),
-            ("apkscan/cli.py", "_merge_config_probe_into_report"),
+            ("fxapk/core/pipeline.py", "_stage_build_leads"),
+            ("fxapk/dynamic/merge.py", "_quarantine_leads"),
+            ("fxapk/cli.py", "_merge_config_probe_into_report"),
         },
         # 审计块三处写入必须同形：values 是 closure 兜底门放行的唯一凭据，
         # 哪一处少写 values，那条路径隔离的值就过不了闭环兜底门。
@@ -111,9 +111,9 @@ def test_addressing_chain_artifact_shape_is_visible_to_scanner():
 
 
 def _write_repo(tmp_path: Path, prod: dict[str, str]) -> Path:
-    (tmp_path / "apkscan").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "fxapk").mkdir(parents=True, exist_ok=True)
     for name, src in prod.items():
-        (tmp_path / "apkscan" / name).write_text(src, encoding="utf-8")
+        (tmp_path / "fxapk" / name).write_text(src, encoding="utf-8")
     return tmp_path
 
 

@@ -7,7 +7,7 @@
 原先住在 ``test_jadx_recall_baseline.py``，其顶层 ``import pytest`` 让 replay
 在 CI 上 ``ModuleNotFoundError`` 挂掉（本地 venv 有 pytest 所以看不出来）。
 数据归数据：本模块的 import 面只许标准库与纯数据语料模块
-``tests.jadx_recall_corpus``——**永远不得**引入 pytest / apkscan / 任何
+``tests.jadx_recall_corpus``——**永远不得**引入 pytest / fxapk / 任何
 dev-only 依赖。
 
 内容契约（与测试模块解耦但语义不变）：

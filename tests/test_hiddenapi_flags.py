@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from apkscan.core import apk as apk_mod
+from fxapk.core import apk as apk_mod
 
 
 @pytest.fixture(autouse=True)
@@ -105,8 +105,8 @@ def test_pipeline_records_the_relaxation_in_meta() -> None:
     """
     from types import SimpleNamespace
 
-    from apkscan.core import pipeline
-    from apkscan.core.models import AnalysisConfig
+    from fxapk.core import pipeline
+    from fxapk.core.models import AnalysisConfig
 
     _restriction, domapi = _flags()
     domapi(6)  # 让本进程确有放行记录
@@ -139,8 +139,8 @@ def _degradation_meta(baseline: int | None) -> dict:
     """跑一遍 _stage_degradation_flags，返回 meta（baseline 模拟 load_apk 钉下的快照）。"""
     from types import SimpleNamespace
 
-    from apkscan.core import pipeline
-    from apkscan.core.models import AnalysisConfig
+    from fxapk.core import pipeline
+    from fxapk.core.models import AnalysisConfig
 
     state = pipeline._PipelineState(
         ctx=SimpleNamespace(  # type: ignore[arg-type]  # 本 stage 只 getattr 这几项

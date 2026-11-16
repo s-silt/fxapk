@@ -8,21 +8,21 @@
 <p align="center"><strong>中文</strong> &nbsp;·&nbsp; <a href="README.en.md">English</a></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.25.0">v1.25.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/latest">最新发布</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
-`fxapk`（别名 `apkscan`）从 APK、授权设备流量和已有网页材料中提取线索，记录来源、归属与覆盖缺口。提供 Python CLI，不提供 exe 或 GUI。
+`fxapk` 从 APK、授权设备流量和已有网页材料中提取线索，记录来源、归属与覆盖缺口。提供 Python CLI，不提供 exe 或 GUI。
 
 ## 快速开始
 
 ```bash
-python -m pip install "fxapk==1.25.0"
+python -m pip install fxapk
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-静态分析不需要设备。发行附件及校验和见[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.25.0)；源码安装、密钥配置与可选工具见 [USAGE.md](USAGE.md)。
+静态分析不需要设备。发行附件及校验和见[最新发布页](https://github.com/s-silt/fxapk/releases/latest)；源码安装、密钥配置与可选工具见 [USAGE.md](USAGE.md)。
 
 ## 常用入口
 

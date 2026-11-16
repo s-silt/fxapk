@@ -12,18 +12,18 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import case_package as case_package_module
-from apkscan.core.case_package import (
+from fxapk.core import case_package as case_package_module
+from fxapk.core.case_package import (
     CasePackageError,
     create_case_package,
     verify_case_package,
 )
-from apkscan.core.integrity import sha256_canonical_json
-from apkscan.core.models import AnalysisConfig, Report
-from apkscan.core.redact import safe_exception_text
-from apkscan.core.report_io import write_report
-import apkscan.core.rea_intake as rea_intake
-from apkscan.core.webctx import load_web_evidence
+from fxapk.core.integrity import sha256_canonical_json
+from fxapk.core.models import AnalysisConfig, Report
+from fxapk.core.redact import safe_exception_text
+from fxapk.core.report_io import write_report
+import fxapk.core.rea_intake as rea_intake
+from fxapk.core.webctx import load_web_evidence
 from fxapk_rea.evidence import claim_output
 
 _DIAGNOSTIC = "unverified REA observation cannot be admitted as direct case evidence"
@@ -326,7 +326,7 @@ def test_deep_entry_keeps_bundle_ancestor_and_ordinary_deep_tree_loads(tmp_path:
 def test_exhausted_ancestor_bound_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("apkscan.core.rea_intake._MAX_ANCESTORS", 2)
+    monkeypatch.setattr("fxapk.core.rea_intake._MAX_ANCESTORS", 2)
     (tmp_path / "app.js").write_text("console.log(1)\n", encoding="utf-8")
     _assert_web_refused(tmp_path)
 

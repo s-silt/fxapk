@@ -1,6 +1,6 @@
 # fxapk-rea
 
-可选 REA 网页观察与 Native 地址恢复插件，版本 0.1.2。要求 Python 3.11+、fxapk 1.19.0+。
+可选 REA 网页观察与 Native 地址恢复插件，版本 0.2.0。要求 Python 3.11+、fxapk 2.0.0+。
 
 **默认关闭**：即使已安装，也不会被 fxapk 导入、注册命令或用于自动补采。仅在明确需要时为该进程设置 `FXAPK_ENABLE_REA=1`（PowerShell `$env:FXAPK_ENABLE_REA='1'`；Linux/macOS `FXAPK_ENABLE_REA=1 fxapk rea --help`）。未启用时核心命令照常可用，`selfcheck` 对已安装的 REA 报 `disabled`。启用不等于授权浏览器、设备或联网操作，agent 不得自行设置该开关。
 
@@ -138,8 +138,8 @@ fxapk rea native attach out/native-recovery-01 --report out/app.json --out out/a
 ```powershell
 python tools/rea_trace_fixture.py --out .\fixture-run
 python -m pytest -q tests/test_rea_plugin.py tests/test_rea_runtime.py tests/test_plugin_registry.py
-python -m ruff check apkscan tests plugins/fxapk-rea/src
-python -m pyright apkscan plugins/fxapk-rea/src
+python -m ruff check fxapk tests plugins/fxapk-rea/src
+python -m pyright fxapk plugins/fxapk-rea/src
 ```
 
 CI 使用合成输入，不下载 REA 或浏览器。本地产物包含源码、URL 和可能的明文日志，请使用受控输出目录。MIT；REA、Node、浏览器及各依赖遵循各自许可。网页观察方法见 [skills/fxapk-web-evidence/SKILL.md](../../skills/fxapk-web-evidence/SKILL.md)。
