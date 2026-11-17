@@ -128,6 +128,7 @@ META_WRITE_CATEGORIES = {
     'ruleset_digest': 'record',
     'stage_status': 'coverage',
     'tool_version': 'record',
+    'tool_version_provenance': 'record',
     'visibility': 'signal',
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
@@ -1024,6 +1025,17 @@ def _stage_credibility(state: _PipelineState) -> None:
         state.skipped_analyzers,
     ) = _analysis_health(state.analyzer_status)
     state.meta["tool_version"] = _tool_version()
+    from fxapk import _FALLBACK_VERSION
+    from fxapk._version import resolve_version
+
+    provenance = resolve_version(_FALLBACK_VERSION, effective_version=state.meta["tool_version"])
+    state.meta["tool_version_provenance"] = provenance.report_record()
+    if provenance.consistency == "conflict":
+        # One warning at this report-generation boundary, never per analyzer.
+        logger.warning(
+            "fxapk version conflict: report identity retained; inspect "
+            "meta.tool_version_provenance and run selfcheck before relying on reproducibility"
+        )
     state.meta["ruleset_digest"] = ruleset_digest()
     state.meta["dependency_versions"] = _dependency_versions()  # 依赖版本复现锚点（androguard 等）
     state.meta["analysis_environment"] = _run_environment()  # 系统/解释器锚点（白名单，无机器身份）

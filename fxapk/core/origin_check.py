@@ -18,7 +18,6 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from fxapk.config.fetch import _ip_is_blocked
 from fxapk.core.case_identity import normalize_case_id
 from fxapk.core.pinned_transport import PinnedConnection as _PinnedConnection
 
@@ -102,6 +101,9 @@ def build_plan(reference_url: str, candidate_url: str, *, case_id: str,
 
 
 def _public_ip(value: str) -> str:
+    # Keep the shared network policy, but do not load HTTP clients for CLI registration.
+    from fxapk.config.fetch import _ip_is_blocked
+
     address = ipaddress.ip_address(value)
     # ★与 config.fetch._ip_is_blocked 同一判据（is_global 白名单 + NAT64/6to4/
     #   Teredo/IPv4-mapped 内嵌 IPv4 递归）——旧的 is_global+mapped 检查会放行

@@ -127,7 +127,7 @@ def build_version_component() -> dict[str, str]:
     导入规则使然、不是算法错误，但读报告的人无从察觉自己看的是旧版结果——
     取证工具的"同版本同结果"承诺正是栽在这种地方。
     """
-    import importlib.metadata as _md
+    from fxapk._version import resolve_version
     from pathlib import Path
 
     import fxapk
@@ -144,15 +144,9 @@ def build_version_component() -> dict[str, str]:
     except Exception:  # noqa: BLE001
         logger.debug("[selfcheck] 解析 fxapk 包路径失败", exc_info=True)
 
-    dist_version = ""
-    dist_location = ""
-    try:
-        dist = _md.distribution("fxapk")
-        dist_version = dist.version
-        located = getattr(dist, "_path", None) or dist.locate_file("")
-        dist_location = str(located)
-    except Exception:  # noqa: BLE001 — 未安装（直接跑源码树）是合法情形
-        logger.debug("[selfcheck] 未找到已安装的 fxapk 分发", exc_info=True)
+    provenance = resolve_version(fallback_version, effective_version=imported_version)
+    dist_version = provenance.distribution_version or ""
+    dist_location = provenance.distribution_location
 
     # ★重装目标必须是**绝对路径**，不能给裸 `-e .`：核对 import_path 无误，不等于当前 shell
     #   就站在那棵树的根上（例：经 PYTHONPATH 导入 A 树，而 cwd 在 B 树——照 `-e .` 装的是 B，
