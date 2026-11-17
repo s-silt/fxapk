@@ -162,7 +162,7 @@ class ScanResult:
         return {k for k in self.produced if k not in self.production_consumed}
 
 
-def collect_module_constants(src: str) -> dict[str, str]:
+def collect_module_constants(src: str, *, _tree: ast.Module | None = None) -> dict[str, str]:
     """收集模块级的字符串常量 ``NAME = "literal"``，供常量键解析。
 
     ★为什么解析常量而不是把它们列进豁免名单：豁免名单会不断增长，最终变成动态访问的
@@ -186,7 +186,7 @@ def collect_module_constants(src: str) -> dict[str, str]:
             literals[name] = value
 
     try:
-        tree = ast.parse(src)
+        tree = ast.parse(src) if _tree is None else _tree
     except SyntaxError:
         return {}
 
@@ -587,7 +587,8 @@ class _Visitor(ast.NodeVisitor):
             self.out.append(Access("<dynamic>", kind, self.path, line))
 
 
-def _import_map(src: str, symbols: dict[str, dict[str, str]]) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+def _import_map(src: str, symbols: dict[str, dict[str, str]], *,
+                _tree: ast.Module | None = None) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
     """解析本模块的 import，返回 (从别处 from-import 进来的常量, 模块别名 → 常量表)。
 
     ★只走一跳、不解析星号导入、不解析重导出。解析不出就落回 unresolved。
@@ -595,7 +596,7 @@ def _import_map(src: str, symbols: dict[str, dict[str, str]]) -> tuple[dict[str,
     from_consts: dict[str, str] = {}
     alias_map: dict[str, dict[str, str]] = {}
     try:
-        tree = ast.parse(src)
+        tree = ast.parse(src) if _tree is None else _tree
     except SyntaxError:
         return from_consts, alias_map
     for node in ast.walk(tree):
@@ -690,8 +691,8 @@ def scan_source(src: str, path: str = "<mem>",
     """
     tree = ast.parse(src)
     meta_functions = _meta_returning_functions(tree)
-    consts = collect_module_constants(src)
-    from_consts, alias_map = _import_map(src, symbols or {})
+    consts = collect_module_constants(src, _tree=tree)
+    from_consts, alias_map = _import_map(src, symbols or {}, _tree=tree)
     consts.update(from_consts)
 
     def _run() -> list[Access]:
