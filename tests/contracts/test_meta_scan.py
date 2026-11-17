@@ -8,11 +8,40 @@
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 from tests.contracts import meta_scan
+
+
+@pytest.fixture(scope="module")
+def _repository_snapshot() -> meta_scan.ScanResult:
+    """One fixed-checkout scan per worker; mutable-root tests bypass this fixture."""
+    return meta_scan.scan_repository(Path(__file__).resolve().parents[2])
+
+
+@pytest.fixture
+def repository_scan(_repository_snapshot: meta_scan.ScanResult) -> meta_scan.ScanResult:
+    """Give each read-only repository contract its own mutable result containers."""
+    return deepcopy(_repository_snapshot)
+
+
+def test_repository_fixture_does_not_share_mutable_results(
+    repository_scan: meta_scan.ScanResult, _repository_snapshot: meta_scan.ScanResult,
+) -> None:
+    assert repository_scan == _repository_snapshot
+    for field in ("produced", "production_consumed", "test_consumed", "unresolved", "families"):
+        assert getattr(repository_scan, field) is not getattr(_repository_snapshot, field)
+    key = next(iter(repository_scan.produced))
+    repository_scan.produced[key].clear()
+    assert _repository_snapshot.produced[key]
+    repository_scan.production_consumed.clear()
+    repository_scan.test_consumed.clear()
+    repository_scan.unresolved.clear()
+    repository_scan.families.clear()
+    assert repository_scan != _repository_snapshot
 
 
 def _keys(src: str, kind: str) -> set[str]:
@@ -102,10 +131,9 @@ def test_mixed_return_helper_is_not_treated_as_meta(returned: str) -> None:
     assert "ordinary" not in _keys(src, "read")
 
 
-def test_corpus_meta_helpers_are_scanned_as_production_reads() -> None:
+def test_corpus_meta_helpers_are_scanned_as_production_reads(repository_scan: meta_scan.ScanResult) -> None:
     """真实调用缝：串案锚点不能因 helper 包装而被误判成孤儿。"""
-    root = Path(__file__).resolve().parents[2]
-    result = meta_scan.scan_repository(root)
+    result = repository_scan
     helper_reads = {
         "sample_sha256", "remote_config_artifacts", "build_provenance",
         "native_lib_hashes", "visibility",
@@ -553,10 +581,9 @@ def test_production_and_test_consumers_are_separated(tmp_path: Path) -> None:
     assert "only_test_reads" in res.orphans(), "测试读取被误算成生产消费方"
 
 
-def test_repository_scan_finds_real_known_keys() -> None:
+def test_repository_scan_finds_real_known_keys(repository_scan: meta_scan.ScanResult) -> None:
     """在真仓库上跑一遍，锚定几个已知键，防止扫描器整体失效后所有断言空对空。"""
-    root = Path(__file__).resolve().parents[2]
-    res = meta_scan.scan_repository(root)
+    res = repository_scan
 
     assert len(res.produced) > 50, f"只扫到 {len(res.produced)} 个 meta 键，扫描器可能整体失效"
     # 这三个键的存在与消费关系是本次调查中人工确认过的事实
@@ -565,10 +592,9 @@ def test_repository_scan_finds_real_known_keys() -> None:
     assert "app_classification" in res.produced
 
 
-def test_analyzer_unresolved_writes_match_reviewed_baseline() -> None:
+def test_analyzer_unresolved_writes_match_reviewed_baseline(repository_scan: meta_scan.ScanResult) -> None:
     """分析器目录的开放写入逐点冻结；新增动态键必须先被人工建模。"""
-    root = Path(__file__).resolve().parents[2]
-    res = meta_scan.scan_repository(root)
+    res = repository_scan
     got = {
         (access.file, access.key)
         for access in res.unresolved
@@ -607,10 +633,9 @@ def _dex_helper_result_owners(root: Path) -> set[str]:
     return owners
 
 
-def test_common_meta_writes_have_explicit_compensation() -> None:
+def test_common_meta_writes_have_explicit_compensation(repository_scan: meta_scan.ScanResult) -> None:
     """共享 helper 的写入面必须显式冻结，不能靠跳过 ``_common`` 放行新键。"""
-    root = Path(__file__).resolve().parents[2]
-    res = meta_scan.scan_repository(root)
+    res = repository_scan
     common_writes = {
         key
         for key, accesses in res.produced.items()
@@ -698,14 +723,14 @@ def _owner_from_module_path(file: str) -> str:
     return ".".join(parts)
 
 
-def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
+def test_analyzer_meta_declarations_match_all_static_writes_both_ways(repository_scan: meta_scan.ScanResult) -> None:
     """具体键、有限键族、共享 helper 写入都必须与分析器声明双向一致。"""
     from fxapk.core.meta_contract import META_KEY_REGISTRY, PIPELINE_OWNER
     from fxapk.analyzers.web_evidence import iter_coverage_meta_keys
     from fxapk.core.registry import discover_analyzers
 
     root = Path(__file__).resolve().parents[2]
-    res = meta_scan.scan_repository(root)
+    res = repository_scan
     observed: set[tuple[str, str]] = set()
     analyzers = discover_analyzers()
     for analyzer in analyzers:
@@ -762,10 +787,10 @@ def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
     assert missing.owners == frozenset({PIPELINE_OWNER}), "缺席留痕键必须登记为 pipeline 所有"
 
 
-def test_non_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
+def test_non_analyzer_meta_declarations_match_all_static_writes_both_ways(repository_scan: meta_scan.ScanResult) -> None:
     """第一方 stage 的模块内声明与实际写入必须键、owner 双向一致。"""
     root = Path(__file__).resolve().parents[2]
-    res = meta_scan.scan_repository(root)
+    res = repository_scan
     excluded = {"fxapk/core/report_io.py"}  # 反序列化边界按设计开放
     observed_files = {
         access.file
