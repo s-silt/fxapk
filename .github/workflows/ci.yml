@@ -165,10 +165,22 @@ jobs:
         # 而非 skip——否则上面的安装行被改掉后守门测试会静默消失、CI 照绿。
         env:
           FXAPK_REQUIRE_BUILD_TOOLCHAIN: "1"
-        run: >-
-          python -m pytest -q -n auto
-          --cov=fxapk --cov-report=term-missing:skip-covered --cov-fail-under=80
-          --junitxml=${{ runner.temp }}/fxapk-tests.xml
+        run: |
+          python -m pytest -q -n 0 tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
+            --cov=fxapk --cov-report= --cov-fail-under=0 \
+            --junitxml=${{ runner.temp }}/fxapk-host-test.xml
+          python - <<'PYTEST_XML'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "fxapk-host-test.xml").getroot()
+          cases = list(root.iter("testcase"))
+          assert len(cases) == 1 and cases[0].get("name") == "test_linux_preexisting_nondumpable_process_does_not_break_owned_run" and len(cases[0]) == 0, "host fixture missing, skipped or failed"
+          PYTEST_XML
+          python -m pytest -q -n auto \
+            --deselect=tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
+            --cov=fxapk --cov-append --cov-report=term-missing:skip-covered --cov-fail-under=80 \
+            --junitxml=${{ runner.temp }}/fxapk-tests.xml
       - name: Verify Linux process ownership tests actually ran
         if: runner.os == 'Linux'
         run: |
@@ -176,9 +188,9 @@ jobs:
           import os
           import xml.etree.ElementTree as ET
           from pathlib import Path
-          root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "fxapk-tests.xml").getroot()
+          roots = [ET.parse(Path(os.environ["RUNNER_TEMP"]) / name).getroot() for name in ("fxapk-host-test.xml", "fxapk-tests.xml")]
           for name in ("test_linux_preexisting_nondumpable_process_does_not_break_owned_run", "test_outer_timeout_kills_nested_owned_session_but_not_unrelated_process"):
-              cases = [case for case in root.iter("testcase") if case.get("name") == name]
+              cases = [case for root in roots for case in root.iter("testcase") if case.get("name") == name]
               assert len(cases) == 1 and len(cases[0]) == 0, f"critical test missing, skipped or failed: {name}"
               print(f"PASSED: {name}")
           PY
@@ -280,7 +292,19 @@ jobs:
           print(f"锁住的 {len(want)} 个包全部按版本装到位。")
           PY
       - name: Run tests in the locked environment
-        run: python -m pytest -q -n auto
+        run: |
+          python -m pytest -q -n 0 tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
+            --junitxml=${{ runner.temp }}/fxapk-host-test.xml
+          python - <<'PYTEST_XML'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "fxapk-host-test.xml").getroot()
+          cases = list(root.iter("testcase"))
+          assert len(cases) == 1 and cases[0].get("name") == "test_linux_preexisting_nondumpable_process_does_not_break_owned_run" and len(cases[0]) == 0, "host fixture missing, skipped or failed"
+          PYTEST_XML
+          python -m pytest -q -n auto \
+            --deselect=tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run
       # 同 test job 的基线不可变守卫（这个 job 也跑全量 pytest，同样的绕闸面）。
       - name: Guard — synthetic baselines untouched during CI
         run: git diff --exit-code -- tests/synthetic
