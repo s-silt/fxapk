@@ -4,11 +4,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
-import subprocess
 
 import pytest
 
 from fxapk.dynamic import probe_coverage
+from tests.node_stage_diagnostic import run_node_harness
 
 
 def test_config_body_status_round_trip_without_changing_default_profile():
@@ -39,6 +39,7 @@ def test_response_observer_compatibility_and_truthful_coverage(variant, expected
     source = (scripts / "probe_coverage.js").read_text(encoding="utf-8") + "\n" + (
         scripts / "config_body_hook.js").read_text(encoding="utf-8")
     program = r'''
+require('fs').writeSync(2, 'fxapk-test-node-stage:node_entry\n');
 const vm=require('vm'), assert=require('assert'), messages=[];
 let reads=0, responses=0, fail=false, observedBodies=0;
 const error=new Error('original exception'), raw=[1,2,3];
@@ -54,7 +55,10 @@ Java:{available:true,perform:fn=>fn(),retain:x=>x,vm:{getEnv:()=>({isSameObject:
  if(VARIANT==='kotlin' && name==='okhttp3.internal.connection.RealCall')return {'getResponseWithInterceptorChain$okhttp':{overload:()=>method}};
  throw new Error('API unavailable');
 }},send:(meta,data)=>messages.push({meta,data})};
-vm.createContext(context);vm.runInContext(SOURCE,context);
+vm.createContext(context);
+require('fs').writeSync(2, 'fxapk-test-node-stage:before_evaluation\n');
+vm.runInContext(SOURCE,context);
+require('fs').writeSync(2, 'fxapk-test-node-stage:after_evaluation\n');
 const statuses=()=>messages.filter(m=>m.meta.type==='apkscan-probe-status' && m.meta.family==='config_body');
 assert(statuses().some(m=>m.meta.status===EXPECTED),JSON.stringify(statuses()));
 if(EXPECTED==='installed'){
@@ -74,6 +78,7 @@ if(EXPECTED==='installed'){
  assert.throws(()=>bytes.implementation.call(body),e=>e===error);
  assert.strictEqual(reads,3);assert.strictEqual(responses,2);
 }
+require('fs').writeSync(2, 'fxapk-test-node-stage:assertions_complete\n');
 '''.replace("VARIANT", json.dumps(variant)).replace("EXPECTED", json.dumps(expected)).replace("SOURCE", json.dumps(source))
-    result = subprocess.run([node], input=program, capture_output=True, text=True, timeout=10)
+    result = run_node_harness(node, program)
     assert result.returncode == 0, result.stderr
