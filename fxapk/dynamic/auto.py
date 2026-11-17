@@ -26,7 +26,7 @@
 
     {
         "steps": [
-            {"name": str, "status": "done"|"skipped"|"error", "detail": str},
+            {"name": str, "status": "done"|"skipped"|"error"|"degraded", "detail": str},
             ...
         ],
         "report_paths": list[str],   # 产出/重渲的报告路径（去重，保持顺序）
@@ -42,7 +42,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal, NotRequired, TypedDict, TYPE_CHECKING
 
 from fxapk.core import device
 from fxapk.dynamic.cancel import AutoCancelled
@@ -74,6 +74,35 @@ META_WRITE_CATEGORIES = {
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
+if TYPE_CHECKING:
+    from fxapk.core.report_delivery import ReportDelivery
+
+
+StepStatus = Literal["done", "skipped", "error", "degraded"]
+
+
+class StepResult(TypedDict):
+    """Existing step projection; typing does not establish evidence or authority."""
+
+    name: str
+    status: StepStatus
+    detail: str
+
+
+class RunResult(TypedDict):
+    """Keep execution steps, closure and delivery as independent result axes."""
+
+    status: str
+    closure: dict[str, object]
+    strict_case: bool
+    steps: list[StepResult]
+    report_paths: list[str]
+    package_name: str
+    out_dir: str
+    report_delivery: ReportDelivery | None
+    cancel_reason: NotRequired[str]
+
+
 logger = logging.getLogger(__name__)
 
 # 步骤名常量（避免裸字符串漂移；CLI / 测试以此识别步骤）。
@@ -92,12 +121,12 @@ _STEP_MERGE = "合并运行时端点"
 _STEP_CLOSE = "案件闭环"
 
 # 步骤状态常量（与 DynamicResult 的 status 取值口径一致）。
-_DONE = "done"
-_SKIPPED = "skipped"
-_ERROR = "error"
+_DONE: Final = "done"
+_SKIPPED: Final = "skipped"
+_ERROR: Final = "error"
 # 抓包跑完但无可用证据路径（与 dynamic.STATUS_DEGRADED 同值）。第一遍即便 degraded 也算「跑出了基线」，
 # 可据以判断要不要旁路——它与「压根没跑起来」（skipped/error）是两回事。
-_DEGRADED = "degraded"
+_DEGRADED: Final = "degraded"
 
 # 默认报告格式（与 merge / cli 口径一致）。
 _DEFAULT_FORMATS = ["html", "json"]
@@ -139,7 +168,7 @@ def _confirm(confirm: Callable[[str], object] | None, msg: str) -> bool:
     return True
 
 
-def _step(name: str, status: str, detail: str) -> dict:
+def _step(name: str, status: StepStatus, detail: str) -> StepResult:
     """构造单步结果。"""
     return {"name": name, "status": status, "detail": detail}
 
@@ -149,17 +178,17 @@ def _finish_run(
     status: str,
     closure: dict[str, object],
     strict_case: bool,
-    steps: list[dict],
+    steps: list[StepResult],
     report_paths: list[str],
     package_name: str,
     out_dir: str,
     delivery_sink: list[object],
     cancel_reason: str = "",
-) -> dict:
+) -> RunResult:
     """组装 run 的返回。写出回执与闭环状态分开，取消不改写成闭环失败。"""
     from fxapk.core.report_delivery import combine_deliveries
 
-    payload: dict[str, object] = {
+    payload: RunResult = {
         "status": status,
         "closure": closure,
         "strict_case": bool(strict_case),
@@ -194,7 +223,7 @@ def run(
     android_ui_plugin: AndroidUiPlugin | None = None,
     web_supplement: str | None = None,
     web_supplement_request: dict | None = None,
-) -> dict:
+) -> RunResult:
     """一键全自动：体检 → 静态 → 脱壳 → 抓包 → 合并，回一份结构化总报告。
 
     普通步骤失败不中断后续。确认拒绝、Ctrl+C 和确认回调失败返回 status=cancelled，
@@ -217,7 +246,7 @@ def run(
         取消时 status 为 cancelled，closure.status 为 not_run。函数本身不把取消抛给调用方。
     """
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
-    steps: list[dict] = []
+    steps: list[StepResult] = []
     report_paths: list[str] = []
     package_name = ""
     # 静态分析得到的 Report，供抓包后 merge 就地补全；任意类型（避免顶层 import pipeline/Report）。
@@ -502,7 +531,8 @@ def run(
                     serial=target_serial,
                     on_progress=on_progress,
                 )
-                repack_step = dict(repack_step, name=_STEP_BYPASS_REPACKAGE)
+                repack_step = repack_step.copy()
+                repack_step["name"] = _STEP_BYPASS_REPACKAGE
                 steps.append(repack_step)
                 if repack_step.get("status") == _DONE and wrapper_apk_path:
                     apk_identity["wrapper"] = {
@@ -524,7 +554,8 @@ def run(
                         antidetect="java",
                         pass_tag="pass2",  # 设备侧 floor pcap 与第一遍分开，绝不覆盖 original 基线
                     )
-                    pass2_step = dict(pass2_step, name=_STEP_BYPASS_CAPTURE)
+                    pass2_step = pass2_step.copy()
+                    pass2_step["name"] = _STEP_BYPASS_CAPTURE
                     steps.append(pass2_step)
                     if pass2_step.get("status") in (_DONE, _DEGRADED) and pass2_path:
                         pass2_runtime_report = pass2_path
@@ -740,7 +771,7 @@ def analyze_static(
 
 def _run_doctor(
     *, serial: str | None = None, auto_fix: bool, on_progress: Callable[[str], None] | None
-) -> dict:
+) -> StepResult:
     """步骤 1：动态前置环境体检 + 自修。失败转 error step，不中断后续。
 
     serial 透传给 doctor.run（多设备消歧：体检/装 CA 全程钉定同一台）；None 时退回旧行为。
@@ -872,7 +903,7 @@ def _run_static(
     web_supplement: str | None = None,
     web_supplement_request: dict | None = None,
     delivery_sink: list[object] | None = None,
-) -> tuple[dict, Report | None, str, list[str], str]:
+) -> tuple[StepResult, Report | None, str, list[str], str]:
     """步骤 2：静态分析 load_apk → pipeline.run → 写报告。
 
     Returns:
@@ -1008,7 +1039,7 @@ def _ensure_root_frida_server(
 
 def _run_install_app(
     apk_path: str, *, serial: str | None = None, on_progress: Callable[[str], None] | None
-) -> dict:
+) -> StepResult:
     """安装 APK 到设备（脱壳/抓包 spawn 前置）。失败不阻断流水线（设备或已装兼容版本）。
 
     成功 → done；失败 → error（带原因，如签名冲突需先 uninstall），但后续步骤仍尝试
@@ -1036,7 +1067,7 @@ def _run_unpack(
     has_device: bool,
     serial: str | None = None,
     on_progress: Callable[[str], None] | None,
-) -> tuple[dict, list[str], Report | None]:
+) -> tuple[StepResult, list[str], Report | None]:
     """步骤 3：脱壳（仅有设备才做）。无设备 → skipped；失败 → error，均不中断。
 
     serial 透传给 unpack.run（多设备消歧）；None 时退回旧行为（-FU）。
@@ -1170,7 +1201,7 @@ def _run_repackage(
     has_device: bool,
     serial: str | None = None,
     on_progress: Callable[[str], None] | None,
-) -> tuple[dict, str | None]:
+) -> tuple[StepResult, str | None]:
     """步骤 3.6：去壳重打包（仅有设备才做）。无设备 → skipped；异常 → error，均不中断流水线。
 
     去壳成功 → done（去壳版已装回，capture 将抓此版）；无料/判定不过 → repackage 内部降级 skipped
@@ -1280,7 +1311,7 @@ def _run_capture(
     pass_tag: str = "",
     web_observer: object | None = None,
     interaction: Callable[..., object] | None = None,
-) -> tuple[dict, str]:
+) -> tuple[StepResult, str]:
     """步骤 4：抓包（有设备 + 有包名才做）。先 confirm 提示用户操作 app 触发网络。
 
     serial 透传给 capture.run（多设备消歧）；None 时退回旧行为（-U）。
@@ -1328,7 +1359,8 @@ def _run_capture(
         #   使 degraded 判据在生产链路真正可达（否则那条分支只有纯函数测试能触发）。
         raw_status = str(result.get("status") or "") if isinstance(result, dict) else ""
         if raw_status == _DEGRADED and step["status"] == _ERROR:
-            step = dict(step, status=_DEGRADED)
+            step = step.copy()
+            step["status"] = _DEGRADED
         runtime_path = ""
         if step["status"] in (_DONE, _DEGRADED):
             runtime_path = _resolve_runtime_report_path(result, out_dir)
@@ -1363,7 +1395,7 @@ def _run_merge(
     on_progress: Callable[[str], None] | None,
     evidence_namespace: str | None = None,
     delivery_sink: list[object] | None = None,
-) -> tuple[dict, list[str]]:
+) -> tuple[StepResult, list[str]]:
     """步骤 5：把运行时端点并回主报告并重渲。失败 → error，但不破坏已产出静态报告。
 
     ``base`` 必须与静态首次写出同一 base，否则重渲会写到 report.* 而静态在 <apk>.*，产两套。
@@ -1427,7 +1459,7 @@ def _run_closure(
     require_dynamic: bool,
     on_progress: Callable[[str], None] | None,
     delivery_sink: list[object] | None = None,
-) -> tuple[dict, dict[str, object], list[str]]:
+) -> tuple[StepResult, dict[str, object], list[str]]:
     """Run deterministic case gates and persist them without raising to callers."""
     _emit(on_progress, "步骤 6/6：多源富化、五层归因与案件闭环验收")
     try:
@@ -1504,7 +1536,7 @@ def _run_closure(
 # ---------------------------------------------------------------------------
 
 
-def _fold_dynamic_step(name: str, result: object) -> tuple[dict, list[str]]:
+def _fold_dynamic_step(name: str, result: object) -> tuple[StepResult, list[str]]:
     """把 DynamicResult（unpack/capture 返回）折叠成一个 step + 其 report_paths。
 
     status 直接沿用 DynamicResult 的 done/skipped/error；detail 用 reason。
@@ -1513,12 +1545,15 @@ def _fold_dynamic_step(name: str, result: object) -> tuple[dict, list[str]]:
         logger.warning("[auto] %s 返回非 dict，按 error 处理：%r", name, type(result).__name__)
         return _step(name, _ERROR, "返回值非预期格式"), []
     status = str(result.get("status") or _ERROR)
-    if status not in (_DONE, _SKIPPED, _ERROR):
-        status = _ERROR
+    folded_status: StepStatus
+    if status == _DONE or status == _SKIPPED or status == _ERROR:
+        folded_status = status
+    else:
+        folded_status = _ERROR
     reason = str(result.get("reason") or "")
     raw_paths = result.get("report_paths") or []
     report_paths = [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
-    return _step(name, status, reason), report_paths
+    return _step(name, folded_status, reason), report_paths
 
 
 def _resolve_runtime_report_path(capture_result: object, out_dir: str) -> str:

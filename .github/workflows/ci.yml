@@ -65,6 +65,8 @@ jobs:
         run: python -m ruff check fxapk tests plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src
       - name: Pyright (type check)
         run: python -m pyright fxapk plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src
+      - name: Auto result type contract (required)
+        run: python tests/check_auto_result_types.py
 
   leak-scan:
     # ★第二道防线：本地 pre-commit hook 可被 --no-verify 跳过，CI 不能。
