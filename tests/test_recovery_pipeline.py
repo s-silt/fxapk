@@ -272,17 +272,17 @@ def test_reanalysis_status_reaches_recovery_and_report(monkeypatch, tmp_path, an
     diagnostic.observe(stage="reanalyze", reasons=reanalyzed.get("reason_codes"))
     with diagnostic:
         assert reanalyzed["state"] == ("ok" if expected == "complete" else expected)
-    if process_failed:
-        assert "subprocess_timeout" in reanalyzed["reason_codes"]
-    if not extra_loaded:
-        assert "reanalyzed_extra_dex_not_loaded" in reanalyzed["reason_codes"]
-        for name in ("report.json", "digest.json", "report.html"):
-            assert "reanalyzed_extra_dex_not_loaded" in (output / "reviewed" / name).read_text(encoding="utf-8")
-    if analysis_status != "complete":
-        reason = "reanalyzed_report_" + analysis_status
-        assert reason in reanalyzed["reason_codes"]
-        for name in ("report.json", "digest.json", "report.html"):
-            assert reason in (output / "reviewed" / name).read_text(encoding="utf-8")
+        if process_failed:
+            assert "subprocess_timeout" in reanalyzed["reason_codes"]
+        if not extra_loaded:
+            assert "reanalyzed_extra_dex_not_loaded" in reanalyzed["reason_codes"]
+            for name in ("report.json", "digest.json", "report.html"):
+                assert "reanalyzed_extra_dex_not_loaded" in (output / "reviewed" / name).read_text(encoding="utf-8")
+        if analysis_status != "complete":
+            reason = "reanalyzed_report_" + analysis_status
+            assert reason in reanalyzed["reason_codes"]
+            for name in ("report.json", "digest.json", "report.html"):
+                assert reason in (output / "reviewed" / name).read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")

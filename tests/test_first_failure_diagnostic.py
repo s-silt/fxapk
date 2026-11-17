@@ -106,3 +106,41 @@ def test_unobserved_reasons_differ_from_observed_empty(capsys):
                 diagnostic.observe(stage="ownership_read", reasons=reasons)
                 assert False
         assert _payload(capsys)["reasons"] == expected
+
+
+@pytest.mark.parametrize("failure", [None, "reason", "report"])
+def test_reanalysis_late_assertions_emit_filtered_diagnostic(monkeypatch, tmp_path, request, capsys, failure):
+    from contextlib import nullcontext
+
+    from tests import test_recovery_pipeline as pipeline
+
+    original_run = pipeline.recovery.run
+    reached = []
+
+    def synthetic_run(plan, output):
+        value = original_run(plan, output)
+        stage = next(row for row in value["stages"] if row["id"] == "reanalyze")
+        assert stage["state"] == "partial"  # The first assertion will pass.
+        reached.append(True)
+        stage["reason_codes"].append("synthetic-private-path-or-command")
+        if failure == "reason":
+            stage["reason_codes"].remove("reanalyzed_report_partial")
+        elif failure == "report":
+            (output / "reviewed/report.json").write_text("synthetic altered report", encoding="utf-8")
+        return value
+
+    monkeypatch.setattr(pipeline.recovery, "run", synthetic_run)
+    with pytest.raises(AssertionError) if failure else nullcontext():
+        pipeline.test_reanalysis_status_reaches_recovery_and_report(
+            monkeypatch, tmp_path, "partial", False, True, request,
+        )
+    assert reached == [True]
+    if failure:
+        payload = _payload(capsys)
+        assert payload["test"] == "recovery_reanalysis"
+        assert payload["stage"] == "reanalyze"
+        assert payload["reasons"] == (["unknown"] if failure == "reason"
+                                      else ["reanalyzed_report_partial", "unknown"])
+        assert "synthetic-private-path-or-command" not in json.dumps(payload)
+    else:
+        assert capsys.readouterr() == ("", "")
