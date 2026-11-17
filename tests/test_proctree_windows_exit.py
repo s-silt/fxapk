@@ -9,6 +9,7 @@ import time
 import pytest
 
 from fxapk.core import proctree
+from tests.windows_tracker_diagnostic import diagnose_tracker_assertion
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows native Job handles")
 
@@ -30,7 +31,8 @@ def owned_sleeper():
         while tracker.seen != 1 and not tracker.failed and time.monotonic() < deadline:
             tracker.changed.wait(0.02)
             tracker.changed.clear()
-        assert tracker.seen == 1 and len(tracker.handles) == 1 and not tracker.failed
+        with diagnose_tracker_assertion(tracker, lambda: proctree._job_process_counts(job)):
+            assert tracker.seen == 1 and len(tracker.handles) == 1 and not tracker.failed
         yield job, tracker, proc
     finally:
         # This Job was created here and contains only the above process; no numeric-PID kill.
