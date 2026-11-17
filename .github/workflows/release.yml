@@ -68,52 +68,22 @@ jobs:
           /tmp/release-smoke/bin/python -m pip install dist/*.whl
           /tmp/release-smoke/bin/python -I tools/release_smoke.py --expect-version "${GITHUB_REF_NAME#v}"
           sha256sum dist/*.whl
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          # Idempotent: if the version already exists (e.g. a tag re-push /
-          # history rewrite re-triggers this run), skip instead of failing.
-          skip-existing: true
       - name: Hash release archives
         run: |
           mkdir release-assets
           cp dist/*.whl dist/*.tar.gz plugin-dist/*.whl plugin-dist/*.tar.gz release-assets/
           cd release-assets
           sha256sum *.whl *.tar.gz > SHA256SUMS.txt
-      - name: 生成中文发行说明
+      - name: Verify complete release and render notes before any upload
         run: |
-          python - <<'PY'
-          import os
-          import re
-          import string
-          import tomllib
-          from pathlib import Path
-
-          core = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
-          plugin = tomllib.loads(Path("plugins/fxapk-android-ui/pyproject.toml").read_text(encoding="utf-8"))["project"]
-          rea = tomllib.loads(Path("plugins/fxapk-rea/pyproject.toml").read_text(encoding="utf-8"))["project"]
-          asc = tomllib.loads(Path("plugins/fxapk-asc/pyproject.toml").read_text(encoding="utf-8"))["project"]
-          flutter = tomllib.loads(Path("plugins/fxapk-flutter/pyproject.toml").read_text(encoding="utf-8"))["project"]
-          template = string.Template(Path(".github/release-notes-template.md").read_text(encoding="utf-8"))
-          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          heading = re.search(r"(?m)^## " + re.escape(core["version"]) + r"(?: — [^\n]+)?$", changelog)
-          if heading is None:
-              raise SystemExit("缺少与发行版本一致的 CHANGELOG 条目")
-          section = changelog[heading.end():]
-          section = re.split(r"(?m)^## ", section, maxsplit=1)[0].strip()
-          # 历史记录说明不属于本版变更；只消费已有中文条目，不生成英文 PR 摘要。
-          section = section.split("\n以下为各版本发布时的历史记录；", 1)[0].strip()
-          if not section:
-              raise SystemExit("发行版本的 CHANGELOG 条目为空")
-          notes = template.substitute(
-              changes=section,
-              tag=os.environ["GITHUB_REF_NAME"], repository=os.environ["GITHUB_REPOSITORY"],
-              commit=os.environ["GITHUB_SHA"], core_version=core["version"],
-              plugin_version=plugin["version"], requires_python=core["requires-python"],
-              rea_version=rea["version"], asc_version=asc["version"], flutter_version=flutter["version"],
-          )
-          Path("release-notes.md").write_text(notes, encoding="utf-8")
-          PY
+          python tools/release_preflight.py \
+            --tag "$GITHUB_REF_NAME" --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA"
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Idempotent: if the version already exists (e.g. a tag re-push /
+          # history rewrite re-triggers this run), skip instead of failing.
+          skip-existing: true
       # 打 tag 时顺带建 GitHub Release，默认使用中文模板，不自动生成英文 PR 摘要。
       # ★ 幂等：Release 已存在（tag 重推）则跳过，不失败——与上面 skip-existing 同philosophy。
       # 历史上 v1.0.0 只发了 PyPI、漏建 Release 就是因为这步以前靠手动。
