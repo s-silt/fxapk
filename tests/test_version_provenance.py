@@ -95,3 +95,42 @@ def test_missing_source_is_not_consistent(monkeypatch):
     result = resolve_version(None)
     assert result.source_version is None
     assert result.consistency == "unverifiable"
+
+
+@pytest.mark.parametrize(
+    "dist,effective,status,consistency,exit_code",
+    [
+        ("2.0.0", "2.0.0", "available", "consistent", 0),
+        ("1.0.0", "1.0.0", "available", "conflict", 1),
+        (None, "2.0.0", "missing", "unverifiable", 0),
+        ("error", "2.0.0", "error", "unverifiable", 0),
+        ("", "2.0.0", "invalid", "unverifiable", 0),
+    ],
+)
+def test_version_detail_distinguishes_metadata_states_without_changing_exit(
+    monkeypatch, dist, effective, status, consistency, exit_code,
+):
+    from typer.testing import CliRunner
+    from fxapk.cli import app
+
+    pin_distribution(monkeypatch, dist)
+    monkeypatch.setattr(fxapk, "_FALLBACK_VERSION", "2.0.0")
+    monkeypatch.setattr(fxapk, "__version__", effective)
+    before = resolve_version("2.0.0", effective_version=effective).report_record()
+    component = build_version_component()
+    assert f"distribution_status={status}" in component["detail"]
+    assert f"consistency={consistency}" in component["detail"]
+    display = {"missing": "未安装", "error": "读取失败", "invalid": "版本无效"}.get(status, dist)
+    assert f"distribution={display} " in component["detail"]
+    if status in ("error", "invalid"):
+        assert "未安装" not in component["detail"]
+    assert component["status"] == ("unreachable" if exit_code else "ok")
+    result = CliRunner().invoke(app, ["--version-verbose"])
+    assert result.exit_code == exit_code
+    assert f"distribution_status={status}" in result.output
+    assert f"consistency={consistency}" in result.output
+    assert f"distribution={display}\n" in result.output
+    if status in ("error", "invalid"):
+        assert "未安装" not in result.output
+    assert resolve_version("2.0.0", effective_version=effective).report_record() == before
+    assert fxapk.__version__ == effective
