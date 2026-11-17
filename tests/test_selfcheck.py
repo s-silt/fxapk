@@ -62,3 +62,28 @@ def test_selfcheck_reports_installed_rea_disabled_without_loading(monkeypatch) -
     assert "安装" not in rea["fix"]
     core = next(item for item in res["components"] if item["name"] == "core")
     assert core["status"] == "ok"
+
+
+def test_cli_selfcheck_preserves_diagnostic_payload_and_offline_flags(monkeypatch) -> None:
+    import json
+
+    calls = []
+    payload = {
+        "components": [{
+            "name": "version", "category": "core", "status": "ok",
+            "detail": "distribution=读取失败 | distribution_status=error consistency=unverifiable",
+            "fix": "",
+        }],
+        "summary": {"ok": 1}, "ok": True,
+    }
+
+    def synthetic_selfcheck(*, online, probe_network):
+        calls.append((online, probe_network))
+        return payload
+
+    monkeypatch.setattr("fxapk.selfcheck.run_selfcheck", synthetic_selfcheck)
+    result = runner.invoke(cli.app, ["selfcheck", "--offline", "--no-probe"])
+    assert result.exit_code == 0
+    assert calls == [(False, False)]
+    assert json.loads(result.output) == payload
+    assert "读取失败" in result.output
