@@ -248,7 +248,7 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 
 ## Optional Android UI plugin
 
-`fxapk-android-ui 0.1.2` provides `ui capabilities` / `ui snapshot` / `ui run-plan`; device commands take an explicit `--serial`, and observations/plans also require `--package` and a new `--out`. Installing the plugin does not automatically attach UI observation to `auto`/`capture`. Screenshots, layouts and diagnostics may contain raw values. See [ANDROID-UI.en.md](ANDROID-UI.en.md).
+`fxapk-android-ui` provides `ui capabilities` / `ui snapshot` / `ui run-plan`; device commands take an explicit `--serial`, and observations/plans also require `--package` and a new `--out`. Installing the plugin does not automatically attach UI observation to `auto`/`capture`. Screenshots, layouts and diagnostics may contain raw values. See [ANDROID-UI.en.md](ANDROID-UI.en.md).
 
 ## Optional Flutter AOT plugin
 
