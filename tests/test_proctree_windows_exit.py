@@ -5,6 +5,8 @@ import ctypes
 import subprocess
 import sys
 import time
+from threading import Lock
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,6 +111,49 @@ def test_collector_failure_during_final_confirmation_remains_unconfirmed(
 
     monkeypatch.setattr(proctree, "_job_process_counts", counts)
     assert tracker.wait(0.03) is False
+
+
+@pytest.mark.parametrize("fail_second", [False, True], ids=["healthy", "collector_fails"])
+def test_final_confirmation_rechecks_collector_state_without_native_fixture(
+    monkeypatch, fail_second,
+):
+    # Exercise the real wait method, without creating a Job, thread or process.
+    tracker = object.__new__(proctree._JobExitTracker)
+    tracker.job = object()
+    handle = object()
+    tracker.handles = [handle]
+    tracker.seen, tracker.failed = 1, False
+    tracker.lock = Lock()
+    calls = []
+    count_calls = 0
+
+    def counts(job):
+        nonlocal count_calls
+        assert job is tracker.job
+        count_calls += 1
+        calls.append("counts")
+        if count_calls == 2 and fail_second:
+            tracker.failed = True
+        return 0, 1
+
+    def wait_for_handle(actual, timeout):
+        assert actual is handle and timeout == 0
+        calls.append("handle_wait")
+        return 0  # Synthetic signaled handle.
+
+    # Advance synthetic time without depending on the number of clock reads.
+    # Exhaustion bounds unexpected loops; do not patch the shared time module.
+    clock = iter(tick / 1000 for tick in range(101))
+    monkeypatch.setattr(proctree, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(proctree, "_job_process_counts", counts)
+    monkeypatch.setattr(
+        proctree, "_kernel32", SimpleNamespace(WaitForSingleObject=wait_for_handle),
+    )
+
+    assert tracker.wait(0.03) is (not fail_second)
+    assert count_calls == 2
+    assert calls == ["counts", "handle_wait", "counts"]
+    assert tracker.failed is fail_second
 
 
 def test_collector_lock_cannot_extend_cleanup_budget(owned_sleeper):
