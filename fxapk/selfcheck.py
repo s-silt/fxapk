@@ -165,13 +165,18 @@ def build_version_component() -> dict[str, str]:
         reinstall = "`python -m pip install -e <该工作树的绝对路径>`（uv 建的 venv 用 `uv pip install -e <同上>`）"
 
     head = _git_head(import_path) if import_path else ""
+    distribution_display = dist_version or {
+        "missing": "未安装", "error": "读取失败", "invalid": "版本无效",
+    }.get(provenance.distribution_status, "未知")
     detail = (
         f"version={imported_version or '未知'} "
         f"source_version={fallback_version or '未知'} "
         f"import_path={import_path or '未知'} "
-        f"distribution={dist_version or '未安装'} "
+        f"distribution={distribution_display} "
         f"distribution_location={dist_location or '-'} "
-        f"git_head={head or '-'}"
+        f"git_head={head or '-'} "
+        f"distribution_status={provenance.distribution_status} "
+        f"consistency={provenance.consistency}"
     )
 
     # 只有"两边都拿到了版本号且不一致"才算故障——未安装时对不上是正常的。
