@@ -16,6 +16,7 @@ import psutil
 import pytest
 
 from fxapk.core import proctree
+from tests.first_failure_diagnostic import FirstFailureDiagnostic
 
 #: 「java 等价物」孙进程：长睡眠、输出全部 DEVNULL（不占父的 stdout 管道，
 #: 免得 communicate 等孙进程 EOF——真实 jadx 的这类挂起由 timeout 兜底，与本测无关）。
@@ -104,17 +105,20 @@ def test_timeout_kills_whole_tree_including_grandchild() -> None:
             _kill_if_alive(pid)  # 断言失败时不留真孤儿
 
 
-def test_descendants_after_root_exit_force_killed() -> None:
+def test_descendants_after_root_exit_force_killed(request) -> None:
     """根进程正常退出但孙进程脱管（daemon 化 java 形态）→ 检出、强杀整树、
     forced_tree_kill=True（该次运行不得算完整覆盖）。"""
     res = proctree.run_owned([sys.executable, "-c", _SPAWN_SLEEPER], timeout=30.0)
+    diagnostic = FirstFailureDiagnostic("ownership_descendants", getattr(request.config, "workerinput", {}).get("workerid", "master"))
+    diagnostic.observe(stage="termination_check", ownership=res.ownership_complete, reasons=res.reason_codes)
     pid = int(res.stdout.strip().splitlines()[0])
     try:
-        assert res.timed_out is False
-        assert res.forced_tree_kill is True
-        assert "descendants_after_root_exit" in res.reason_codes
-        assert res.termination_complete is True
-        assert _sleeper_gone(pid), "脱管孙进程未被强杀"
+        with diagnostic:
+            assert res.timed_out is False
+            assert res.forced_tree_kill is True
+            assert "descendants_after_root_exit" in res.reason_codes
+            assert res.termination_complete is True
+            assert _sleeper_gone(pid), "脱管孙进程未被强杀"
     finally:
         _kill_if_alive(pid)
 
@@ -245,7 +249,7 @@ def test_posix_internal_error_after_spawn_kills_and_reaps_group(
 
 
 @pytest.mark.parametrize("older", [True, False])
-def test_posix_access_denied_process_is_ignored_only_when_older(monkeypatch, older):
+def test_posix_access_denied_process_is_ignored_only_when_older(monkeypatch, older, request):
     from types import SimpleNamespace
 
     name = "_apkscan_proctree_access_test"
@@ -257,6 +261,8 @@ def test_posix_access_denied_process_is_ignored_only_when_older(monkeypatch, old
         loading.setattr(sys, "platform", "linux")
         spec.loader.exec_module(posix)
 
+    diagnostic = FirstFailureDiagnostic("ownership_access", getattr(request.config, "workerinput", {}).get("workerid", "master"))
+
     class Protected:
         pid = 4243
         def status(self):
@@ -264,6 +270,7 @@ def test_posix_access_denied_process_is_ignored_only_when_older(monkeypatch, old
         def uids(self):
             return SimpleNamespace(real=1000)
         def environ(self):
+            diagnostic.observe(stage="ownership_read", read_error="AccessDenied")
             raise psutil.AccessDenied(self.pid)
         def create_time(self):
             return time.time() - 100 if older else time.time() + 1
@@ -282,11 +289,12 @@ def test_posix_access_denied_process_is_ignored_only_when_older(monkeypatch, old
     monkeypatch.setattr(posix.os, "getpgid", lambda pid: 9999, raising=False)
     monkeypatch.setattr(psutil, "process_iter", lambda *a: iter([Protected()]))
     monkeypatch.setattr(sys, "platform", "linux")
-    result = posix.run_owned(["synthetic"], timeout=1)
-    assert result.returncode == 0 and result.stdout == "success"
-    assert result.ownership_complete is True
-    assert result.termination_complete is older
-    assert result.reason_codes == (() if older else ("tree_state_unverified",))
+    with diagnostic:
+        result = posix.run_owned(["synthetic"], timeout=1)
+        assert result.returncode == 0 and result.stdout == "success"
+        assert result.ownership_complete is True
+        assert result.termination_complete is older
+        assert result.reason_codes == (() if older else ("tree_state_unverified",))
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux procfs dumpability")
