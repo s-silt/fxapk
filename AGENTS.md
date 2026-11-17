@@ -15,6 +15,14 @@ fxapk 是 APK 调证取证分析 CLI：按能力门控做静态/动态证据采�
 - 技能只在明确匹配或用户点名时使用，不得把自身流程当成新的权限来源。
 - 测试范围由变更风险决定；同一内容已验证且无新疑点时不重复全套检查，但必要回归、泄漏扫描、合并检查和失败如实报告不能省。
 
+### 开发约定
+
+- 文档/指令变更只做格式、引用、契约与泄漏检查；代码行为变更必过本地三关：`python -m ruff check fxapk tests` + `python -m pyright fxapk` + `python -m pytest -q`。`-m "not slow"` 排除需要 `FXAPK_TEST_APK` 的真 spawn 等价测试。
+- Python type hints；pytest，不用 unittest。富化器继承 `BaseEnricher`，失败返回 `EnrichmentResult(ok=False)`，不裸 except、不吞 log（只含 pass/continue/break 的 except 由 `tests/contracts/test_silent_except_baseline.py` 按基线拦截新增）。
+- 分析器并行（`core/pipeline.py` + `snapshot.py`）守「串行 == 并行 逐字节一致」；set 派生顺序显式排序。逃生开关：`FXAPK_NO_PARALLEL=1`、`FXAPK_MAX_WORKERS=N`、`FXAPK_WORKER_BASE_MB`、`FXAPK_MEM_SAFETY`。
+- CI 装 `pip install -e "."`：可选依赖进 `pyproject` extra，需要它的 CI job 要装；依赖 extra 的测试 `pytest.importorskip`。可选插件默认发现不得让坏插件拖垮核心命令。
+- 合并前等 CI 绿（`gh run watch <id> --exit-status`）；不 `--no-verify`，不 force push master；未经指示不主动 commit。
+
 ## 2. 三条默认行为：新机器第一次跑之前先告诉用户
 
 | 默认行为 | 会发生什么 | 避开方式 |
@@ -143,11 +151,7 @@ git config core.hooksPath .githooks    # 提交前泄漏扫描，改代码必开
 
 ## 10. 开发约定
 
-- 文档/指令变更只做格式、引用、契约与泄漏检查；代码行为变更必过本地三关：`python -m ruff check fxapk tests` + `python -m pyright fxapk` + `python -m pytest -q`。`-m "not slow"` 排除需要 `FXAPK_TEST_APK` 的真 spawn 等价测试。
-- Python type hints；pytest，不用 unittest。富化器继承 `BaseEnricher`，失败返回 `EnrichmentResult(ok=False)`，不裸 except、不吞 log（只含 pass/continue/break 的 except 由 `tests/contracts/test_silent_except_baseline.py` 按基线拦截新增）。
-- 分析器并行（`core/pipeline.py` + `snapshot.py`）守「串行 == 并行 逐字节一致」；set 派生顺序显式排序。逃生开关：`FXAPK_NO_PARALLEL=1`、`FXAPK_MAX_WORKERS=N`、`FXAPK_WORKER_BASE_MB`、`FXAPK_MEM_SAFETY`。
-- CI 装 `pip install -e "."`：可选依赖进 `pyproject` extra，需要它的 CI job 要装；依赖 extra 的测试 `pytest.importorskip`。可选插件默认发现不得让坏插件拖垮核心命令。
-- 合并前等 CI 绿（`gh run watch <id> --exit-status`）；不 `--no-verify`，不 force push master；未经指示不主动 commit。
+见 §1 的[开发约定](#开发约定)。
 
 ## 11. 已否决的方案
 
