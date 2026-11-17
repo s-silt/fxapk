@@ -1,0 +1,119 @@
+name: Synthetic artifact evidence experiment
+on:
+  push:
+    branches: [experiment-artifact-proof]
+    paths: [.github/workflows/artifact-evidence-experiment.yml]
+permissions: {}
+concurrency:
+  group: synthetic-artifact-evidence
+  cancel-in-progress: false
+jobs:
+  producer:
+    name: synthetic artifact producer
+    if: github.event_name == 'push' && github.ref == 'refs/heads/experiment-artifact-proof'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    outputs:
+      run: ${{ steps.identity.outputs.run }}
+      attempt: ${{ steps.identity.outputs.attempt }}
+      head: ${{ steps.identity.outputs.head }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - name: Fixed synthetic bytes only
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'FXAPK_SYNTHETIC_ARTIFACT_V1\n' > "$RUNNER_TEMP/marker.txt"
+          printf 'run=%s\nattempt=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - name: Upload only the fixed marker
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: synthetic-marker-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/marker.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+  receiver:
+    name: synthetic artifact receiver
+    needs: producer
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/experiment-artifact-proof'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: read
+    steps:
+      - name: Bind trusted outputs to API artifact and current-attempt successful producer
+        shell: bash
+        env:
+          READ_TOKEN: ${{ github.token }}
+          RUN: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          HEAD: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
+          PRODUCER_RUN: ${{ needs.producer.outputs.run }}
+          PRODUCER_ATTEMPT: ${{ needs.producer.outputs.attempt }}
+          PRODUCER_HEAD: ${{ needs.producer.outputs.head }}
+          ARTIFACT_ID: ${{ needs.producer.outputs.artifact_id }}
+          DIGEST: ${{ needs.producer.outputs.digest }}
+        run: |
+          python3 - <<'PYTHON'
+          """Candidate metadata-only verifier. main is never called by local tests."""
+          import json,os,re,sys,urllib.request
+          
+          def require(ok,code):
+              if not ok:raise ValueError(code)
+          
+          def validate_inputs(e):
+              for k in ['RUN','ATTEMPT','ARTIFACT_ID','REPO_ID']:
+                  require(bool(re.fullmatch(r'[1-9][0-9]{0,19}',e.get(k,''))), 'INPUT_INVALID')
+              require(e.get('PRODUCER_RUN')==e['RUN'] and e.get('PRODUCER_ATTEMPT')==e['ATTEMPT'],'STALE_OR_MISSING_PRODUCER')
+              require(bool(re.fullmatch('[a-f0-9]{40}',e.get('HEAD',''))) and e.get('PRODUCER_HEAD')==e['HEAD'],'HEAD_MISMATCH')
+              require(bool(re.fullmatch('[a-f0-9]{64}',e.get('DIGEST',''))),'DIGEST_INVALID')
+              require(bool(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',e.get('REPO',''))),'REPO_INVALID')
+          
+          def validate(e,artifact,jobs):
+              validate_inputs(e)
+              require(isinstance(artifact,dict) and artifact.get('id')==int(e['ARTIFACT_ID']) and type(artifact.get('id')) is int,'ARTIFACT_ID_MISMATCH')
+              require(artifact.get('expired') is False and type(artifact.get('size_in_bytes')) is int and 0<artifact['size_in_bytes']<=65536,'ARTIFACT_INVALID')
+              require(artifact.get('digest')=='sha256:'+e['DIGEST'],'DIGEST_MISMATCH')
+              run=artifact.get('workflow_run',{})
+              require(all(type(run.get(k)) is int for k in ['id','repository_id','head_repository_id']) and run.get('id')==int(e['RUN']) and run.get('head_sha')==e['HEAD'] and run.get('repository_id')==int(e['REPO_ID']) and run.get('head_repository_id')==int(e['REPO_ID']),'ARTIFACT_RUN_MISMATCH')
+              require(isinstance(jobs,dict) and isinstance(jobs.get('jobs'),list) and type(jobs.get('total_count')) is int and jobs['total_count']==len(jobs['jobs']) and len(jobs['jobs'])<=10,'JOBS_INCOMPLETE')
+              found=[j for j in jobs['jobs'] if isinstance(j,dict) and j.get('name')=='synthetic artifact producer']
+              require(len(found)==1,'PRODUCER_NOT_UNIQUE_CURRENT_ATTEMPT')
+              j=found[0]
+              require(type(j.get('id')) is int and j['id']>0 and type(j.get('run_id')) is int and j.get('run_id')==int(e['RUN']) and j.get('head_sha')==e['HEAD'] and j.get('status')=='completed' and j.get('conclusion')=='success','PRODUCER_NOT_SUCCESSFUL')
+              # Attempt is selected by the REST endpoint, not guessed from artifact metadata/name.
+              return {'result':'METADATA_BINDING_VERIFIED_NOT_UPLOAD_AUTHORIZATION','run':int(e['RUN']),'attempt':int(e['ATTEMPT']),'artifact_id':int(e['ARTIFACT_ID']),'producer_job_id':j['id'],'head':e['HEAD'],'digest':'sha256:'+e['DIGEST'],'archive_bytes_verified':False}
+          
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args,**kwargs):return None
+          
+          def main():
+              e=dict(os.environ);validate_inputs(e)
+              require(e.get('GITHUB_SERVER_URL')=='https://github.com','PLATFORM_UNSUPPORTED')
+              token=e.get('READ_TOKEN');require(bool(token),'TOKEN_MISSING')
+              opener=urllib.request.build_opener(NoRedirect())
+              def get(path):
+                  request=urllib.request.Request('https://api.github.com/repos/'+e['REPO']+path,headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'synthetic-artifact-evidence'})
+                  with opener.open(request,timeout=15) as response:
+                      require(response.status==200,'API_STATUS');data=response.read(262145)
+                  require(len(data)<=262144,'API_TOO_LARGE')
+                  return json.loads(data)
+              artifact=get('/actions/artifacts/'+e['ARTIFACT_ID'])
+              jobs=get('/actions/runs/'+e['RUN']+'/attempts/'+e['ATTEMPT']+'/jobs?per_page=100')
+              print(json.dumps(validate(e,artifact,jobs),sort_keys=True))
+          if __name__=='__main__':
+              try:main()
+              except Exception as error:
+                  allowed={'INPUT_INVALID','STALE_OR_MISSING_PRODUCER','HEAD_MISMATCH','DIGEST_INVALID','REPO_INVALID','ARTIFACT_ID_MISMATCH','ARTIFACT_INVALID','DIGEST_MISMATCH','ARTIFACT_RUN_MISMATCH','JOBS_INCOMPLETE','PRODUCER_NOT_UNIQUE_CURRENT_ATTEMPT','PRODUCER_NOT_SUCCESSFUL','PLATFORM_UNSUPPORTED','TOKEN_MISSING','API_STATUS','API_TOO_LARGE'}
+                  message=str(error) if type(error) is ValueError and str(error) in allowed else 'READ_ONLY_VERIFICATION_FAILED'
+                  print(message,file=sys.stderr);sys.exit(1)
+          PYTHON
