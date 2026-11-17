@@ -377,8 +377,9 @@ def test_standalone_failed_review_has_failed_report_health(tmp_path):
     assert report["analyzer_status"][0]["status"] == "error"
 
 
-def test_intake_deadline_stops_tasks_and_bounds_worker(monkeypatch, tmp_path):
-    import time
+@pytest.mark.parametrize("worker_elapsed", [0.0, 0.75, 1.0])
+def test_intake_deadline_stops_tasks_and_bounds_worker(monkeypatch, tmp_path, worker_elapsed):
+    from types import SimpleNamespace
     from fxapk.core import proctree
 
     source = tmp_path / "data.bin"
@@ -386,14 +387,31 @@ def test_intake_deadline_stops_tasks_and_bounds_worker(monkeypatch, tmp_path):
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"schema_version": "fxapk.offline-review.v1", "sample_sha256": "a" * 64,
                                "tasks": [plan_task("later", "jni", source)]}), encoding="utf-8")
-    receipt = runner.run(plan, tmp_path / "expired", deadline=time.monotonic() - 1)
-    assert receipt["tasks"][0]["state"] == "not_run"
-    assert receipt["tasks"][0]["reason_codes"] == ["intake_time_budget"]
+    # Keep real receipt setup and deadline calculations; elapsed wall time is not
+    # the contract. Replace only this module reference, never the shared clock.
+    clock = SimpleNamespace(monotonic=lambda: 100.0)
+    monkeypatch.setattr(runner, "time", clock)
     observed = []
     def timed_out(*args, **kwargs):
         observed.append(kwargs["timeout"])
         return proctree.OwnedRun(None, "", "", True, True, True, False, ("timeout",))
     monkeypatch.setattr(proctree, "run_owned", timed_out)
-    receipt = runner.run(plan, tmp_path / "bounded", deadline=time.monotonic() + 1)
-    assert len(observed) == 1 and 0 < observed[0] <= 1
+    receipt = runner.run(plan, tmp_path / "expired", deadline=99.0)
+    assert receipt["tasks"][0]["state"] == "not_run"
+    assert receipt["tasks"][0]["reason_codes"] == ["intake_time_budget"]
+    assert observed == []
+
+    original_isolated_review = runner.isolated_review
+    def advance_before_worker(*args, **kwargs):
+        clock.monotonic = lambda: 100.0 + worker_elapsed
+        return original_isolated_review(*args, **kwargs)
+    monkeypatch.setattr(runner, "isolated_review", advance_before_worker)
+    receipt = runner.run(plan, tmp_path / "bounded", deadline=101.0)
+    if worker_elapsed < 1.0:
+        assert observed == [1.0 - worker_elapsed]
+        assert receipt["tasks"][0]["state"] == "failed"
+        assert "review_worker_timeout" in receipt["tasks"][0]["reason_codes"]
+    else:
+        assert observed == []
+        assert receipt["tasks"][0]["state"] == "not_run"
     assert "intake_time_budget" in receipt["tasks"][0]["reason_codes"]
