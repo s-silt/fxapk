@@ -8,12 +8,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import NoReturn
+from typing import Literal, NoReturn, TypedDict
 
 import typer
 
 from fxapk.core.atomic import atomic_write_text
-from fxapk.core.evidence_archive import Compression, EvidenceArchive, _name, materialize, pack
+from fxapk.core.evidence_archive import ArchiveError, Compression, EvidenceArchive, _name, materialize, pack
 
 app = typer.Typer(help="Lossless evidence archive storage and verified offline reading.")
 META_WRITE_OWNER = "commands.evidence_archive"
@@ -21,10 +21,45 @@ META_WRITE_CATEGORIES = {"evidence_manifest": "record"}
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 
-def _failure(error: Exception, output: Path | None = None, prior: dict | None = None) -> NoReturn:
+VerificationStage = Literal["archive_open", "member_verification", "archive_close"]
+VerificationReason = Literal["access_denied", "not_found", "io_error", "archive_contract_failed", "unknown"]
+
+
+class VerificationFailure(TypedDict):
+    """First failure observed at a command boundary, not an inferred internal cause."""
+
+    stage: VerificationStage
+    reason: VerificationReason
+    index_observed: bool
+    all_members_verified: bool
+
+
+class VerificationDiagnostic(TypedDict):
+    first_failure: VerificationFailure
+
+
+def _verification_failure(
+    error: Exception, stage: VerificationStage, index_observed: bool, members_verified: bool,
+) -> VerificationFailure:
+    reason: VerificationReason = "unknown"
+    if isinstance(error, PermissionError):
+        reason = "access_denied"
+    elif isinstance(error, FileNotFoundError):
+        reason = "not_found"
+    elif isinstance(error, OSError):
+        reason = "io_error"
+    elif isinstance(error, ArchiveError):
+        reason = "archive_contract_failed"
+    return {"stage": stage, "reason": reason, "index_observed": index_observed,
+            "all_members_verified": members_verified}
+
+
+def _failure(error: Exception, output: Path | None = None, prior: dict | None = None, *, diagnostic: VerificationDiagnostic | None = None) -> NoReturn:
     code = str(error) if isinstance(error, ValueError) and re.fullmatch("[a-z_]{1,80}", str(error)) else "archive_operation_failed"
     value = {**(prior or {}), "state": "failed", "reason_codes": sorted(set([*(prior or {}).get("reason_codes", []), code])),
              "exception_type": type(error).__name__}
+    if diagnostic is not None:
+        value["diagnostic"] = diagnostic
     if output is not None:
         atomic_write_text(output, json.dumps(value, indent=2))
     typer.echo(json.dumps(value), err=True)
@@ -53,11 +88,28 @@ def pack_command(
 @app.command("verify")
 def verify_command(archive: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
     """Stream and hash every original file without extracting the archive."""
+    stage: VerificationStage = "archive_open"
+    index_observed = False
+    members_verified = False
+    first_failure: VerificationFailure | None = None
     try:
         with EvidenceArchive(archive) as source:
-            receipt = source.verify()
+            index_observed = True
+            stage = "member_verification"
+            try:
+                receipt = source.verify()
+            except Exception as error:
+                # Snapshot before __exit__: a later close failure must not relabel it.
+                first_failure = _verification_failure(error, stage, index_observed, members_verified)
+                raise
+            members_verified = True
+            stage = "archive_close"
     except Exception as error:
-        _failure(error)
+        if first_failure is None:
+            first_failure = _verification_failure(error, stage, index_observed, members_verified)
+        # The legacy envelope still describes the exception that actually escaped.
+        # Do not infer another failure's stage from arbitrary exception chains.
+        _failure(error, diagnostic={"first_failure": first_failure})
     typer.echo(json.dumps(receipt))
 
 
