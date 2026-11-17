@@ -10,6 +10,7 @@ import pytest
 
 from fxapk.core.offline_review import acquisition, dex, jni, recover, runner
 from fxapk.dynamic import recovery
+from tests.first_failure_diagnostic import FirstFailureDiagnostic
 
 
 def plan_task(identifier, kind, path, **options):
@@ -113,11 +114,14 @@ def test_recovered_dex_exact_descriptor_and_missing_body_are_separate():
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")
-def test_same_vectors_do_not_count_as_distinct_validation(tmp_path):
+def test_same_vectors_do_not_count_as_distinct_validation(tmp_path, request):
     pytest.importorskip("unicorn")
     value = execute(bytes.fromhex("0000018bc0035fd6"), emu_options(vectors=[
         {"args": [3, 4], "expected_return": 7}, {"args": [3, 4], "expected_return": 7}]), tmp_path)
-    assert value["state"] == "partial" and "distinct_validation_inputs_required" in value["reason_codes"]
+    diagnostic = FirstFailureDiagnostic("recovery_vectors", getattr(request.config, "workerinput", {}).get("workerid", "master"))
+    diagnostic.observe(stage="validation_result", reasons=value.get("reason_codes"))
+    with diagnostic:
+        assert value["state"] == "partial" and "distinct_validation_inputs_required" in value["reason_codes"]
 
 
 def test_native_worker_crash_becomes_terminal_receipt(monkeypatch, tmp_path):
@@ -224,7 +228,7 @@ def test_recovery_failure_receipt_publishes_report(monkeypatch, tmp_path):
 @pytest.mark.parametrize("analysis_status", ["partial", "failed", "complete"])
 @pytest.mark.parametrize("process_failed", [False, True])
 @pytest.mark.parametrize("extra_loaded", [True, False])
-def test_reanalysis_status_reaches_recovery_and_report(monkeypatch, tmp_path, analysis_status, process_failed, extra_loaded):
+def test_reanalysis_status_reaches_recovery_and_report(monkeypatch, tmp_path, analysis_status, process_failed, extra_loaded, request):
     from fxapk.core.models import Report
     from fxapk.report.json import to_dict
 
@@ -264,7 +268,10 @@ def test_reanalysis_status_reaches_recovery_and_report(monkeypatch, tmp_path, an
     expected = "failed" if process_failed or analysis_status == "failed" else analysis_status
     if expected == "complete" and not extra_loaded:
         expected = "partial"
-    assert reanalyzed["state"] == ("ok" if expected == "complete" else expected)
+    diagnostic = FirstFailureDiagnostic("recovery_reanalysis", getattr(request.config, "workerinput", {}).get("workerid", "master"))
+    diagnostic.observe(stage="reanalyze", reasons=reanalyzed.get("reason_codes"))
+    with diagnostic:
+        assert reanalyzed["state"] == ("ok" if expected == "complete" else expected)
     if process_failed:
         assert "subprocess_timeout" in reanalyzed["reason_codes"]
     if not extra_loaded:
