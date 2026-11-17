@@ -45,9 +45,13 @@ assert "fxapk.config.fetch" not in sys.modules
 
 @pytest.mark.parametrize("args", [[], ["--version"], ["leak-scan", "--diff", "-"]])
 def test_lightweight_cli_does_not_load_http_implementation(args: list[str]) -> None:
-    env = dict(os.environ)
-    for name in ("PYTHONPATH", "FXHX_API_KEY", "CLIPROXYAPI_API_KEY"):
-        env.pop(name, None)
+    # Only inherit platform runtime settings, not integration credentials or Python overrides.
+    runtime_names = {
+        "PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "COMSPEC",
+        "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
+        "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "VIRTUAL_ENV",
+    }
+    env = {name: value for name, value in os.environ.items() if name.upper() in runtime_names}
     # Pin both ends of this test-owned pipe, independently of the host locale.
     env["PYTHONIOENCODING"] = "utf-8:strict"
     result = subprocess.run(

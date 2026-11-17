@@ -54,7 +54,7 @@ This reference lists public core top-level commands and groups. Use each entryâ€
 | Compatibility entry point; prefer `fxapk case phase2` | `fxapk phase2 --help` |
 | Device unpacking; authorized devices only, help does not execute | `fxapk unpack --help` |
 | Repackage/reinstall on an authorized device; help does not execute | `fxapk repackage --help` |
-| Bounded explicitly authorized checks (plan only by default) | `fxapk probe-target out/app.json --target <IP-or-domain> --business-host <domain> --allow <IP-or-domain>`; execution additionally requires `--execute --mode authorized-active`, at most six requests, raw archives |
+| Bounded checks; view help without executing | `fxapk probe-target --help` |
 | Read-only offline addressing-chain evaluation | `fxapk addressing-evaluate <manifest.json> --out <result.json>`; verifies supplied hashes, missing independent labels remain unknown |
 
 ## Privacy and output
