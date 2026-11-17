@@ -38,14 +38,25 @@ def execute(code, options, tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")
-def test_real_unicorn_calls_and_negative_vectors(tmp_path):
+def test_real_unicorn_calls_and_negative_vectors(tmp_path, request):
     pytest.importorskip("unicorn")
     code = bytes.fromhex("0000018bc0035fd6")  # add x0,x0,x1; ret
+    worker = getattr(request.config, "workerinput", {}).get("workerid", "master")
     good = execute(code, emu_options(), tmp_path)
-    assert good["state"] == "ok" and all(row["returned"] for row in good["vectors"])
+    positive = FirstFailureDiagnostic("recovery_unicorn", worker)
+    positive.observe(stage="positive_result", reasons=good.get("reason_codes"))
+    with positive:
+        positive_matches = good["state"] == "ok" and all(row["returned"] for row in good["vectors"])
+        assert positive_matches
     bad = execute(code, emu_options(vectors=[{"args": [1, 2], "expected_return": 4}]), tmp_path)
-    assert bad["state"] == "failed" and "emulation_output_mismatch" in bad["reason_codes"]
-    assert good["independent_algorithm"] is False
+    negative = FirstFailureDiagnostic("recovery_unicorn", worker)
+    negative.observe(stage="negative_result", reasons=bad.get("reason_codes"))
+    with negative:
+        negative_matches = bad["state"] == "failed" and "emulation_output_mismatch" in bad["reason_codes"]
+        assert negative_matches
+    with positive:
+        algorithm_is_not_independent = good["independent_algorithm"] is False
+        assert algorithm_is_not_independent
 
 
 @pytest.mark.parametrize("hex_code,reason", [

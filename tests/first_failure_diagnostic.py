@@ -4,12 +4,16 @@ from __future__ import annotations
 import json
 import sys
 
-_TESTS = frozenset({"ownership_access", "recovery_reanalysis", "diagnostic_contract", "ownership_descendants", "recovery_vectors"})
-_STAGES = frozenset({"ownership_read", "reanalyze", "cleanup", "termination_check", "validation_result"})
+_TESTS = frozenset({"ownership_access", "recovery_reanalysis", "diagnostic_contract", "ownership_descendants", "recovery_vectors", "recovery_unicorn"})
+_STAGES = frozenset({"ownership_read", "reanalyze", "cleanup", "termination_check", "validation_result", "positive_result", "negative_result"})
 _REASONS = frozenset({
     "descendants_after_root_exit", "distinct_validation_inputs_required",
     "tree_state_unverified", "subprocess_timeout", "reanalyzed_extra_dex_not_loaded",
     "reanalyzed_report_partial", "reanalyzed_report_failed",
+    "review_worker_timeout", "review_worker_exit", "review_worker_process_tree_incomplete",
+    "review_worker_receipt_missing", "review_worker_receipt_invalid", "review_worker_failed",
+    "optional_dependency_unavailable", "platform_memory_limit_unavailable",
+    "emulation_fault", "emulation_budget_exhausted", "emulation_output_mismatch",
 })
 
 
