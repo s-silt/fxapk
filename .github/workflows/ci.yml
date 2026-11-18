@@ -327,10 +327,26 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e "." pytest
-          # droidasc 先按测试清单里的官方轮子 sha256 走 hash 校验安装：同版本号换了制品
-          # （或退回 sdist）在这里就红。哈希只存一份在 _ASC_RELEASES，不在 workflow 里抄第二份。
-          python -c "from fxapk.core import dex_query as dq; from tests.test_dex_query_versions import _ASC_RELEASES as r; print(f'droidasc=={dq.PINNED_VERSION} --hash=sha256:{r[dq.PINNED_VERSION][\"wheel_sha256\"]}')" > "$RUNNER_TEMP/droidasc.req"
-          python -m pip install --no-deps --only-binary=:all: --require-hashes -r "$RUNNER_TEMP/droidasc.req"
+          # 只绕开固定官方 wheel 的索引查找；摘要仍只从 _ASC_RELEASES 取。
+          python - <<'PYREQ'
+          import os
+          from pathlib import Path
+          from fxapk.core import dex_query as dq
+          from tests.test_dex_query_versions import _ASC_RELEASES
+          temp = Path(os.environ["RUNNER_TEMP"])
+          release = _ASC_RELEASES[dq.PINNED_VERSION]
+          digest = release["wheel_sha256"]
+          (temp / "droidasc-url.req").write_text(
+              f"droidasc @ {release['wheel_url']} --hash=sha256:{digest}\n", encoding="utf-8"
+          )
+          (temp / "droidasc.req").write_text(
+              f"droidasc=={dq.PINNED_VERSION} --hash=sha256:{digest}\n", encoding="utf-8"
+          )
+          PYREQ
+          WHEELS=$(mktemp -d "$RUNNER_TEMP/droidasc-wheel.XXXXXX")
+          python -m pip --disable-pip-version-check download --no-index --no-deps --only-binary=:all: --require-hashes --timeout 30 --retries 1 -r "$RUNNER_TEMP/droidasc-url.req" --dest "$WHEELS"
+          # 按版本从只含已验证 wheel 的目录安装，保留 pip freeze 的锁校验语义。
+          python -m pip install --no-index --find-links "$WHEELS" --no-deps --only-binary=:all: --require-hashes -r "$RUNNER_TEMP/droidasc.req"
           # 其余直接依赖按锁装；axml/mutf8 无 hash 钉，mutf8 由 worker 运行期自检编码。
           python -m pip install -r plugins/fxapk-asc/requirements.lock
           # --no-deps：防止重新解析依赖把锁住的版本升上去。
@@ -415,10 +431,10 @@ jobs:
       # 显式豁免。不加 --strict：非 PyPI 的本地 fxapk 包会被跳过、--strict 会因此误红。
       - name: Audit only the fxapk dependency tree
         run: |
-          python -m pip install --upgrade pip pip-audit
+          python -m pip install --upgrade pip "pip-audit==2.10.1"
           # sysconfig purelib = 真正的 site-packages（跨平台可靠；site.getsitepackages()[0] 在不同
           # 平台可能是 venv 根，会让 --path 审到空目录、"无漏洞"假绿）。
           SITE=$(/tmp/auditenv/bin/python -c "import sysconfig; print(sysconfig.get_path('purelib'))")
           echo "auditing: $SITE"
           test -d "$SITE" || { echo "site-packages 路径无效：$SITE"; exit 1; }
-          python -m pip_audit --path "$SITE"
+          python tools/audit_retry.py "$SITE"
