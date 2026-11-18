@@ -87,11 +87,70 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import json, os, re
-          keys=("GITHUB_REPOSITORY_ID","GITHUB_RUN_ID","GITHUB_RUN_ATTEMPT","GITHUB_SHA","VERSION")
-          assert json.loads(os.environ["PRODUCER_CONTEXT"])=={k:os.environ[k] for k in keys}
-          assert re.fullmatch(r"[1-9][0-9]{0,18}",os.environ["ARTIFACT_ID"])
-          assert re.fullmatch(r"[a-f0-9]{64}",os.environ["OUTER_SHA"])
+          import json
+          import os
+          import re
+          import sys
+
+          formats = {
+              "GITHUB_REPOSITORY_ID": r"[1-9][0-9]{0,18}",
+              "GITHUB_RUN_ID": r"[1-9][0-9]{0,18}",
+              "GITHUB_RUN_ATTEMPT": r"[1-9][0-9]{0,18}",
+              "GITHUB_SHA": r"[a-f0-9]{40}",
+              "VERSION": r"[0-9]+\.[0-9]+\.[0-9]+",
+          }
+          reasons = {
+              "GITHUB_REPOSITORY_ID": "REPOSITORY_MISMATCH",
+              "GITHUB_RUN_ID": "RUN_MISMATCH",
+              "GITHUB_RUN_ATTEMPT": "STALE_PRODUCER_ATTEMPT",
+              "GITHUB_SHA": "COMMIT_MISMATCH",
+              "VERSION": "VERSION_MISMATCH",
+          }
+
+          def reject(reason):
+              print(f"::error title=Release rehearsal receipt::{reason}", file=sys.stderr)
+              raise SystemExit(1)
+
+          def unique_pairs(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError
+                  result[key] = value
+              return result
+
+          def valid_context(context):
+              return (
+                  type(context) is dict
+                  and context.keys() == formats.keys()
+                  and all(type(context[key]) is str and len(context[key]) <= 40
+                          and re.fullmatch(pattern, context[key])
+                          for key, pattern in formats.items())
+              )
+
+          receiver = {key: os.environ.get(key) for key in formats}
+          if not valid_context(receiver):
+              reject("RECEIVER_CONTEXT_INVALID")
+          raw = os.environ.get("PRODUCER_CONTEXT", "")
+          if not 0 < len(raw) <= 1024 or not raw.isascii():
+              reject("PRODUCER_RECEIPT_INVALID")
+          try:
+              producer = json.loads(raw, object_pairs_hook=unique_pairs)
+          except (ValueError, RecursionError):
+              reject("PRODUCER_RECEIPT_INVALID")
+          if not valid_context(producer):
+              reject("PRODUCER_RECEIPT_INVALID")
+          for key, reason in reasons.items():
+              if producer[key] != receiver[key]:
+                  if key == "GITHUB_RUN_ATTEMPT" and int(producer[key]) > int(receiver[key]):
+                      reject("FUTURE_PRODUCER_ATTEMPT")
+                  reject(reason)
+
+          if not re.fullmatch(r"[1-9][0-9]{0,18}", os.environ.get("ARTIFACT_ID", "")):
+              reject("ARTIFACT_ID_INVALID")
+          if not re.fullmatch(r"[a-f0-9]{64}", os.environ.get("OUTER_SHA", "")):
+              reject("ARTIFACT_DIGEST_INVALID")
+          print("Rehearsal only: producer receipt matches independent receiver context")
           PY
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
@@ -106,28 +165,84 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import hashlib, json, os, re, stat, zipfile
+          import hashlib
+          import json
+          import os
           from pathlib import Path
-          target=Path(os.environ["RUNNER_TEMP"])/"fxapk-rehearsal-received"
-          paths=list(target.iterdir())
-          assert len(paths)==1 and paths[0].is_file() and not paths[0].is_symlink()
-          path=paths[0]
-          assert 0 < path.stat().st_size <= 64*1024*1024
-          with path.open("rb") as stream:
-              assert hashlib.file_digest(stream,"sha256").hexdigest()==os.environ["OUTER_SHA"]
-          expected=json.loads(os.environ["ACCEPTED_INVENTORY"])
-          assert type(expected) is dict and len(expected)==11 and "SHA256SUMS.txt" in expected
-          assert all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}",n) and
-                     re.fullmatch(r"[a-f0-9]{64}",h) for n,h in expected.items())
-          with zipfile.ZipFile(path) as zip_file:
-              entries=zip_file.infolist()
-              assert len(entries)==11 and {e.filename for e in entries}==set(expected)
-              assert sum(e.file_size for e in entries)<=64*1024*1024
-              for e in entries:
-                  assert not e.is_dir() and not e.flag_bits&1
-                  assert stat.S_IFMT(e.external_attr>>16) in (0,stat.S_IFREG)
-                  assert e.compress_type in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED)
-                  with zip_file.open(e) as stream:
-                      assert hashlib.file_digest(stream,"sha256").hexdigest()==expected[e.filename]
+          import re
+          import stat
+          import sys
+          import zipfile
+          import zlib
+
+          LIMIT = 64 * 1024 * 1024
+          DIGEST = re.compile(r"[a-f0-9]{64}")
+          FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}")
+
+          def reject(reason):
+              print(f"::error title=Release rehearsal archive::{reason}", file=sys.stderr)
+              raise SystemExit(1)
+
+          def unique_pairs(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError
+                  result[key] = value
+              return result
+
+          raw = os.environ.get("ACCEPTED_INVENTORY", "")
+          if not 0 < len(raw) <= 4096 or not raw.isascii():
+              reject("INVENTORY_INVALID")
+          try:
+              expected = json.loads(raw, object_pairs_hook=unique_pairs)
+          except (ValueError, RecursionError):
+              reject("INVENTORY_INVALID")
+          if (type(expected) is not dict or len(expected) != 11
+                  or "SHA256SUMS.txt" not in expected
+                  or not all(FILENAME.fullmatch(name) and type(digest) is str and DIGEST.fullmatch(digest)
+                             for name, digest in expected.items())):
+              reject("INVENTORY_INVALID")
+          outer = os.environ.get("OUTER_SHA", "")
+          if not DIGEST.fullmatch(outer):
+              reject("ARTIFACT_DIGEST_INVALID")
+
+          temp = os.environ.get("RUNNER_TEMP")
+          if not temp:
+              reject("ARCHIVE_PATH_INVALID")
+          target = Path(temp) / "fxapk-rehearsal-received"
+          try:
+              if target.is_symlink():
+                  reject("ARCHIVE_PATH_INVALID")
+              with os.scandir(target) as found:
+                  first = next(found, None)
+                  if first is None or next(found, None) is not None or not first.is_file(follow_symlinks=False):
+                      reject("ARCHIVE_PATH_INVALID")
+              with open(first.path, "rb") as archive:
+                  info = os.fstat(archive.fileno())
+                  if not stat.S_ISREG(info.st_mode):
+                      reject("ARCHIVE_PATH_INVALID")
+                  if not 0 < info.st_size <= LIMIT:
+                      reject("ARCHIVE_SIZE_INVALID")
+                  if hashlib.file_digest(archive, "sha256").hexdigest() != outer:
+                      reject("ARCHIVE_DIGEST_MISMATCH")
+                  archive.seek(0)
+                  with zipfile.ZipFile(archive) as bundle:
+                      entries = bundle.infolist()
+                      if len(entries) != len(expected) or {e.filename for e in entries} != expected.keys():
+                          reject("ARCHIVE_INVENTORY_MISMATCH")
+                      if sum(e.file_size for e in entries) > LIMIT:
+                          reject("ARCHIVE_SIZE_INVALID")
+                      for e in entries:
+                          if (e.is_dir() or e.flag_bits & 1 or e.orig_filename != e.filename
+                                  or stat.S_IFMT(e.external_attr >> 16) not in (0, stat.S_IFREG)
+                                  or e.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)):
+                              reject("ARCHIVE_MEMBER_INVALID")
+                          with bundle.open(e) as member:
+                              if hashlib.file_digest(member, "sha256").hexdigest() != expected[e.filename]:
+                                  reject("ARCHIVE_MEMBER_DIGEST_MISMATCH")
+          except (OSError, zipfile.BadZipFile, NotImplementedError, RuntimeError, EOFError, zlib.error):
+              reject("ARCHIVE_READ_FAILED")
+
           print("Rehearsal only: all 11 received entries match the independently supplied producer inventory")
           PY
