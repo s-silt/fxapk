@@ -181,12 +181,32 @@ def _no_enrich_threads() -> None:
     assert names == []
 
 
-def test_late_blocking_result_is_cancelled_not_published(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("second_started", [True, False], ids=["both-started", "one-queued"])
+def test_late_blocking_result_is_cancelled_not_published(
+    monkeypatch: pytest.MonkeyPatch, second_started: bool,
+) -> None:
     monkeypatch.setattr("fxapk.core.enrichment.ENRICH_MAX_WORKERS", 2)
     from fxapk.core import enrichment
 
     release = threading.Event()
-    started = threading.Event()
+    required_started = threading.Event()
+    expected_started = 2 if second_started else 1
+    if not second_started:
+        from concurrent.futures import Future, ThreadPoolExecutor
+
+        class _OneQueuedExecutor(ThreadPoolExecutor):
+            submissions = 0
+
+            def submit(self, *args, **kwargs):
+                self.submissions += 1
+                if self.submissions == 2:
+                    return Future()  # pending work, not yet started
+                return super().submit(*args, **kwargs)
+
+        monkeypatch.setattr(enrichment, "ThreadPoolExecutor", _OneQueuedExecutor)
+    interrupt_entered = threading.Event()
+    started_lock = threading.Lock()
+    started_count = 0
 
     class _Wait(BaseEnricher):
         name = "blocking-provider"
@@ -194,7 +214,11 @@ def test_late_blocking_result_is_cancelled_not_published(monkeypatch: pytest.Mon
 
         def enrich(self, endpoint: Endpoint) -> EnrichmentResult:
             del endpoint
-            started.set()
+            nonlocal started_count
+            with started_lock:
+                started_count += 1
+                if started_count == expected_started:
+                    required_started.set()
             release.wait(timeout=10)
             return EnrichmentResult(
                 provider=self.name,
@@ -218,14 +242,17 @@ def test_late_blocking_result_is_cancelled_not_published(monkeypatch: pytest.Mon
             )
 
     def _interrupt(_pending: set) -> tuple:
-        assert started.wait(timeout=10)
+        assert required_started.wait(timeout=10), "started worker count not reached before interrupt"
+        interrupt_entered.set()
         raise KeyboardInterrupt
 
     monkeypatch.setattr(enrichment, "_wait_bounded", _interrupt)
-    helper = threading.Thread(
-        target=lambda: (enrichment._cancel_sleep.wait(timeout=10), release.set()),
-        daemon=True,
-    )
+    def _release_after_interrupt() -> None:
+        if interrupt_entered.wait(timeout=10):
+            enrichment._cancel_sleep.wait(timeout=10)
+        release.set()
+
+    helper = threading.Thread(target=_release_after_interrupt, daemon=True)
     helper.start()
     blocking = _Wait()
     following = _Next()
@@ -243,9 +270,10 @@ def test_late_blocking_result_is_cancelled_not_published(monkeypatch: pytest.Mon
     assert status == "keyboard_interrupt"
     assert following.calls == []
     assert all("SYNTHETIC-LATE" not in str(item.enrichment) for item in endpoints)
-    for endpoint in endpoints:
+    assert started_count == expected_started
+    for index, endpoint in enumerate(endpoints):
         assert endpoint.enrichment["source_status"]["blocking-provider"] == {
-            "status": "failed",
+            "status": "failed" if index < expected_started else "skipped",
             "reason": "cancelled",
         }
         assert endpoint.enrichment["source_status"]["following-provider"]["status"] == "skipped"
