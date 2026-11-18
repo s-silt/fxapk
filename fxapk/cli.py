@@ -745,6 +745,15 @@ def diff(
     old_dict = _report_dict_for(old, online=online)
     new_dict = _report_dict_for(new, online=online)
     output = diff_reports(old_dict, new_dict)
+    package_change = output["meta_changes"].get("package_name")
+    if package_change and all(
+        isinstance(value, str) and value.strip()
+        for value in (package_change["old"], package_change["new"])
+    ):
+        typer.echo(
+            "⚠ 两份报告记录的应用包名不同。差异仅代表报告内容，不能当作同一应用的版本变化。",
+            err=True,
+        )
     if not report_details:
         output.pop("manifest_declarations")
         output.pop("analysis_notes")
