@@ -67,7 +67,15 @@ def test_generic_network_text_never_enough(stderr):
 
 
 def test_exhausted_budget_before_retry():
-    run_case([cp(1, stderr=TRACE)], ("AUDIT_BUDGET_EXHAUSTED", 1, 1), [179])
+    _, _, output = run_case(
+        [cp(1, stderr="too old " + "a" * 9000 + "\n" + TRACE)],
+        ("AUDIT_BUDGET_EXHAUSTED", 1, 1), [179],
+    )
+    assert len(output) == 1
+    stdout, stderr = output[0]
+    assert stdout == ""
+    assert "too old" not in stderr
+    assert stderr.endswith("  " + LINE + "\n")
 
 
 def test_process_timeout_preserves_bounded_pending_output_and_fails():

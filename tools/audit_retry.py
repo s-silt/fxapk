@@ -79,6 +79,7 @@ def audit(
             emit(result.stdout, result.stderr)
             return Outcome("AUDIT_PYPI_READ_TIMEOUT", 1, attempt)
         if deadline - clock() <= 2:
+            emit(_timeout_tail(result.stdout), _timeout_tail(result.stderr))
             return Outcome("AUDIT_BUDGET_EXHAUSTED", 1, attempt)
         sleep(2)
     raise RuntimeError("unreachable")
