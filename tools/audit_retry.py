@@ -36,6 +36,15 @@ def is_pypi_read_timeout(result: subprocess.CompletedProcess[str]) -> bool:
     )
 
 
+def _timeout_tail(output: str | bytes | None) -> str:
+    if not output:
+        return ""
+    tail = output[-8192:]
+    if isinstance(tail, bytes):
+        tail = tail.decode("utf-8", errors="replace")
+    return "".join("  " + line + "\n" for line in tail.splitlines())
+
+
 def audit(
     site: str,
     *,
@@ -54,7 +63,8 @@ def audit(
             return Outcome("AUDIT_BUDGET_EXHAUSTED", 1, attempt - 1)
         try:
             result = invoke(command, remaining)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            emit(_timeout_tail(exc.stdout), _timeout_tail(exc.stderr))
             return Outcome("AUDIT_BUDGET_EXHAUSTED", 1, attempt)
         except OSError:
             return Outcome("AUDIT_START_FAILED", 1, attempt)
