@@ -64,6 +64,8 @@ This reference lists public core top-level commands and groups. Use each entry�
 - `compared_report_values`: both reports contain a valid list. An explicit `[]` means the report recorded an empty list, not that the analyzed app lacks those items.
 - `not_compared`: at least one report is missing that field or has an invalid list. Existing scripts can still read the diff lists and counts, but should check the status first. Zero counts here do not mean “no change.” The `old` and `new` states tell you why.
 
+Use `--report-details` to include the next two fields. Without it, the top-level keys stay unchanged.
+
 `manifest_declarations` compares numeric `min_sdk` and `target_sdk` values read from reports with the same package name. Each field is evaluated separately. If either side lacks a reliable number, the field is `not_observed`; the command does not substitute a default. Matching package names do not prove matching signers.
 
 `analysis_notes` lists failures and skips recorded by each report, without free-form error messages. `not_recorded` means no analyzer status was recorded; `invalid` means the status records are unusable. These notes neither certify list coverage nor change any counts or deltas.

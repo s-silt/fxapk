@@ -27,9 +27,6 @@
       "firebase": [
         "fxapk/analyzers/firebase.py"
       ],
-      "manifest_anomaly": [
-        "fxapk/analyzers/manifest.py"
-      ],
       "re_toolkit": [
         "fxapk/analyzers/re_toolkit.py"
       ],

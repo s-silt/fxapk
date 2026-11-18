@@ -131,7 +131,7 @@ def test_saved_report_diff_cli_preserves_counts_and_explains_them(
     right.write_text(json.dumps(new), encoding="utf-8")
     result = subprocess.run(
         [sys.executable, "-c", "from fxapk.cli import main; main()",
-         "diff", str(left), str(right), "--offline"],
+         "diff", str(left), str(right), "--offline", "--report-details"],
         capture_output=True, text=True, encoding="utf-8", timeout=20,
     )
     assert result.returncode == 0, result.stderr
@@ -173,7 +173,7 @@ def test_diff_reads_serialized_reports_without_losing_rule_instances(tmp_path: P
 
     result = subprocess.run(
         [sys.executable, "-c", "from fxapk.cli import main; main()",
-         "diff", str(left), str(right), "--offline"],
+         "diff", str(left), str(right), "--offline", "--report-details"],
         capture_output=True, text=True, encoding="utf-8", timeout=20,
     )
     assert result.returncode == 0, result.stderr
@@ -234,3 +234,14 @@ def test_diff_exposes_analysis_gap_without_altering_record_deltas(state: str) ->
 def test_diff_does_not_invent_analysis_health(rows, state) -> None:
     diff = diff_reports({}, {"analyzer_status": rows})
     assert diff["analysis_notes"]["new"] == {"state": state, "failed": [], "skipped": []}
+
+
+def test_diff_accepts_offline_review_task_ids_starting_with_a_hyphen() -> None:
+    rows = [
+        {"name": "offline_review:-trace", "status": "error"},
+        {"name": "manifest", "status": "skipped"},
+    ]
+    notes = diff_reports({}, {"analyzer_status": rows})["analysis_notes"]["new"]
+    assert notes == {
+        "state": "recorded", "failed": ["offline_review:-trace"], "skipped": ["manifest"],
+    }
