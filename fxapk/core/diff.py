@@ -9,6 +9,137 @@
 
 from __future__ import annotations
 
+import re
+from typing import Literal, TypedDict
+
+
+_ABSENT = object()
+
+
+class _SectionState(TypedDict):
+    state: Literal["missing", "malformed", "recorded_empty", "recorded_nonempty"]
+    reason: str
+
+
+class _Comparison(TypedDict):
+    status: Literal["not_compared", "compared_report_values"]
+    old: _SectionState
+    new: _SectionState
+
+
+class _AnalysisNotes(TypedDict):
+    state: Literal["not_recorded", "invalid", "recorded"]
+    failed: list[str]
+    skipped: list[str]
+
+
+# Offline review tasks accept a leading hyphen; ordinary analyzer IDs do not.
+_ANALYZER_ID = re.compile(
+    r"(?:offline_review:[A-Za-z0-9_-]{1,64}|[A-Za-z0-9_][A-Za-z0-9_-]{0,63})"
+)
+
+
+def _analysis_notes(rows: object) -> _AnalysisNotes:
+    """Project recorded states only; never copy free-form analyzer reasons."""
+    out: _AnalysisNotes = {"state": "invalid", "failed": [], "skipped": []}
+    if rows is _ABSENT or rows == []:
+        out["state"] = "not_recorded"
+        return out
+    if not isinstance(rows, list):
+        return out
+    statuses: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return out
+        name, status = row.get("name"), row.get("status")
+        if (
+            not isinstance(name, str) or not _ANALYZER_ID.fullmatch(name)
+            or name in statuses or status not in ("ran", "error", "skipped")
+        ):
+            return out
+        statuses[name] = status
+    return {
+        "state": "recorded",
+        "failed": sorted(name for name, status in statuses.items() if status == "error"),
+        "skipped": sorted(name for name, status in statuses.items() if status == "skipped"),
+    }
+
+
+class _Declaration(TypedDict):
+    value: int | None
+    reason: Literal["", "manifest_unobserved", "declaration_unobserved"]
+
+
+def _declared_sdk(report: dict, meta: dict, field: str) -> _Declaration:
+    statuses = report.get("analyzer_status")
+    manifest = [
+        row for row in statuses if isinstance(row, dict) and row.get("name") == "manifest"
+    ] if isinstance(statuses, list) else []
+    if len(manifest) != 1 or manifest[0].get("status") != "ran" or meta.get("manifest_anomaly"):
+        return {"value": None, "reason": "manifest_unobserved"}
+    value = meta.get(field)
+    if type(value) is not int or value <= 0:
+        return {"value": None, "reason": "declaration_unobserved"}
+    return {"value": value, "reason": ""}
+
+
+def _diff_manifest_declarations(old: dict, new: dict) -> dict:
+    previous_meta = old.get("meta")
+    current_meta = new.get("meta")
+    previous_meta = previous_meta if isinstance(previous_meta, dict) else {}
+    current_meta = current_meta if isinstance(current_meta, dict) else {}
+    package = previous_meta.get("package_name")
+    if not isinstance(package, str) or not package or package != current_meta.get("package_name"):
+        return {"status": "not_compared", "reason": "package_not_comparable", "fields": {}}
+    fields = {}
+    for key in ("min_sdk", "target_sdk"):
+        previous = _declared_sdk(old, previous_meta, key)
+        current = _declared_sdk(new, current_meta, key)
+        if previous["value"] is None or current["value"] is None:
+            state = "not_observed"
+        else:
+            state = "unchanged" if previous["value"] == current["value"] else "changed"
+        fields[key] = {"state": state, "old": previous, "new": current}
+    any_comparable = any(item["state"] != "not_observed" for item in fields.values())
+    return {
+        "status": "compared_report_values" if any_comparable else "not_compared",
+        "reason": "" if any_comparable else "declarations_not_comparable",
+        "fields": fields,
+    }
+
+
+def _section_state(
+    items: object, identity: tuple[str, ...], optional: tuple[str, ...] = (),
+) -> _SectionState:
+    """Describe recorded values, not evidence completeness or analysis success."""
+    if items is _ABSENT:
+        return {"state": "missing", "reason": "absent"}
+    if items is None:
+        return {"state": "malformed", "reason": "null"}
+    if not isinstance(items, list):
+        return {"state": "malformed", "reason": "invalid_collection_type"}
+    for row in items:
+        if not isinstance(row, dict):
+            return {"state": "malformed", "reason": "invalid_row"}
+        if any(not isinstance(row.get(key), str) or not row[key] for key in identity):
+            return {"state": "malformed", "reason": "invalid_identity"}
+        if any(key in row and not isinstance(row[key], str) for key in optional):
+            return {"state": "malformed", "reason": "invalid_identity"}
+    return {"state": "recorded_nonempty" if items else "recorded_empty", "reason": ""}
+
+
+def _comparison(
+    old: object, new: object, identity: tuple[str, ...], optional: tuple[str, ...] = (),
+) -> _Comparison:
+    previous = _section_state(old, identity, optional)
+    current = _section_state(new, identity, optional)
+    recorded = {"recorded_empty", "recorded_nonempty"}
+    return {
+        "status": "compared_report_values" if previous["state"] in recorded
+        and current["state"] in recorded else "not_compared",
+        "old": previous, "new": current,
+    }
+
 #: meta 里追踪对比的身份 / 加固 / 运行标识键（变了即入 meta_changes）。
 _META_TRACKED: tuple[str, ...] = (
     "package_name",
@@ -105,20 +236,34 @@ def _diff_meta(old_meta: object, new_meta: object) -> dict:
 def diff_reports(old: object, new: object) -> dict:
     """对比两份 report.json 字典，返回调证增量的稳定结构（供 fxapk diff 打印 / agent 消费）。
 
-    结构：``{leads, endpoints, findings, meta_changes, summary}``；leads/endpoints 各 {added, removed}，
-    findings {added, removed, changed}，meta_changes 为变化键→{old,new}，summary 为各项计数。绝不抛。
+    原有增删/汇总字段保持；comparison 表示报告条目是否可比较。
+    manifest_declarations 仅比较同包名报告中已观察到的数值声明，不推断默认值、运行时状态或发布者。
     """
     o = old if isinstance(old, dict) else {}
     n = new if isinstance(new, dict) else {}
-    leads = _diff_collection(o.get("leads"), n.get("leads"), _lead_key)
-    endpoints = _diff_collection(o.get("endpoints"), n.get("endpoints"), _endpoint_key)
-    findings = _diff_findings(o.get("findings"), n.get("findings"))
+    lead_comparison = _comparison(o.get("leads", _ABSENT), n.get("leads", _ABSENT), ("category", "value"))
+    endpoint_comparison = _comparison(o.get("endpoints", _ABSENT), n.get("endpoints", _ABSENT), ("value", "kind"))
+    finding_comparison = _comparison(o.get("findings", _ABSENT), n.get("findings", _ABSENT), ("id",), ("description",))
+    leads = _diff_collection(o.get("leads"), n.get("leads"), _lead_key) if (
+        lead_comparison["status"] == "compared_report_values"
+    ) else {"added": [], "removed": []}
+    endpoints = _diff_collection(o.get("endpoints"), n.get("endpoints"), _endpoint_key) if (
+        endpoint_comparison["status"] == "compared_report_values"
+    ) else {"added": [], "removed": []}
+    findings = _diff_findings(o.get("findings"), n.get("findings")) if (
+        finding_comparison["status"] == "compared_report_values"
+    ) else {"added": [], "removed": [], "changed": []}
     meta_changes = _diff_meta(o.get("meta"), n.get("meta"))
     return {
-        "leads": leads,
-        "endpoints": endpoints,
-        "findings": findings,
+        "leads": {**leads, "comparison": lead_comparison},
+        "endpoints": {**endpoints, "comparison": endpoint_comparison},
+        "findings": {**findings, "comparison": finding_comparison},
         "meta_changes": meta_changes,
+        "manifest_declarations": _diff_manifest_declarations(o, n),
+        "analysis_notes": {
+            "old": _analysis_notes(o.get("analyzer_status", _ABSENT)),
+            "new": _analysis_notes(n.get("analyzer_status", _ABSENT)),
+        },
         "summary": {
             "leads_added": len(leads["added"]),
             "leads_removed": len(leads["removed"]),

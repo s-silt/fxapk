@@ -674,6 +674,9 @@ def diff(
         "--online/--offline",
         help="参数是 APK 时是否联网富化（默认离线：diff 通常只看结构变化、更快更确定）。",
     ),
+    report_details: bool = typer.Option(
+        False, "--report-details", help="额外输出 SDK 声明与分析失败/跳过提示。",
+    ),
     jadx_cache_root: Path | None = typer.Option(
         None,
         "--jadx-cache-root",
@@ -739,6 +742,9 @@ def diff(
     old_dict = _report_dict_for(old, online=online)
     new_dict = _report_dict_for(new, online=online)
     output = diff_reports(old_dict, new_dict)
+    if not report_details:
+        output.pop("manifest_declarations")
+        output.pop("analysis_notes")
 
     if has_any_index_arg:
         assert isinstance(jadx_cache_root, Path)
