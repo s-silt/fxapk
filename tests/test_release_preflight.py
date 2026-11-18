@@ -142,3 +142,40 @@ def test_cli_writes_notes_only_after_successful_gate(bundle: Path, monkeypatch: 
     with pytest.raises(ValueError, match="checksum"):
         main()
     assert not notes.exists()
+
+
+def test_verified_inventory_returns_only_the_accepted_bytes(bundle: Path) -> None:
+    from tools.release_preflight import verified_inventory
+
+    assets = bundle / "release-assets"
+    result = verified_inventory(bundle, bundle / "dist", bundle / "plugin-dist", assets)
+    assert len(result) == 11
+    assert result == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in assets.iterdir()}
+    assert validate_archives(bundle, bundle / "dist", bundle / "plugin-dist", assets) is None
+
+
+def test_verified_inventory_rejects_rehashed_changed_asset(bundle: Path) -> None:
+    from tools.release_preflight import verified_inventory
+
+    name = sorted(archive_names(projects(bundle)[0]))[0]
+    (bundle / "release-assets" / name).write_bytes(b"other synthetic package contents")
+    checksum(bundle)
+    with pytest.raises(ValueError, match="differ from built"):
+        verified_inventory(bundle, bundle / "dist", bundle / "plugin-dist", bundle / "release-assets")
+
+
+def test_verified_inventory_rejects_a_manifest_with_different_valid_bytes(
+    bundle: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools.release_preflight import verified_inventory
+
+    manifest = bundle / "release-assets/SHA256SUMS.txt"
+    original_read_bytes = Path.read_bytes
+    alternate_format = original_read_bytes(manifest).replace(b"  ", b" *")
+
+    def read_bytes(path: Path) -> bytes:
+        return alternate_format if path == manifest else original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    with pytest.raises(ValueError, match="checksum file changed during preflight"):
+        verified_inventory(bundle, bundle / "dist", bundle / "plugin-dist", bundle / "release-assets")

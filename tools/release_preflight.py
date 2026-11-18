@@ -42,7 +42,8 @@ def inventory(directory: Path, expected: set[str]) -> dict[str, str]:
     return result
 
 
-def validate_archives(root: Path, core: Path, plugins: Path, assets: Path) -> None:
+def verified_inventory(root: Path, core: Path, plugins: Path, assets: Path) -> dict[str, str]:
+    """Return the checked staged byte inventory, including its checksum manifest."""
     declared = projects(root)
     core_names = archive_names(declared[0])
     plugin_names = set().union(*(archive_names(p) for p in declared[1:]))
@@ -50,18 +51,26 @@ def validate_archives(root: Path, core: Path, plugins: Path, assets: Path) -> No
     if len(expected) != 10:
         raise ValueError("expected ten distinct release archives")
     built = inventory(core, core_names) | inventory(plugins, plugin_names)
-    staged = inventory(assets, expected | {"SHA256SUMS.txt"})
-    staged.pop("SHA256SUMS.txt")
+    full_inventory = inventory(assets, expected | {"SHA256SUMS.txt"})
+    staged = {name: full_inventory[name] for name in built}
     if built != staged:
         raise ValueError("staged archives differ from built archives")
     checksums: dict[str, str] = {}
-    for line in (assets / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
+    manifest = (assets / "SHA256SUMS.txt").read_bytes()
+    if hashlib.sha256(manifest).hexdigest() != full_inventory["SHA256SUMS.txt"]:
+        raise ValueError("checksum file changed during preflight")
+    for line in manifest.decode("utf-8").splitlines():
         match = re.fullmatch(r"([0-9a-f]{64}) [ *]([^/\\]+)", line)
         if match is None or match[2] in checksums:
             raise ValueError("invalid or duplicate checksum entry")
         checksums[match[2]] = match[1]
     if checksums != staged:
         raise ValueError("checksum inventory or digest mismatch")
+    return full_inventory
+
+
+def validate_archives(root: Path, core: Path, plugins: Path, assets: Path) -> None:
+    verified_inventory(root, core, plugins, assets)
 
 
 def render_notes(root: Path, tag: str, repository: str, commit: str) -> str:
