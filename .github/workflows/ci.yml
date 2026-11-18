@@ -415,10 +415,10 @@ jobs:
       # 显式豁免。不加 --strict：非 PyPI 的本地 fxapk 包会被跳过、--strict 会因此误红。
       - name: Audit only the fxapk dependency tree
         run: |
-          python -m pip install --upgrade pip pip-audit
+          python -m pip install --upgrade pip "pip-audit==2.10.1"
           # sysconfig purelib = 真正的 site-packages（跨平台可靠；site.getsitepackages()[0] 在不同
           # 平台可能是 venv 根，会让 --path 审到空目录、"无漏洞"假绿）。
           SITE=$(/tmp/auditenv/bin/python -c "import sysconfig; print(sysconfig.get_path('purelib'))")
           echo "auditing: $SITE"
           test -d "$SITE" || { echo "site-packages 路径无效：$SITE"; exit 1; }
-          python -m pip_audit --path "$SITE"
+          python tools/audit_retry.py "$SITE"
