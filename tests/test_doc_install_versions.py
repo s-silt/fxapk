@@ -15,6 +15,7 @@ _DOCS = (
     "README.md", "README.en.md", "USAGE.md", "USAGE.en.md",
     "ANDROID-UI.md", "ANDROID-UI.en.md",
     "COMPANION-TOOLS.md", "COMPANION-TOOLS.en.md",
+    "tools/TOOLCHAIN.md", "tools/TOOLCHAIN.en.md",
 )
 _PINNED = re.compile(r"fxapk(?:\[[^\]]*\])?==\d|releases/tag/v\d|fxapk_[a-z_]+-\d+\.\d+\.\d+-py3")
 
