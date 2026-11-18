@@ -161,7 +161,7 @@ def _archive(target: Path | None, raw: str, outer: str) -> None:
                             digest.update(chunk)
                         if digest.hexdigest() != expected[e.filename]:
                             _reject("ARCHIVE_MEMBER_DIGEST_MISMATCH")
-    except (OSError, zipfile.BadZipFile, NotImplementedError, RuntimeError, EOFError, zlib.error):
+    except (OSError, zipfile.BadZipFile, NotImplementedError, RuntimeError, EOFError, UnicodeDecodeError, zlib.error):
         _reject("ARCHIVE_READ_FAILED")
 
 

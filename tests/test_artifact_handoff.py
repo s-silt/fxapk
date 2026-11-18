@@ -116,6 +116,19 @@ class TestHandoffContract:
         assert result.reason == "INVENTORY_INVALID"
         assert events == ["download"]
 
+    def test_member_name_decoder_failure_stays_a_structured_rejection(self, monkeypatch):
+        import tools.artifact_handoff as verifier
+
+        def unreadable_archive(*args, **kwargs):
+            # Mock the parser's exception; the on-disk ZIP remains an ordinary fixture.
+            raise UnicodeDecodeError("utf-8", b"", 0, 0, "synthetic decoder failure")
+
+        monkeypatch.setattr(verifier.zipfile, "ZipFile", unreadable_archive)
+        result, events = self.run_case()
+        assert result.reason == "ARCHIVE_READ_FAILED"
+        assert not result.accepted
+        assert events == ["download"]
+
     def test_transport_failure_does_not_become_accepted(self):
         with pytest.raises(OSError, match="synthetic transport failure"):
             self.run_case(downloader_error=True)
