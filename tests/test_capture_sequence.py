@@ -66,8 +66,8 @@ def test_hook_profile_is_bundled_and_rejects_sample_code():
         capture._build_injection_source(selected_hooks=("arbitrary-sample-script",))
 
 
-@pytest.mark.parametrize("floor_failed", [False, True])
-def test_auto_unpacks_then_runs_three_rounds_and_merges_each(tmp_path, monkeypatch, floor_failed):
+@pytest.mark.parametrize(("floor_failed", "artifact_changed"), [(False, False), (True, False), (False, True)])
+def test_auto_unpacks_then_runs_three_rounds_and_merges_each(tmp_path, monkeypatch, floor_failed, artifact_changed):
     events = []
     rep = report()
     monkeypatch.setattr(auto.device, "select_target_serial", lambda: "synthetic-device")
@@ -87,13 +87,31 @@ def test_auto_unpacks_then_runs_three_rounds_and_merges_each(tmp_path, monkeypat
             return {"status": "error", "reason": "synthetic floor failure"}
         return runner(*a, **kw)
     monkeypatch.setattr(capture, "run", capture_fake)
+    if artifact_changed:
+        from fxapk.dynamic import capture_sequence
+        original_rounds = capture_sequence.run_rounds
+
+        def rounds_with_changed_bytes(*args, **kwargs):
+            records = original_rounds(*args, **kwargs)
+            for record in records:
+                if record.get("runtime_report_path"):
+                    changed_report = Path(record["runtime_report_path"])
+                    changed_report.write_bytes(changed_report.read_bytes() + b" ")
+                    break
+            return records
+
+        monkeypatch.setattr(capture_sequence, "run_rounds", rounds_with_changed_bytes)
     def merge(*a, **kw):
         events.append("merge")
         return auto._step("merge", "done", ""), []
     monkeypatch.setattr(auto, "_run_merge", merge)
     monkeypatch.setattr(auto, "_run_closure", lambda *a, **kw: (auto._step("close", "done", ""), {"status": "partial"}, []))
     outcome = auto.run("synthetic.apk", out_dir=str(tmp_path), three_rounds=True, online=False, repackage=False)
-    assert events == ["unpack", "floor-only", "no-proxy", "both"] + ["merge"] * (2 if floor_failed else 3)
+    assert events == ["unpack", "floor-only", "no-proxy", "both"] + ["merge"] * (
+        2 if floor_failed or artifact_changed else 3)
+    rejected = [step for step in outcome["steps"] if step.get("name") == auto._STEP_MERGE
+                and step.get("status") == auto._ERROR]
+    assert len(rejected) == int(artifact_changed)
     assert len(rep.meta["capture_rounds"]) == 3
     assert outcome["status"] == "partial"
 
