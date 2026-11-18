@@ -105,6 +105,24 @@ def test_timeout_kills_whole_tree_including_grandchild() -> None:
             _kill_if_alive(pid)  # 断言失败时不留真孤儿
 
 
+
+def _fixture_pid_state_before_cleanup(pid: int) -> str:
+    """Inspect only the synthetic fixture; disclose neither PID nor command."""
+    try:
+        process = psutil.Process(pid)
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return "exited_or_zombie"
+        if "time.sleep(120)" in " ".join(process.cmdline()):
+            return "fixture_live"
+        return "identity_unverified"
+    except (psutil.ZombieProcess, psutil.NoSuchProcess, ProcessLookupError):
+        return "exited_or_zombie"
+    except (psutil.AccessDenied, PermissionError):
+        return "unreadable"
+    except OSError:
+        return "unreadable"
+
+
 def test_descendants_after_root_exit_force_killed(request) -> None:
     """根进程正常退出但孙进程脱管（daemon 化 java 形态）→ 检出、强杀整树、
     forced_tree_kill=True（该次运行不得算完整覆盖）。"""
@@ -119,8 +137,43 @@ def test_descendants_after_root_exit_force_killed(request) -> None:
             assert "descendants_after_root_exit" in res.reason_codes
             assert res.termination_complete is True
             assert _sleeper_gone(pid), "脱管孙进程未被强杀"
+    except AssertionError:
+        print(
+            "fixture-pid-before-cleanup: " + _fixture_pid_state_before_cleanup(pid),
+            file=sys.stderr,
+        )
+        raise
     finally:
         _kill_if_alive(pid)
+
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        ("live", "fixture_live"),
+        ("gone", "exited_or_zombie"),
+        ("zombie", "exited_or_zombie"),
+        ("denied", "unreadable"),
+        ("other", "identity_unverified"),
+    ],
+)
+def test_fixture_pid_observation_is_not_a_termination_verdict(
+    monkeypatch, outcome: str, expected: str,
+) -> None:
+    class Observed:
+        def status(self):
+            if outcome == "gone":
+                raise psutil.NoSuchProcess(1)
+            if outcome == "denied":
+                raise psutil.AccessDenied(1)
+            return psutil.STATUS_ZOMBIE if outcome == "zombie" else psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return ["time.sleep(120)"] if outcome == "live" else ["other-command"]
+
+    monkeypatch.setattr(psutil, "Process", lambda _pid: Observed())
+    assert _fixture_pid_state_before_cleanup(1) == expected
 
 
 def test_clean_exit_utf8_stdout_and_env_passthrough() -> None:
@@ -334,3 +387,43 @@ def test_spawn_failure_reported_not_raised() -> None:
     else:
         assert res.ownership_complete is False
         assert "spawn_failed" in res.reason_codes
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_descendant_failure_observation_precedes_fallback(
+    monkeypatch, capsys, request, completed: bool,
+) -> None:
+    import subprocess  # No process is started by this contract test.
+    from types import SimpleNamespace
+
+    calls: list[str] = []
+
+    def unavailable(_pid: int) -> None:
+        calls.append("observe")
+        raise psutil.AccessDenied(424242)
+
+    def unexpected_spawn(*args, **kwargs):
+        pytest.fail("the diagnostic contract must not spawn a process")
+
+    result = SimpleNamespace(
+        stdout="424242\n", ownership_complete=True,
+        reason_codes=("descendants_after_root_exit", "tree_state_unverified"),
+        timed_out=False, forced_tree_kill=True, termination_complete=completed,
+    )
+    monkeypatch.setattr(proctree, "run_owned", lambda *_a, **_kw: result)
+    monkeypatch.setattr(subprocess, "Popen", unexpected_spawn)
+    monkeypatch.setattr(psutil, "Process", unavailable)
+    monkeypatch.setitem(globals(), "_sleeper_gone", lambda _pid: True)
+    monkeypatch.setitem(globals(), "_kill_if_alive", lambda _pid: calls.append("cleanup"))
+
+    if completed:
+        test_descendants_after_root_exit_force_killed(request)
+        assert capsys.readouterr().err == ""
+        assert calls == ["cleanup"]
+    else:
+        with pytest.raises(AssertionError):
+            test_descendants_after_root_exit_force_killed(request)
+        stderr = capsys.readouterr().err
+        assert "fixture-pid-before-cleanup: unreadable" in stderr
+        assert "424242" not in stderr
+        assert calls == ["observe", "cleanup"]
