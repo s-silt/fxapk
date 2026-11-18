@@ -40,7 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Final, Literal, NotRequired, TypedDict, TYPE_CHECKING
 
@@ -591,17 +591,10 @@ def run(
             for round_path in capture_round_paths:
                 namespace = None
                 if three_rounds:
-                    from fxapk.core.integrity import sha256_file
-                    expected = next((record.get("runtime_report_sha256") for record in round_records
-                                     if record.get("runtime_report_path") == round_path), None)
-                    try:
-                        unchanged = expected is not None and sha256_file(round_path) == expected
-                    except OSError:
-                        unchanged = False
-                    if not unchanged:
+                    namespace = _verified_merge_namespace(round_path, round_records)
+                    if namespace is None:
                         steps.append(_step(_STEP_MERGE, _ERROR, "运行时材料已变化或缺失，拒绝合并"))
                         continue
-                    namespace = f"capture:{expected}"
                 merge_step, merge_paths = _run_merge(
                     report,
                     round_path,
@@ -1383,6 +1376,26 @@ def _run_capture(
     except Exception:  # noqa: BLE001 - 抓包失败不中断流水线
         logger.exception("[auto] 抓包步骤异常：%s", package_name)
         return _step(_STEP_CAPTURE, _ERROR, "抓包发生未预期异常（详见日志）"), ""
+
+
+def _verified_merge_namespace(
+    runtime_path: str, round_records: Iterable[Mapping[str, object]],
+) -> str | None:
+    """Return the existing evidence namespace only when the recorded bytes still match."""
+    from fxapk.core.integrity import sha256_file
+
+    expected = next(
+        (record.get("runtime_report_sha256") for record in round_records
+         if record.get("runtime_report_path") == runtime_path),
+        None,
+    )
+    if expected is None:
+        return None
+    try:
+        unchanged = sha256_file(runtime_path) == expected
+    except OSError:
+        unchanged = False
+    return f"capture:{expected}" if unchanged else None
 
 
 def _run_merge(
