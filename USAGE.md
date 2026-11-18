@@ -57,6 +57,17 @@
 | 真机脱壳；仅已授权设备，查看参数不执行 | `fxapk unpack --help` |
 | 重打包/装回设备；仅已授权设备，查看参数不执行 | `fxapk repackage --help` |
 
+## 比较两份报告
+
+`fxapk diff old.json new.json` 只比较两份已保存报告，不重新分析 APK。线索、端点和发现各有一个 `comparison`。先看它的 `status`，再看 `added`、`removed` 或 `changed`：
+
+- `compared_report_values`：两边都记录了格式有效的列表。显式的 `[]` 表示“报告记录为空”，不证明被分析对象里没有。
+- `not_compared`：至少一边缺字段或格式不对。旧脚本仍能读取原来的差异列表和计数，但要先检查状态；此时零计数不等于“没有变化”。`old` 和 `new` 会分别标出情况。
+
+`manifest_declarations` 比较同包名报告中已读到的数值 `min_sdk` 和 `target_sdk`。每项单独判断；一边没有可靠数值就标记 `not_observed`，不会套默认值。相同包名也不证明两份 APK 来自同一签名者。
+
+`analysis_notes` 列出两份报告各自记录的失败和跳过项，不包含原始错误说明。`not_recorded` 表示报告没记录分析项状态，`invalid` 表示状态记录不可用。这些提示不判断每组列表是否扫全，也不改变原有增删或计数。
+
 ## 隐私与输出
 
 `digest` 默认有限脱敏：遮蔽高敏类别值及线索自由文本中固定形态的邮箱、国内手机号、证件号和长数字串；姓名、地址、境外号码及 findings/visibility/closure/overseas_targets 等说明文字不保证移除。`--no-redact` 恢复原值。

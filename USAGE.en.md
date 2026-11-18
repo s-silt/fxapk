@@ -57,6 +57,17 @@ This reference lists public core top-level commands and groups. Use each entry�
 | Bounded checks; view help without executing | `fxapk probe-target --help` |
 | Read-only offline addressing-chain evaluation | `fxapk addressing-evaluate <manifest.json> --out <result.json>`; verifies supplied hashes, missing independent labels remain unknown |
 
+## Compare two saved reports
+
+`fxapk diff old.json new.json` compares two saved reports without analyzing either APK again. For leads, endpoints, and findings, read `comparison.status` before interpreting `added`, `removed`, or `changed`:
+
+- `compared_report_values`: both reports contain a valid list. An explicit `[]` means the report recorded an empty list, not that the analyzed app lacks those items.
+- `not_compared`: at least one report is missing that field or has an invalid list. Existing scripts can still read the diff lists and counts, but should check the status first. Zero counts here do not mean “no change.” The `old` and `new` states tell you why.
+
+`manifest_declarations` compares numeric `min_sdk` and `target_sdk` values read from reports with the same package name. Each field is evaluated separately. If either side lacks a reliable number, the field is `not_observed`; the command does not substitute a default. Matching package names do not prove matching signers.
+
+`analysis_notes` lists failures and skips recorded by each report, without free-form error messages. `not_recorded` means no analyzer status was recorded; `invalid` means the status records are unusable. These notes neither certify list coverage nor change any counts or deltas.
+
 ## Privacy and output
 
 `digest` provides limited redaction: sensitive-category values and fixed patterns for email addresses, domestic phone numbers, identity numbers and long digit strings in lead text. Names, addresses, international phone numbers and explanatory text in findings/visibility/closure/overseas_targets are not guaranteed to be removed. `--no-redact` restores raw values.
