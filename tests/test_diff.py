@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from fxapk import cli
@@ -159,3 +160,26 @@ def test_cli_diff_bad_json_exits_3(tmp_path: Path) -> None:
     good.write_text(json.dumps(_report()), encoding="utf-8")
     res = CliRunner().invoke(cli.app, ["diff", str(bad), str(good)])
     assert res.exit_code == 3
+
+
+@pytest.mark.parametrize("raw", ["[]", "null", "false", "15", '"report"'])
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_cli_diff_rejects_non_object_report(tmp_path: Path, raw: str, invalid_first: bool) -> None:
+    invalid = tmp_path / "invalid.json"
+    good = tmp_path / "good.json"
+    invalid.write_text(raw, encoding="utf-8")
+    good.write_text(json.dumps(_report()), encoding="utf-8")
+    paths = (invalid, good) if invalid_first else (good, invalid)
+    result = CliRunner().invoke(cli.app, ["diff", *map(str, paths), "--offline"])
+    assert result.exit_code == 3
+    assert not result.stdout
+    assert "报告 JSON 顶层必须是对象" in result.stderr
+
+
+def test_cli_diff_preserves_legacy_empty_object(tmp_path: Path) -> None:
+    old, new = tmp_path / "old.json", tmp_path / "new.json"
+    old.write_text("{}", encoding="utf-8")
+    new.write_text(json.dumps(_report()), encoding="utf-8")
+    result = CliRunner().invoke(cli.app, ["diff", str(old), str(new), "--offline"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["summary"]["endpoints_added"] == 0

@@ -626,7 +626,10 @@ def _report_dict_for(path: Path, *, online: bool) -> dict:
         except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
             typer.echo(f"错误：无法读取报告 JSON：{path}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=3) from exc
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            typer.echo(f"错误：报告 JSON 顶层必须是对象：{path}", err=True)
+            raise typer.Exit(code=3)
+        return data
 
     # 非 .json → 当 APK 现分析（离线默认：diff 通常不需联网富化，也让结果确定/快）。
     from fxapk.core import pipeline
