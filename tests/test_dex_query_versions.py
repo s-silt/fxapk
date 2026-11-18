@@ -7,6 +7,7 @@ import os
 import sys
 import tomllib
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -20,6 +21,7 @@ from tests.fixtures.dex_query.dexgen import build_dex, sample_classes, zip_bytes
 # （来源是 plugins/fxapk-asc/README.md），此处不声称已核验。
 _ASC_RELEASES = {
     "0.1.2.post2": {
+        "wheel_url": "https://files.pythonhosted.org/packages/c8/99/c6bdea4cc03305a6aafad54702b836ed4b6083911449c23ac67ec0d746c9/droidasc-0.1.2.post2-py3-none-any.whl",
         "wheel_sha256": "5adf6681e6d6eeefe685045115f0db9c63ad2e5c126ff8bbb3fd1f2b76e3e324",
         "findrefs_sha256": "19bab436bf154df6ca1da9cbede95e004de8260a6b22a5d2231862f94efde503",
         "revision": "b93cbd0798131312b6dc083198e6decbca28a12e",
@@ -72,6 +74,16 @@ def test_identity_tables_match_independent_release_manifest() -> None:
     project = tomllib.loads((root / "plugins/fxapk-asc/pyproject.toml").read_text(encoding="utf-8"))
     dependencies = project["project"]["dependencies"]
     assert _droidasc_pins([dep for dep in dependencies if isinstance(dep, str)]) == [dq.PINNED_VERSION]
+
+
+def test_ci_wheel_is_the_pinned_binary_on_pypi() -> None:
+    release = _ASC_RELEASES[dq.PINNED_VERSION]
+    wheel = urlsplit(release["wheel_url"])
+    assert wheel.scheme == "https"
+    assert wheel.netloc == "files.pythonhosted.org"
+    assert not wheel.query and not wheel.fragment
+    assert wheel.path.startswith("/packages/")
+    assert wheel.path.rsplit("/", 1)[-1] == f"droidasc-{dq.PINNED_VERSION}-py3-none-any.whl"
 
 
 def test_provider_identity_rejects_mixed_release_and_hash() -> None:
