@@ -967,7 +967,7 @@
       「为什么降级」，于是把 count=0 读成"样本确实没有"。 -#}
   {% set vis = meta.get("visibility") %}
   {% set cov = coverage_gaps %}
-  {% if vis or cov %}
+  {% if vis or cov or java_scan %}
   <section id="visibility">
     <h2>看到了多少 <span class="muted" style="font-size:13px;font-weight:400">（本次分析的可见范围；「未发现」只在可见范围内成立）</span></h2>
     {% if vis and vis.get("blocked_claims") %}
@@ -989,6 +989,9 @@
       {% endfor %}
       </tbody>
     </table>
+    {% endif %}
+    {% if java_scan %}
+    <p id="jadx-java-scan" class="muted">JADX 已读取 Java 文件（已枚举）：{{ java_scan.files_scanned }}/{{ java_scan.files_total }}。</p>
     {% endif %}
     {% if cov %}
     <h3>扫描缺口</h3>

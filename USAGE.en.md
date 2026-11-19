@@ -157,6 +157,8 @@ Hunter reads the account's free balance before searching and reserves credits in
 
 ## JADX index
 
+The HTML visibility section and `visibility.java_scan` in `digest` show how many Java files JADX analysis read and enumerated. A count such as 2/3 refers to the enumerated Java files, not coverage of the whole APK. Read it alongside the Java visibility status and gap notes. Older reports without reliable counts omit this value.
+
 Multi-index queries read `fxapk-jadx-index-map.json` at the cache root by default (or `--index-map`). Older 1.6 indexes keep postings only for the values selected when the index was built; `coverage=complete` does not guarantee coverage of new values, and queries also report `query_coverage`. New analyses run with `--jadx-cache-root` save bounded Java snapshots under `query-sources` for later queries on new values. Snapshots and the `--out` receipt contain controlled material — do not publish them. `callpath`'s `name_unique` only means the simple name is unique; it does not prove method binding. `jadx compare` similarity does not mean the same operator.
 
 ## Corpus
