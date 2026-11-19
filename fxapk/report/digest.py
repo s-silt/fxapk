@@ -14,6 +14,7 @@ from collections import Counter
 from typing import Any
 
 from fxapk.core.coverage import collect_coverage
+from fxapk.core.visibility import java_scan_counts
 from fxapk.core.admission import evaluate_usage
 from fxapk.core.evidence_scope import (
     project_serialized_closure,
@@ -771,6 +772,9 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         digest["enrichment"] = enrichment
     # ★扫描覆盖缺口（core/coverage.py 协议）：哪些分析器没扫全。仅非零项，且**无缺口时整键不出现**
     #   （缺失=无事件）。没有这一段，各 count=0 分不清「样本确实没有」与「这一面根本没扫到」。
+    java_scan = java_scan_counts(meta)
+    if java_scan is not None:
+        digest["visibility"]["java_scan"] = java_scan
     _coverage = collect_coverage(meta)
     capture = meta.get("web_capture_visibility")
     if isinstance(capture, dict) and capture:

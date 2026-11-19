@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -813,3 +814,170 @@ def test_analyzer_creates_no_persistent_index_by_default(tmp_path, monkeypatch) 
     ]
     assert index_artifacts == [], "默认分析不得留下任何持久索引产物"
     assert list(workdir.iterdir()) == [], "默认分析不得向 cwd 写任何东西"
+
+
+_JadxCoverageReport = tuple[str, str, str, dict[str, Any], str, dict[str, Any]]
+
+
+@pytest.fixture(params=["full", "limited", "empty", "legacy", "at_byte_limit", "over_byte_limit"])
+def jadx_coverage_report(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> _JadxCoverageReport:
+    """Real scan and report delivery over a stubbed decompiler's Java output."""
+    import json
+    from zipfile import ZipFile
+
+    from typer.testing import CliRunner
+
+    from fxapk import cli
+    from fxapk.core import visibility
+    from fxapk.core.models import Report
+
+    mode: str = request.param
+    limited = mode in {"limited", "legacy"}
+    monkeypatch.setattr(jadx, "_MAX_JAVA_FILES", 2 if limited else 3)
+    apk = tmp_path / "synthetic.apk"
+    with ZipFile(apk, "w") as archive:
+        archive.writestr("AndroidManifest.xml", '<manifest package="com.example.synthetic"/>')
+    first_url = "https://" + "example.com/jadx-retained"
+    marker = "https://" + "example.com/jadx-third-only"
+    bodies = {"A": "class A {}", "B": "class B {}", "C": "class C {}"}
+    if mode != "empty":
+        bodies["B"] = f'class B {{ String value = "{first_url}"; }}'
+        bodies["C"] = f'class C {{ String value = "{marker}"; }}'
+    if mode in {"at_byte_limit", "over_byte_limit"}:
+        byte_limit = 96
+        monkeypatch.setattr(jadx, "_MAX_FILE_BYTES", byte_limit)
+        target = byte_limit + int(mode == "over_byte_limit")
+        # Only the comment extends beyond the byte limit; the marker fits in both inputs.
+        body = (bodies["C"] + " //").encode("ascii")
+        assert len(body) <= byte_limit
+        bodies["C"] = body.ljust(target, b"x").decode("ascii")
+
+    def write_java(cmd: list[str]) -> proctree.OwnedRun:
+        sources = Path(cmd[cmd.index("-d") + 1]) / "sources" / "com" / "example"
+        sources.mkdir(parents=True)
+        # Reverse creation order to exercise the analyzer's path sort.
+        for name in ("C", "B", "A"):
+            (sources / f"{name}.java").write_bytes(bodies[name].encode("ascii"))
+        return _owned()
+
+    calls = _patch_run_owned(monkeypatch, write_java)
+    result = JadxAnalyzer().analyze(FakeContext(apk_path=str(apk)))
+    assert calls and result.error is None
+    meta = dict(result.meta, dex_available=True, dex_scanned=True)
+    if mode == "legacy":
+        meta["jadx_receipt"] = {
+            k: v for k, v in meta["jadx_receipt"].items() if k != "scan"
+        }
+    meta["visibility"] = visibility.assess({"meta": meta})
+    report = Report(
+        package_name="com.example.synthetic", meta=meta, leads=[],
+        endpoints=result.endpoints, findings=result.findings,
+        analyzer_status=[{"name": "jadx", "status": "ran"}],
+    )
+    delivery = cli._write_reports(report, tmp_path, ["json", "html"], "synthetic-report")
+    assert delivery.written == ("json", "html") and delivery.failed == ()
+    report_path = tmp_path / "synthetic-report.json"
+    cli_result = CliRunner().invoke(cli.app, ["digest", str(report_path)])
+    assert cli_result.exit_code == 0, cli_result.output
+    (tmp_path / "digest.json").write_text(cli_result.stdout, encoding="utf-8")
+    return (
+        mode, first_url, marker, json.loads(report_path.read_text(encoding="utf-8")),
+        (tmp_path / "synthetic-report.html").read_text(encoding="utf-8"),
+        json.loads(cli_result.stdout),
+    )
+
+
+def test_jadx_coverage_report_json(jadx_coverage_report: _JadxCoverageReport) -> None:
+    mode, first_url, marker, report, _, _ = jadx_coverage_report
+    receipt = report["meta"]["jadx_receipt"]
+    limited = mode in {"limited", "legacy"}
+    truncated = mode == "over_byte_limit"
+    assert receipt["status"] == "ok"
+    assert receipt["complete"] is (not (limited or truncated))
+    expected_reasons = ["scan_limit_hit"] if limited else []
+    if truncated:
+        expected_reasons.append("source_file_truncated")
+    assert receipt["reason_codes"] == expected_reasons
+    if mode == "legacy":
+        assert "scan" not in receipt
+    else:
+        scan = receipt["scan"]
+        assert scan["files_scanned"] == scan["files_selected"] == (2 if limited else 3)
+        assert scan["files_total"] == 3
+        assert scan["scan_limit_hit"] is limited
+        assert scan["truncated_files"] == int(truncated)
+        if mode in {"at_byte_limit", "over_byte_limit"}:
+            assert scan["bytes_total"] - scan["bytes_scanned"] == int(truncated)
+
+    def locations(url: str) -> list[str]:
+        return [
+            evidence["location"]
+            for endpoint in report["endpoints"] if endpoint["value"] == url
+            for evidence in endpoint["evidences"] if evidence["source"] == "jadx"
+        ]
+
+    assert locations(marker) == ([] if limited or mode == "empty" else ["sources/com/example/c.java"])
+    if mode == "empty":
+        assert report["endpoints"] == []
+    else:
+        assert locations(first_url) == ["sources/com/example/b.java"]
+    assert report["analysis_status"] == "complete" and report["completeness"] == 1.0
+    assert report["meta"]["visibility"]["sources"]["dex"]["visibility"] == "complete"
+
+
+def test_jadx_coverage_report_html(jadx_coverage_report: _JadxCoverageReport) -> None:
+    mode, _, _, _, html, _ = jadx_coverage_report
+    section = html.split('<section id="visibility">', 1)[1].split("</section>", 1)[0]
+    mark = 'id="jadx-java-scan"'
+    if mode == "legacy":
+        assert mark not in section
+    else:
+        assert mark in section
+        row = section.split(mark, 1)[1].split("</p>", 1)[0]
+        assert ("2/3" if mode == "limited" else "3/3") in row
+    if mode in {"at_byte_limit", "over_byte_limit"}:
+        truncated = mode == "over_byte_limit"
+        java_row = section.split("<td>java</td>", 1)[1].split("</tr>", 1)[0]
+        assert ("<td>partial</td>" if truncated else "<td>complete</td>") in java_row
+        assert ("source_file_truncated" in java_row) is truncated
+
+
+def test_jadx_coverage_report_digest(jadx_coverage_report: _JadxCoverageReport) -> None:
+    mode, _, _, _, _, digest = jadx_coverage_report
+    visibility = digest["visibility"]
+    truncated = mode == "over_byte_limit"
+    expected_state = "partial" if mode in {"limited", "legacy"} or truncated else "complete"
+    assert visibility["sources"]["java"] == expected_state
+    assert visibility["sources"]["dex"] == "complete"
+    assert any(
+        note.startswith("[java] ") and "source_file_truncated" in note
+        for note in visibility["notes"]
+    ) is truncated
+    if mode == "legacy":
+        assert "java_scan" not in visibility
+    else:
+        assert visibility["java_scan"] == {
+            "files_scanned": 2 if mode == "limited" else 3, "files_total": 3,
+        }
+
+
+@pytest.mark.parametrize(("scan", "expected"), [
+    (None, None),
+    ({}, None),
+    ({"files_scanned": 2}, None),
+    ({"files_scanned": True, "files_total": 3}, None),
+    ({"files_scanned": "2", "files_total": 3}, None),
+    ({"files_scanned": -1, "files_total": 3}, None),
+    ({"files_scanned": 4, "files_total": 3}, None),
+    ({"files_scanned": 0, "files_total": 0}, {"files_scanned": 0, "files_total": 0}),
+    (
+        {"files_scanned": 2, "files_total": 3, "private_label": "not projected"},
+        {"files_scanned": 2, "files_total": 3},
+    ),
+])
+def test_java_scan_counts_does_not_invent_coverage(scan: object, expected: dict[str, int] | None) -> None:
+    from fxapk.core.visibility import java_scan_counts
+
+    assert java_scan_counts({"jadx_receipt": {"scan": scan}}) == expected

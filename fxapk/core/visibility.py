@@ -303,6 +303,18 @@ def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
     return {"state": state, "reason_codes": codes}
 
 
+def java_scan_counts(meta: object) -> dict[str, int] | None:
+    """Return observed reads and enumerated files from a valid JADX scan pair."""
+    receipt = meta.get("jadx_receipt") if isinstance(meta, Mapping) else None
+    scan = receipt.get("scan") if isinstance(receipt, Mapping) else None
+    if not isinstance(scan, Mapping):
+        return None
+    scanned, total = scan.get("files_scanned"), scan.get("files_total")
+    if type(scanned) is not int or type(total) is not int or not 0 <= scanned <= total:
+        return None
+    return {"files_scanned": scanned, "files_total": total}
+
+
 def _native_visibility(meta: dict) -> tuple[str, list[str]]:
     """native 层可见性。
 

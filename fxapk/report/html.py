@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from fxapk.core import infra
 from fxapk.core.coverage import collect_coverage
+from fxapk.core.visibility import java_scan_counts
 from fxapk.core.web_observations import GAP_LABELS, digest_web_observations
 from fxapk.core.web_supplement import project_for_digest
 from fxapk.core.leads import _overseas_target_coverage, _project_overseas_profiles
@@ -552,6 +553,7 @@ def _render_template(template: Any, report: Report) -> str:
         #   这里按 core/coverage.py 的协议算好传进去（只含非零项）。没有它，
         #   读 HTML 的人看不到「哪些分析器没扫全」，会把 count=0 读成「样本确实没有」。
         coverage_gaps=collect_coverage(report.meta or {}),
+        java_scan=java_scan_counts(report.meta),
         analyzer_status=report.analyzer_status or [],
         enricher_status=report.enricher_status or [],
         findings=report.findings or [],
