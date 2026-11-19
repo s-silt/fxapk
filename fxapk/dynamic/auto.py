@@ -243,7 +243,8 @@ def run(
 
     Returns:
         dict：{status, closure, steps, report_paths, package_name, out_dir, report_delivery}。
-        取消时 status 为 cancelled，closure.status 为 not_run。函数本身不把取消抛给调用方。
+        取消由结果表达，不抛给调用方；未执行闭环时 closure.status 为 not_run。
+        正常走到闭环但缺报告时，整体仍为 failed，以保持严格模式退出语义。
     """
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     steps: list[StepResult] = []
@@ -253,12 +254,12 @@ def run(
     report: object | None = None
     closure: dict[str, object] = {
         "schema_version": "1.0",
-        "status": "failed",
+        "status": "not_run",
         "checks": [],
         "targets": [],
         "source_summary": {},
-        "gaps": ["case closure did not run"],
-        "next_actions": ["rerun case closure after static analysis succeeds"],
+        "gaps": ["pipeline_stopped_before_closure"],
+        "next_actions": [],
     }
     delivery_sink: list[object] = []
 
@@ -586,52 +587,23 @@ def run(
                     for record in round_records
                 ]
 
-        # 5) 合并：抓包成功且静态有 report 才把运行时端点并回主报告并重渲。
-        if capture_step["status"] == _DONE and report is not None and capture_round_paths:
-            for round_path in capture_round_paths:
-                namespace = None
-                if three_rounds:
-                    namespace = _verified_merge_namespace(round_path, round_records)
-                    if namespace is None:
-                        steps.append(_step(_STEP_MERGE, _ERROR, "运行时材料已变化或缺失，拒绝合并"))
-                        continue
-                merge_step, merge_paths = _run_merge(
-                    report,
-                    round_path,
-                    out_dir=out_dir,
-                    base=base,
-                    formats=fmts,
-                    on_progress=on_progress,
-                    delivery_sink=delivery_sink,
-                    **({"evidence_namespace": namespace} if namespace else {}),
-                )
-                steps.append(merge_step)
-                _extend_unique(report_paths, merge_paths)
-                if three_rounds:
-                    for row in report.meta.get("capture_rounds", []):
-                        if row.get("runtime_report_path") == round_path:
-                            row["merge_status"] = merge_step["status"]
-                            payload = _read_runtime_payload(round_path)
-                            row["artifact_verified"] = True
-                            row["identity_which"] = apk_identity.get("which", "unknown")
-                            original_identity = apk_identity.get("original")
-                            row["original_sample_sha256"] = (
-                                original_identity.get("sha256") if isinstance(original_identity, dict) else None)
-                            row["runtime_variant"] = payload.get("runtime_variant", "unknown")
-                            row["package_matches"] = payload.get("package_name") == report.package_name
-                            row["quality_after_merge"] = (
-                                dict(report.meta.get("capture_quality", {}))
-                                if merge_step["status"] == _DONE else {}
-                            )
-                            row["decryption_after_merge"] = dict(report.meta.get("runtime_decrypt_stats", {}))
-        else:
-            steps.append(
-                _step(
-                    _STEP_MERGE,
-                    _SKIPPED,
-                    "抓包未成功或无静态报告，无运行时端点可并入",
-                )
+        try:
+            _merge_capture_stage(
+                report,
+                capture_step=capture_step,
+                capture_round_paths=capture_round_paths,
+                round_records=round_records if three_rounds else None,
+                apk_identity=apk_identity,
+                out_dir=out_dir,
+                base=base,
+                formats=fmts,
+                on_progress=on_progress,
+                steps=steps,
+                report_paths=report_paths,
+                delivery_sink=delivery_sink,
             )
+        except KeyboardInterrupt as exc:
+            raise AutoCancelled("merge_interrupted") from exc
 
         if three_rounds and isinstance(report, Report) and round_records:
             from fxapk.dynamic.capture_safety import compare_rounds
@@ -646,30 +618,42 @@ def run(
 
         # 6) 案件闭环：无论动态是否完整，只要静态报告存在都执行并把缺口显式写入报告。
         if report is not None:
-            close_step, closure, close_paths = _run_closure(
-                report,
-                out_dir=out_dir,
-                base=base,
-                online=online,
-                mode=mode,
-                require_dynamic=has_device,
-                on_progress=on_progress,
-                delivery_sink=delivery_sink,
-            )
+            # Fallback for an exception escaping the call. A normal return
+            # replaces it; cancellation keeps its separate terminal states.
+            closure.update(status="failed", gaps=["closure_execution_error"])
+            try:
+                close_step, closure, close_paths = _run_closure(
+                    report,
+                    out_dir=out_dir,
+                    base=base,
+                    online=online,
+                    mode=mode,
+                    require_dynamic=has_device,
+                    on_progress=on_progress,
+                    delivery_sink=delivery_sink,
+                )
+            except KeyboardInterrupt as exc:
+                raise AutoCancelled("closure_interrupted") from exc
             steps.append(close_step)
             _extend_unique(report_paths, close_paths)
         else:
-            steps.append(_step(_STEP_CLOSE, _SKIPPED, "无有效静态报告，案件闭环失败"))
+            steps.append(_step(_STEP_CLOSE, _SKIPPED, "无可用于闭环的报告，未执行"))
+            closure["gaps"] = ["no_report_for_closure"]
+            closure["next_actions"] = ["rerun case closure after static analysis succeeds"]
     except AutoCancelled as exc:
-        logger.info("[auto] 人工取消，停止后续抓包、旁路和闭环：%s", exc.code)
-        steps.append(_step("人工取消", _SKIPPED, "用户取消或确认失败，后续抓包、旁路和闭环未执行"))
+        logger.info("[auto] 人工取消，停止本轮剩余步骤：%s", exc.code)
+        closure_interrupted = exc.code == "closure_interrupted"
+        if closure_interrupted:
+            steps.append(_step(_STEP_CLOSE, _DEGRADED, "案件闭环已开始，但未完成（人工中断）"))
+        else:
+            steps.append(_step("人工取消", _SKIPPED, "用户取消或确认失败，后续抓包、旁路和闭环未执行"))
         closure = {
             "schema_version": "1.0",
-            "status": "not_run",
+            "status": "interrupted" if closure_interrupted else "not_run",
             "checks": [],
             "targets": [],
             "source_summary": {},
-            "gaps": ["cancelled_before_closure"],
+            "gaps": ["closure_interrupted" if closure_interrupted else "cancelled_before_closure"],
             "next_actions": [],
         }
         return _finish_run(
@@ -689,8 +673,9 @@ def run(
         logger.exception("[auto] run 未预期异常（已转结构化结果）")
         steps.append(_step("一键全自动", _ERROR, "流水线发生未预期异常（详见日志）"))
 
+    closure_status = str(closure.get("status") or "failed")
     return _finish_run(
-        status=str(closure.get("status") or "failed"),
+        status="failed" if closure_status == "not_run" else closure_status,
         closure=closure,
         strict_case=strict_case,
         steps=steps,
@@ -1378,6 +1363,69 @@ def _run_capture(
         return _step(_STEP_CAPTURE, _ERROR, "抓包发生未预期异常（详见日志）"), ""
 
 
+def _merge_capture_stage(
+    report: Report | None,
+    *,
+    capture_step: StepResult,
+    capture_round_paths: list[str],
+    round_records: list[dict] | None,
+    apk_identity: Mapping[str, object],
+    out_dir: str,
+    base: str,
+    formats: list[str],
+    on_progress: Callable[[str], None] | None,
+    steps: list[StepResult],
+    report_paths: list[str],
+    delivery_sink: list[object],
+) -> None:
+    """Merge existing capture reports in order; only multi-round output has a hash gate."""
+    if capture_step["status"] == _DONE and report is not None and capture_round_paths:
+        for round_path in capture_round_paths:
+            namespace = None
+            if round_records is not None:
+                namespace = _verified_merge_namespace(round_path, round_records)
+                if namespace is None:
+                    steps.append(_step(_STEP_MERGE, _ERROR, "运行时材料已变化或缺失，拒绝合并"))
+                    continue
+            merge_step, merge_paths = _run_merge(
+                report,
+                round_path,
+                out_dir=out_dir,
+                base=base,
+                formats=formats,
+                on_progress=on_progress,
+                delivery_sink=delivery_sink,
+                **({"evidence_namespace": namespace} if namespace else {}),
+            )
+            steps.append(merge_step)
+            _extend_unique(report_paths, merge_paths)
+            if round_records is not None:
+                for row in report.meta.get("capture_rounds", []):
+                    if row.get("runtime_report_path") == round_path:
+                        row["merge_status"] = merge_step["status"]
+                        payload = _read_runtime_payload(round_path)
+                        row["artifact_verified"] = True
+                        row["identity_which"] = apk_identity.get("which", "unknown")
+                        original_identity = apk_identity.get("original")
+                        row["original_sample_sha256"] = (
+                            original_identity.get("sha256") if isinstance(original_identity, dict) else None)
+                        row["runtime_variant"] = payload.get("runtime_variant", "unknown")
+                        row["package_matches"] = payload.get("package_name") == report.package_name
+                        row["quality_after_merge"] = (
+                            dict(report.meta.get("capture_quality", {}))
+                            if merge_step["status"] == _DONE else {}
+                        )
+                        row["decryption_after_merge"] = dict(report.meta.get("runtime_decrypt_stats", {}))
+    else:
+        steps.append(
+            _step(
+                _STEP_MERGE,
+                _SKIPPED,
+                "抓包未成功或无静态报告，无运行时端点可并入",
+            )
+        )
+
+
 def _verified_merge_namespace(
     runtime_path: str, round_records: Iterable[Mapping[str, object]],
 ) -> str | None:
@@ -1498,21 +1546,35 @@ def _run_closure(
                 require_dynamic=require_dynamic,
             ),
         )
+        json_written: Path | None = None
+
+        def acknowledge_json(path: Path) -> None:
+            nonlocal json_written
+            json_written = path
+
         try:
-            paths = report_io.write_report(report, Path(out_dir) / f"{base}.json")
+            paths = report_io.write_report(
+                report, Path(out_dir) / f"{base}.json", on_json_written=acknowledge_json,
+            )
         except AutoCancelled:
             raise
         except Exception:
             logger.exception("[auto] 案件闭环结果写回失败")
+            # File presence isn't proof of this run's write. The writer confirms
+            # JSON only after atomic replacement and before refreshing HTML.
+            if json_written is not None:
+                detail = "闭环已计算：JSON 已写出，HTML 副本未写回"
+                delivered = [str(json_written)]
+                requested, written, failed = ("json", "html"), ("json",), ("html",)
+            else:
+                detail = "闭环已计算，但结果未能写回报告"
+                delivered = []
+                requested, written, failed = ("json",), (), ("json",)
             if delivery_sink is not None:
                 from fxapk.core.report_delivery import ReportDelivery
 
-                delivery_sink.append(ReportDelivery(("json",), (), ("json",), ()))
-            return (
-                _step(_STEP_CLOSE, _ERROR, "闭环结果未能写回报告"),
-                closure,
-                [],
-            )
+                delivery_sink.append(ReportDelivery(requested, written, failed, ()))
+            return _step(_STEP_CLOSE, _ERROR, detail), closure, delivered
         if delivery_sink is not None:
             from fxapk.core.report_delivery import ReportDelivery
 

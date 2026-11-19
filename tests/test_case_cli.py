@@ -243,3 +243,44 @@ def test_case_review_refuses_missing_gate_receipt(tmp_path) -> None:  # noqa: AN
 
     assert reviewed.exit_code == 2
     assert not review_path.exists()
+
+
+@pytest.mark.parametrize(("failed_format", "strict", "exit_code"), [
+    ("json", True, 6), ("html", True, 6), ("html", False, 1),
+])
+def test_case_close_distinguishes_json_and_html_delivery(
+    tmp_path, monkeypatch, caplog, failed_format, strict, exit_code,
+) -> None:
+    from fxapk.core import report_io
+    from fxapk.report import html as report_html
+
+    path = _write_report(tmp_path)
+    initial = path.read_bytes()
+    sibling = path.with_suffix(".html")
+    sibling.write_text("old inert HTML", encoding="utf-8")
+
+    def calculate(report, _config):
+        closure = {"status": "complete", "targets": [], "gaps": []}
+        report.meta["closure"] = closure
+        return closure
+
+    def fail_before_replacement(*_, **__):
+        raise OSError("do not print synthetic private output detail")
+
+    monkeypatch.setattr(case_command, "close_report", calculate)
+    if failed_format == "json":
+        monkeypatch.setattr(report_io, "atomic_write_text", fail_before_replacement)
+    else:
+        monkeypatch.setattr(report_html, "render", fail_before_replacement)
+
+    flags = ["--offline", "--strict" if strict else "--no-strict"]
+    result = runner.invoke(cli.app, ["case", "close", str(path), *flags])
+    assert result.exit_code == exit_code
+    assert "do not print synthetic private output detail" not in result.output + caplog.text
+    assert sibling.read_text(encoding="utf-8") == "old inert HTML"
+    if failed_format == "html":
+        assert json.loads(path.read_text())["meta"]["closure"]["status"] == "complete"
+        assert "JSON 已写出" in result.output and "HTML 副本未写回" in result.output
+    else:
+        assert path.read_bytes() == initial
+        assert "JSON 未写回" in result.output and "JSON 已写出" not in result.output

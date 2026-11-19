@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import fields
 from pathlib import Path
@@ -337,8 +338,9 @@ def write_report(
     path: str | Path,
     *,
     render_existing_html: bool = True,
+    on_json_written: Callable[[Path], None] | None = None,
 ) -> list[str]:
-    """Atomically replace report JSON and refresh an existing sibling HTML report."""
+    """Atomically replace JSON, acknowledge it, then refresh an existing sibling HTML."""
     ensure_writable_report_version(report.schema_version)
     report.schema_version = REPORT_SCHEMA_VERSION
     canonicalize_report_source_status(report)
@@ -351,6 +353,8 @@ def write_report(
 
     target = Path(path)
     atomic_write_text(target, raw)
+    if on_json_written is not None:
+        on_json_written(target)
 
     written = [str(target)]
     html_path = target.with_suffix(".html")

@@ -1210,7 +1210,10 @@ def auto(
         )
         if isinstance(result, dict) and result.get("status") == "cancelled":
             _print_auto_result(result)
-            typer.echo("已取消：停止后续抓包、旁路和闭环。", err=True)
+            if result.get("cancel_reason") == "closure_interrupted":
+                typer.echo("已取消：案件闭环未完成。", err=True)
+            else:
+                typer.echo("已取消：停止后续抓包、旁路和闭环。", err=True)
             from fxapk.dynamic.cancel import CANCEL_EXIT_CODE
 
             raise typer.Exit(code=CANCEL_EXIT_CODE)
@@ -2340,7 +2343,7 @@ def _print_auto_result(result: object) -> None:
         tag = _tags.get(status, "[?]   ")
         typer.echo(f"{tag} {name}{('：' + detail) if detail else ''}")
 
-    if result.get("status") == "cancelled":
+    if result.get("status") == "cancelled" and result.get("cancel_reason") != "closure_interrupted":
         typer.echo("后续步骤：未执行（已取消）")
 
     pkg = str(result.get("package_name") or "(未知)")
