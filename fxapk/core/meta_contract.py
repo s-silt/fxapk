@@ -88,6 +88,7 @@ def _build_registry() -> dict[str, MetaKeyContract]:
         "dex_strings_truncated_by",
         MISSING_ANALYZERS_KEY,
         "analyzer_receipts",
+        "manifest_analysis_failed",
         "parser_execution",
         "jadx_judgment_ledger",
         "file_read_visibility",

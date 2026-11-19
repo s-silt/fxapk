@@ -109,6 +109,7 @@ class ManifestAnalyzer(BaseAnalyzer):
         'allow_backup': 'signal',
         'debuggable': 'signal',
         'manifest_anomaly': 'signal',
+        'manifest_parse_reason': 'coverage',
         'min_sdk': 'record',
         'network_security_config': 'signal',
         'package_name': 'signal',
@@ -206,6 +207,7 @@ class ManifestAnalyzer(BaseAnalyzer):
         if not manifest_xml or not manifest_xml.strip():
             logger.warning("manifest_xml 为空，跳过 manifest 解析")
             result.error = "manifest_xml 为空"
+            meta["manifest_parse_reason"] = "manifest_xml_empty"
             return None
         try:
             return _safe_fromstring(manifest_xml)
@@ -216,6 +218,7 @@ class ManifestAnalyzer(BaseAnalyzer):
         except expat.ExpatError:
             logger.exception("AndroidManifest XML 解析失败")
             result.error = "AndroidManifest XML 解析失败（详见日志）"
+            meta["manifest_parse_reason"] = "manifest_xml_malformed"
             return None
         except Exception:  # noqa: BLE001
             logger.exception("AndroidManifest 解析出现未预期异常")

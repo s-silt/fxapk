@@ -678,7 +678,7 @@ def diff(
         help="参数是 APK 时是否联网富化（默认离线：diff 通常只看结构变化、更快更确定）。",
     ),
     report_details: bool = typer.Option(
-        False, "--report-details", help="额外输出 SDK 声明与分析失败/跳过提示。",
+        False, "--report-details", help="额外输出 SDK 声明、分析失败/跳过和 Java 覆盖提示。",
     ),
     jadx_cache_root: Path | None = typer.Option(
         None,
@@ -754,7 +754,14 @@ def diff(
             "⚠ 两份报告记录的应用包名不同。差异仅代表报告内容，不能当作同一应用的版本变化。",
             err=True,
         )
-    if not report_details:
+    if report_details:
+        from fxapk.core.visibility import java_coverage_observation
+
+        output["coverage_observations"] = {"java": {
+            "old": java_coverage_observation(old_dict),
+            "new": java_coverage_observation(new_dict),
+        }}
+    else:
         output.pop("manifest_declarations")
         output.pop("analysis_notes")
 

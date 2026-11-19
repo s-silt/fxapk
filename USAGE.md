@@ -66,11 +66,13 @@
 
 两份报告记录的非空包名不同时，命令会在标准错误流提醒：这是报告内容对比，不是同一应用的版本变化。对比仍可继续，标准输出的 JSON 不变。
 
-加上 `--report-details` 才输出下面两项，默认保留既有顶层字段。
+加上 `--report-details` 才输出下面这些字段，默认保留既有顶层字段。
 
-`manifest_declarations` 比较同包名报告中已读到的数值 `min_sdk` 和 `target_sdk`。每项单独判断；一边没有可靠数值就标记 `not_observed`，不会套默认值。相同包名也不证明两份 APK 来自同一签名者。
+`manifest_declarations` 比较同包名报告中已读到的数值 `min_sdk` 和 `target_sdk`。每项单独判断；任一侧缺少可靠数值，或该侧的 APK 校验失败、清单不可信，该字段标记 `not_observed`；即使报告留有数字也不参与比较，不会套默认值。相同包名也不证明两份 APK 来自同一签名者。
 
 `analysis_notes` 列出两份报告各自记录的失败和跳过项，不包含原始错误说明。`not_recorded` 表示报告没记录分析项状态，`invalid` 表示状态记录不可用。这些提示不判断每组列表是否扫全，也不改变原有增删或计数。
+
+`coverage_observations.java` 分别展示两份报告的 JADX 覆盖，而不是分析器是否运行成功。仅带出已知的产出不全（`producer_partial`）与文件数上限（`scan_limit_hit`）原因码，不输出原始错误文本。旧报告只有 JADX 成功、没有覆盖回执时是 `unknown`。这不会改变端点差异，也不能证明任何清单已查全。
 
 ## 隐私与输出
 

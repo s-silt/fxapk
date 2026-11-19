@@ -247,6 +247,110 @@ def test_diff_accepts_offline_review_task_ids_starting_with_a_hyphen() -> None:
     }
 
 
+def test_cli_details_preserve_java_coverage_evidence(tmp_path) -> None:
+    import json
+    import subprocess
+    import sys
+
+
+    def write(name, *, receipt=None, scheduler=None, endpoint=False):
+        meta = {"package_name": "example.synthetic", "jadx_status": "ok"}
+        if receipt is not None:
+            meta["jadx_receipt"] = receipt
+        if scheduler is not None:
+            meta["analyzer_receipts"] = {"jadx": {"execution": scheduler}}
+        path = tmp_path / (name + ".json")
+        report_json.dump(Report(
+            package_name="example.synthetic", meta=meta, leads=[], findings=[],
+            endpoints=[Endpoint("sample.example.invalid", "domain")] if endpoint else [],
+            analyzer_status=[{"name": "jadx", "status": "ran", "reason": ""}],
+        ), str(path))
+        return path
+
+    def compare(left, right, *flags):
+        result = subprocess.run(
+            [sys.executable, "-c", "from fxapk.cli import main; main()",
+             "diff", str(left), str(right), "--offline", *flags],
+            capture_output=True, text=True, encoding="utf-8", timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    old = write("old", endpoint=True)
+    incomplete = {"schema": 1, "status": "partial", "complete": False,
+                  "reason_codes": ["scan_limit_hit", "producer_partial", "scan_limit_hit",
+                                   "raw_diagnostic", "/private/exception", {"bad": True}]}
+    new = write("new", receipt=incomplete)
+    default = compare(old, new)
+    detail = compare(old, new, "--report-details")
+    assert "coverage_observations" not in default
+    optional = {"coverage_observations", "analysis_notes", "manifest_declarations"}
+    assert {key: value for key, value in detail.items() if key not in optional} == default
+    assert detail["summary"]["endpoints_removed"] == 1
+    assert detail["analysis_notes"]["new"] == {"state": "recorded", "failed": [], "skipped": []}
+    assert detail["coverage_observations"]["java"] == {
+        "old": {"state": "unknown", "reason_codes": []},
+        "new": {"state": "partial", "reason_codes": ["producer_partial", "scan_limit_hit"]},
+    }
+    complete = {"schema": 1, "status": "ok", "complete": True, "reason_codes": []}
+    good = write("good", receipt=complete)
+    timeout = write("timeout", receipt=complete, scheduler="scheduler_timeout")
+    reverse = compare(timeout, good, "--report-details")
+    assert reverse["coverage_observations"]["java"] == {
+        "old": {"state": "timeout", "reason_codes": []},
+        "new": {"state": "complete", "reason_codes": []},
+    }
+
+
+def test_saved_diff_does_not_compare_sdk_from_rejected_apk(tmp_path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from fxapk import cli
+    from fxapk.analyzers.manifest import ManifestAnalyzer
+    from fxapk.core import pipeline
+    from fxapk.core.models import AnalysisConfig
+    from tests.conftest import FakeContext
+    from tests.test_pipeline_stages import _stub_discovery
+
+    _stub_discovery(monkeypatch, analyzers=[ManifestAnalyzer()])
+    runner = CliRunner()
+
+    def invoke(*args):
+        result = runner.invoke(cli.app, list(args))
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)
+
+    def report(sdk, *, verified=True):
+        xml = (
+            '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.test.app">'
+            f'<uses-sdk android:targetSdkVersion="{sdk}"/><application/></manifest>'
+        )
+        context = FakeContext(manifest_xml=xml)
+        context.apk_validation_ok = verified
+        saved = pipeline.run(context, AnalysisConfig(online=False))
+        assert saved.meta["target_sdk"] == sdk  # recorded, but not necessarily eligible
+        assert any(row["name"] == "manifest" and row["status"] == "ran"
+                   for row in saved.analyzer_status)
+        path = tmp_path / f"{sdk}-{verified}.json"
+        report_json.dump(saved, str(path))
+        return str(path)
+
+    old, valid, rejected = report(32), report(34), report(35, verified=False)
+    assert invoke("digest", rejected)["visibility"]["sources"]["manifest"] == "unavailable"
+    normal = invoke("diff", old, valid, "--offline", "--report-details")
+    assert normal["manifest_declarations"]["fields"]["target_sdk"]["state"] == "changed"
+    for left, right, side in ((old, rejected, "new"), (rejected, old, "old")):
+        result = invoke("diff", left, right, "--offline", "--report-details")
+        projection = result.pop("manifest_declarations")
+        assert projection["status"] == "not_compared"
+        target = projection["fields"]["target_sdk"]
+        assert target["state"] == "not_observed"
+        assert target[side] == {"value": None, "reason": "manifest_unobserved"}
+        result.pop("analysis_notes")
+        result.pop("coverage_observations")
+        assert result == invoke("diff", left, right, "--offline")
+
+
 @pytest.mark.parametrize(
     ("old_package", "new_package", "warn"),
     [

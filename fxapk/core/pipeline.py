@@ -94,6 +94,7 @@ META_WRITE_CATEGORIES = {
     'analysis_environment': 'coverage',
     'analysis_started_at': 'record',
     'analyzer_receipts': 'coverage',
+    'manifest_analysis_failed': 'coverage',
     'apk_validation_ok': 'signal',
     'apk_validation_warning': 'signal',
     'asset_scores': 'signal',
@@ -1053,6 +1054,9 @@ def _stage_visibility(state: _PipelineState) -> None:
     """
     from fxapk.core import visibility
 
+    if any(row.get("name") == "manifest" and row.get("status") == "error"
+           for row in state.analyzer_status):
+        state.meta["manifest_analysis_failed"] = True
     state.meta["visibility"] = visibility.assess({"meta": state.meta})
 
 
