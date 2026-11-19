@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # 发行名、命令名与导入包名均为 fxapk。
 name = "fxapk"
-version = "2.0.5"
+version = "2.0.6"
 description = "涉诈 APK 调证分析 CLI — 静态分析 + 配置键值/服务归属提取，产出调证线索清单"
 readme = "README.md"
 requires-python = ">=3.11"
