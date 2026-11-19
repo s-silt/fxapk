@@ -815,6 +815,44 @@ def test_readable_legacy_without_lead_array_is_not_missing_report(tmp_path):
     assert not any("报告读不到" in note for note in detail.notes)
 
 
+@pytest.mark.parametrize(("missing_side", "expected_counters"), [
+    ("from", (1, 1)),
+    ("to", (1, 1)),
+    ("none", (1, 1)),
+    ("unreadable", (0, 0)),
+    ("conflict", (0, 0)),
+])
+def test_closure_and_visibility_summary_independent_of_advice(tmp_path, missing_side, expected_counters):
+    from typer.testing import CliRunner
+
+    from fxapk import cli
+
+    before = _report("synthetic-summary", "2.0.0", closure="complete", visibility=_vis(), leads=["建议调证"])
+    after = _report("synthetic-summary", "2.1.0", closure="partial", leads=["建议调证"] * 2)
+    if missing_side in {"from", "to"}:
+        del (before if missing_side == "from" else after)["leads"]
+    if missing_side == "conflict":
+        after["meta"]["tool_version_provenance"] = {"consistency": "conflict"}
+    root = _seed(tmp_path, [before, after])
+    if missing_side == "unreadable":
+        (root / corpus.report_relpath(after)).unlink()
+    args = ["corpus", "regress", "--corpus", str(root), "--from", "2.0.0@dd", "--to", "2.1.0@dd"]
+    invocation = CliRunner().invoke(cli.app, [*args, "--json"])
+    assert invocation.exit_code == 0, invocation.output
+    doc = json.loads(invocation.stdout)
+    [detail] = doc["diffs"]
+    summary = doc["summary"]
+    expected_close, expected_vis = expected_counters
+    assert any("闭环 complete" in n for n in detail["notes"]) == bool(expected_close)
+    assert any("求值阶段丢失" in n for n in detail["notes"]) == bool(expected_vis)
+    assert summary["advice_comparable"] == (1 if missing_side == "none" else 0)
+    assert (summary["closure_downgraded"], summary["visibility_assessment_lost"]) == expected_counters
+    text = CliRunner().invoke(cli.app, args)
+    assert text.exit_code == 0, text.output
+    assert f"闭环降级 {expected_close}" in text.stdout
+    assert f"求值丢失 {expected_vis}" in text.stdout
+
+
 def test_cli_reports_unreadable_side_without_publishing_a_delta(tmp_path):
     from typer.testing import CliRunner
 

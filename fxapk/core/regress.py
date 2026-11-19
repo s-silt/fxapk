@@ -78,6 +78,16 @@ class SampleDiff:
         return bool(self.version_conflict_sides or self.unreadable_report_sides)
 
     @property
+    def closure_downgraded(self) -> bool:
+        """Review signal from the closure fields, not the lead array."""
+        return not self.comparison_blocked and self.closure_from == "complete" and self.closure_to != "complete"
+
+    @property
+    def visibility_assessment_lost(self) -> bool:
+        """A readable, attributable new report lacks a previously present assessment."""
+        return not self.comparison_blocked and self.visibility_from is not None and self.visibility_to is None
+
+    @property
     def changed(self) -> bool:
         return bool(
             self.findings_added or self.findings_removed or self.notes
@@ -369,7 +379,7 @@ def _direction_notes(d: SampleDiff) -> list[str]:
     if d.hardened_from and not d.hardened_to:
         notes.append("⚠ 加固判定：已检出 → 未检出")
     # 闭环状态翻转：complete→partial 需人核（可能是新加的可见性约束正确降级，也可能是误伤）
-    if d.closure_from == "complete" and d.closure_to != "complete":
+    if d.closure_downgraded:
         notes.append(f"闭环 complete → {d.closure_to}（须人核：正确降级还是误伤）")
     if d.closure_from != "complete" and d.closure_to == "complete":
         notes.append(f"闭环 {d.closure_from} → complete（须人核：是否证据确实变足）")
@@ -393,7 +403,7 @@ def _visibility_notes(d: SampleDiff) -> list[str]:
     新增受限主张多半是新约束在正确降级，记中性备注、不告警。
     """
     va, vb = d.visibility_from, d.visibility_to
-    if va is not None and vb is None:
+    if d.visibility_assessment_lost:
         return ["⚠ 新版报告缺失可见性求值（求值阶段丢失？须人核）"]
     if va is None and vb is not None:
         # 换版首次对比时全库都会走这条：旧报告产于可见性求值上线之前，不是退化。
@@ -479,7 +489,7 @@ def _summarize(
         "only_in_to_samples": list(only_b),
         "findings_added_total": dict(added.most_common()),
         "findings_removed_total": dict(removed.most_common()),
-        # 建议调证合计的分母：仅两侧报告都可读的样本数（其余样本不参与合计）
+        # 建议调证合计仅使用两侧线索分档都可观察、且报告可比较的样本。
         "advice_comparable": len(comparable),
         **({"advice_only_gaps": advice_only_gaps} if advice_only_gaps else {}),
         "advice_unreadable": unreadable,
@@ -487,12 +497,7 @@ def _summarize(
         "advice_investigate_to": inv_to,
         "became_analyzable": sum(1 for d in qualified if any("由分析失败转为可分析" in n for n in d.notes)),
         "became_unanalyzable": sum(1 for d in qualified if any("由可分析转为分析失败" in n for n in d.notes)),
-        # 闭环状态取自报告全文，读不到时 closure_* 恒为 None，不得计入降级
-        "closure_downgraded": sum(
-            1 for d in qualified
-            if d.advice_from is not None and d.advice_to is not None
-            and d.closure_from == "complete" and d.closure_to != "complete"
-        ),
+        "closure_downgraded": sum(d.closure_downgraded for d in diffs),
         "hardening_newly_detected": sum(1 for d in qualified if not d.hardened_from and d.hardened_to),
         # ---- 证据可见性（中性计数，不给总评）----
         "visibility_comparable": sum(
@@ -509,12 +514,7 @@ def _summarize(
             if d.visibility_from is not None and d.visibility_to is not None
             and set(d.visibility_to["blocked_claims"]) - set(d.visibility_from["blocked_claims"])
         ),
-        # ★只数「新版报告读得到、却没有可见性求值」；报告根本读不到走 advice_unreadable 口径，
-        #   不折进来。反方向（旧版无求值 → 新版有）是旧 schema 升级，绝不与本计数合并。
-        "visibility_assessment_lost": sum(
-            1 for d in qualified
-            if d.visibility_from is not None and d.visibility_to is None and d.advice_to is not None
-        ),
+        "visibility_assessment_lost": sum(d.visibility_assessment_lost for d in diffs),
     }
 
 
