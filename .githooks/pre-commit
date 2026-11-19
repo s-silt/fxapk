@@ -14,6 +14,15 @@
 
 set -e
 
+if [ "${1-}" = "--fixed-jadx" ]; then
+    shift
+    if ! command -v python >/dev/null 2>&1; then
+        echo "fixed-jadx: Python is required" >&2
+        exit 2
+    fi
+    exec python -I tools/fixed_jadx_gate.py "$@"
+fi
+
 if ! command -v python >/dev/null 2>&1; then
     echo "leak-scan: 找不到 python，跳过扫描（CI 仍会扫 PR diff）。" >&2
     exit 0

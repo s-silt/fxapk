@@ -22,6 +22,7 @@ fxapk 是 APK 调证取证分析 CLI：按能力门控做静态/动态证据采�
 - 分析器并行（`core/pipeline.py` + `snapshot.py`）守「串行 == 并行 逐字节一致」；set 派生顺序显式排序。逃生开关：`FXAPK_NO_PARALLEL=1`、`FXAPK_MAX_WORKERS=N`、`FXAPK_WORKER_BASE_MB`、`FXAPK_MEM_SAFETY`。
 - CI 装 `pip install -e "."`：可选依赖进 `pyproject` extra，需要它的 CI job 要装；依赖 extra 的测试 `pytest.importorskip`。可选插件默认发现不得让坏插件拖垮核心命令。
 - 合并前等 CI 绿（`gh run watch <id> --exit-status`）；不 `--no-verify`，不 force push master；未经指示不主动 commit。
+- 走 JADX 报告固定回归时，在仓库根目录暂存候选后运行 `sh .githooks/pre-commit --fixed-jadx`。需要已装 pytest 和项目测试依赖；默认临时目录有 Git 祖先时，用 `--scratch <目录>` 指定可写的独立临时目录。命令只在暂存快照上执行 18 个合成 JADX JSON、HTML、digest 用例，通过回执含 `index_tree`。退出码 0 为通过，1 为回归拒绝或暂存快照发生变化，2 为准备失败。仅在可信仓库中运行，提交前核对回执树仍是待提交树。
 
 ## 2. 三条默认行为：新机器第一次跑之前先告诉用户
 

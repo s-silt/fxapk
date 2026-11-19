@@ -7,3 +7,6 @@
 tests/golden/phase2/*.json text eol=lf
 # Mixed newline/UTF-16 trace fixture is byte-sensitive on all platforms.
 tests/fixtures/rea_trace/inline.html -text
+# The shell entry requires LF and the runner compares checkout and staged bytes.
+/.githooks/pre-commit text eol=lf
+/tools/fixed_jadx_gate.py text eol=lf
