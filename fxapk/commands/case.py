@@ -113,9 +113,17 @@ def close_command(
         typer.echo(f"错误：闭环参数无效：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
 
+    calculated = False
+    json_written = False
+
+    def acknowledge_json(_path: Path) -> None:
+        nonlocal json_written
+        json_written = True
+
     try:
         closure = close_report(report, config)
-        write_report(report, report_json)
+        calculated = True
+        write_report(report, report_json, on_json_written=acknowledge_json)
     except Exception as exc:  # noqa: BLE001 - command boundary prints a safe summary
         # 记异常**调用栈位置**（文件:行:函数，末 5 帧），但**不含异常消息/源码行**——闭环会处理
         # provider 响应，异常消息可能夹带敏感响应片段/带 key 的 URL，``logger.exception`` 会把它
@@ -124,7 +132,13 @@ def close_command(
         frames = traceback.extract_tb(exc.__traceback__)[-5:]
         where = " <- ".join(f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}" for f in frames)
         logger.error("[case close] closure failed (%s) at %s", type(exc).__name__, where)
-        typer.echo(f"错误：案件闭环执行失败（{type(exc).__name__}）", err=True)
+        if json_written:
+            detail = "闭环已计算：JSON 已写出，HTML 副本未写回"
+        elif calculated:
+            detail = "闭环已计算，但 JSON 未写回"
+        else:
+            detail = "案件闭环执行失败"
+        typer.echo(f"错误：{detail}（{type(exc).__name__}）", err=True)
         raise typer.Exit(code=_execution_failure_exit_code(strict=strict)) from exc
 
     _print_closure_summary(closure)
