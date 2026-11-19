@@ -716,3 +716,49 @@ def test_cli_regress_renders_visibility(tmp_path):
     assert r2.exit_code == 0, r2.stdout
     assert "可见性受限解除 1" in r2.stdout
     assert "受限主张解除" in r2.stdout
+
+
+@pytest.mark.parametrize("conflict_sides", [("from",), ("to",), ("from", "to")])
+def test_regress_excludes_explicit_version_conflict_from_claims(tmp_path, conflict_sides):
+    from typer.testing import CliRunner
+
+    from fxapk import cli
+
+    first = _report("suspect", "2.0.0", status="failed", findings=["OLD"], leads=[regress.ADVICE_INVESTIGATE])
+    second = _report("suspect", "2.1.0", hardened=True, findings=["NEW"])
+    for side, report in (("from", first), ("to", second)):
+        if side in conflict_sides:
+            report["meta"]["tool_version_provenance"] = {
+                "consistency": "conflict",
+                "source_version": "3.0.0",
+                "effective_version": report["meta"]["tool_version"],
+            }
+
+    ordinary = [
+        _report("ordinary", "2.0.0", status="failed"),
+        _report("ordinary", "2.1.0", findings=["CONTROL"]),
+    ]
+    root = _seed(tmp_path, [first, second, *ordinary])
+    args = ["corpus", "regress", "--corpus", str(root), "--from", "2.0.0@dd", "--to", "2.1.0@dd"]
+    run = CliRunner().invoke(cli.app, [*args, "--json"])
+    assert run.exit_code == 0
+    payload = json.loads(run.stdout)
+    result = payload["summary"]
+    assert result["version_conflict_pairs"] == 1
+    assert result["compared"] == 2
+    assert result["became_analyzable"] == 1
+    assert result["hardening_newly_detected"] == 0
+    assert result["findings_added_total"] == {"CONTROL": 1}
+    assert result["findings_removed_total"] == {}
+    assert result["advice_comparable"] == 1 and result["advice_unreadable"] == 0
+    assert result["advice_investigate_from"] == 0
+    suspect = next(item for item in payload["diffs"] if item.get("version_conflict_sides"))
+    assert suspect["version_conflict_sides"] == list(conflict_sides)
+    assert suspect["status"] == ["failed", "complete"]
+    assert not suspect["findings_added"] and not suspect["findings_removed"]
+    assert len(suspect["notes"]) == 1 and "版本出处冲突" in suspect["notes"][0]
+
+    readable = CliRunner().invoke(cli.app, args)
+    assert readable.exit_code == 0
+    assert "1 个样本版本出处冲突，未计入回归统计" in readable.stdout
+    assert "+ NEW" not in readable.stdout and "- OLD" not in readable.stdout

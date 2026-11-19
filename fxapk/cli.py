@@ -1408,6 +1408,10 @@ def digest(
             typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
+        if not isinstance(report, dict):
+            typer.echo("错误：报告 JSON 必须为对象", err=True)
+            raise typer.Exit(code=1)
+
         _warn_report_revision(report)
 
         from fxapk.report.digest import build_digest
@@ -2306,8 +2310,11 @@ def _print_auto_result(result: object) -> None:
         return
     typer.echo("")
     typer.echo("===== 步骤摘要 =====")
-    steps = result.get("steps") or []
-    _tags = {"done": "[OK]  ", "skipped": "[SKIP]", "error": "[ERR] "}
+    raw_steps = result.get("steps")
+    steps = raw_steps if isinstance(raw_steps, (list, tuple)) else ()
+    if raw_steps is not None and not isinstance(raw_steps, (list, tuple)):
+        typer.echo("步骤摘要：步骤列表格式非预期")
+    _tags = {"done": "[OK]  ", "skipped": "[SKIP]", "error": "[ERR] ", "degraded": "[DEGRADED]"}
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -2317,18 +2324,39 @@ def _print_auto_result(result: object) -> None:
         tag = _tags.get(status, "[?]   ")
         typer.echo(f"{tag} {name}{('：' + detail) if detail else ''}")
 
+    if result.get("status") == "cancelled":
+        typer.echo("后续步骤：未执行（已取消）")
+
     pkg = str(result.get("package_name") or "(未知)")
     out_dir = str(result.get("out_dir") or "")
     typer.echo("")
     typer.echo(f"包名：{pkg}  输出目录：{out_dir}")
 
-    report_paths = result.get("report_paths") or []
-    if report_paths:
+    report_paths = result.get("report_paths")
+    if report_paths is not None and (
+        not isinstance(report_paths, (list, tuple))
+        or any(not isinstance(path, str) for path in report_paths)
+    ):
+        typer.echo("报告路径列表格式非预期，不判断是否已写出。")
+    elif report_paths:
         typer.echo(f"报告（{len(report_paths)}）：")
         for p in report_paths:
             typer.echo(f"  - {p}")
     else:
         typer.echo("未产出报告（详见步骤摘要）。")
+
+    delivery = result.get("report_delivery")
+    if isinstance(delivery, ReportDelivery):
+        # A later successful write can coexist with an earlier mandatory write failure.
+        failed = [fmt for fmt in ("json", "html") if fmt in delivery.requested and fmt in delivery.failed]
+        if failed:
+            typer.echo(f"报告写出：必需格式曾写出失败（{','.join(failed)}）")
+        elif delivery.blocks_success():
+            typer.echo("报告写出：未写出请求的报告")
+        if "pdf" in delivery.skipped and "pdf" not in delivery.written:
+            typer.echo("报告写出：可选 PDF 已跳过")
+    elif delivery is not None:
+        typer.echo("报告写出：回执格式非预期")
 
     closure = result.get("closure")
     if isinstance(closure, dict):

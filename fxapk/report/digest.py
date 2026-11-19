@@ -26,6 +26,9 @@ from fxapk.core.native_handoff import project_native_handoff
 from fxapk.core.web_observation_plan import project_plan_for_digest
 from fxapk.core.web_supplement import project_for_digest
 from fxapk.core.models import (
+    ANALYSIS_STATUS_COMPLETE,
+    ANALYSIS_STATUS_FAILED,
+    ANALYSIS_STATUS_PARTIAL,
     OBSERVED_CONTACT_SOURCES,
     EvidenceScope,
     display_lead_category,
@@ -201,7 +204,9 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
             warnings.append(f"分析完整度 {completeness} 越界（应在 [0,1]）：报告数据异常，结果不可信")
         elif completeness < _COMPLETENESS_WARN:
             warnings.append(f"分析完整度 {completeness} 低于 {_COMPLETENESS_WARN}：部分分析器失败，结论基础可能残缺")
-    elif raw_completeness is not None:
+    elif raw_completeness is None:
+        warnings.append("缺少分析完整度：无法确认结论基础完整")
+    else:
         warnings.append("分析完整度字段异常（非有限数）：报告数据异常，结果不可信")
     crit = [str(c) for c in _list(report.get("critical_failures")) if str(c)]
     if crit:
@@ -210,7 +215,11 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
     # ★analysis_status 必须被**消费**而不只是透传：报告自称 partial/failed 时，即使
     #   completeness=1.0 且无 critical_failures（如仅 pipeline 阶段崩溃降的档），摘要也不得
     #   自称 reliable——否则"部分完成"在唯一被下游读取的出口上消失。
-    if isinstance(status, str) and status in ("partial", "failed"):
+    if not isinstance(status, str) or status not in (
+        ANALYSIS_STATUS_COMPLETE, ANALYSIS_STATUS_PARTIAL, ANALYSIS_STATUS_FAILED
+    ):
+        warnings.append("分析状态缺失或无法识别：无法确认结论基础完整")
+    elif status in (ANALYSIS_STATUS_PARTIAL, ANALYSIS_STATUS_FAILED):
         # 存盘形状：stage_status 由 pipeline 写在 meta 下（pipeline._run_stage →
         # meta["stage_status"]）；根级仅容错手工/合成报告。缺失/坏形状只丢细节，不丢主告警。
         stages = report.get("stage_status")

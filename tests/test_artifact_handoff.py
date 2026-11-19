@@ -2,8 +2,10 @@
 import hashlib
 import json
 from pathlib import Path
-import pytest
+import shutil
 import warnings
+
+import pytest
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from tools.artifact_handoff import inspect_handoff
@@ -14,16 +16,14 @@ class TestHandoffContract:
     @pytest.fixture(autouse=True)
     def fixture(self, tmp_path: Path):
         self.root = tmp_path
-        for i, relative in enumerate(PROJECTS):
+        for relative in PROJECTS:
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                f'[project]\nname = "synthetic-{i}"\nversion = "1.{i}.0"\n',
-                encoding="utf-8",
-            )
+            shutil.copyfile(Path(__file__).resolve().parents[1] / relative, path)
         for name in ("dist", "plugin-dist", "release-assets", "received"):
             (self.root / name).mkdir()
-        for i, declaration in enumerate(projects(self.root)):
+        declared = projects(self.root)
+        for i, declaration in enumerate(declared):
             for name in archive_names(declaration):
                 payload = f"synthetic byte fixture {name}".encode()
                 (self.root / ("dist" if i == 0 else "plugin-dist") / name).write_bytes(payload)
@@ -40,10 +40,13 @@ class TestHandoffContract:
         assert len(self.inventory) == 11
         self.context = {
             "GITHUB_REPOSITORY_ID": "123", "GITHUB_RUN_ID": "456",
-            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40, "VERSION": "1.0.0",
+            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40, "VERSION": declared[0]["version"],
         }
 
-    def run_case(self, change=None, receiver=None, downloader_error=False, inventory=None):
+    def run_case(
+        self, change=None, receiver=None, downloader_error=False, inventory=None,
+        artifact_requests=None,
+    ):
         assets = self.root / "release-assets"
         archive = self.root / "synthetic.zip"
         first = sorted(n for n in self.inventory if n.endswith(".whl"))[0]
@@ -64,7 +67,9 @@ class TestHandoffContract:
         events = []
         received = self.root / "received"
 
-        def download():
+        def download(selected_id=None):
+            if artifact_requests is not None:
+                artifact_requests.append(selected_id)
             events.append("download")
             if downloader_error:
                 raise OSError("synthetic transport failure")
@@ -85,6 +90,19 @@ class TestHandoffContract:
         result, events = self.run_case()
         assert result.reason is None
         assert events == ["download", "synthetic-consumer"]
+
+    def test_download_receives_the_checked_artifact_id(self):
+        requests = []
+        result, events = self.run_case(artifact_requests=requests)
+        assert result.accepted and events == ["download", "synthetic-consumer"]
+        assert requests == ["789"]
+
+    def test_wrong_run_never_requests_the_artifact(self):
+        requests = []
+        receiver = {**self.context, "GITHUB_RUN_ID": "999"}
+        result, events = self.run_case(receiver=receiver, artifact_requests=requests)
+        assert result.reason == "RUN_MISMATCH"
+        assert events == requests == []
 
     def test_stale_producer_never_downloads_or_consumes(self):
         result, events = self.run_case(receiver={**self.context, "GITHUB_RUN_ATTEMPT": "2"})
