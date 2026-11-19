@@ -33,6 +33,8 @@ fxapk 是 APK 调证取证分析 CLI：按能力门控做静态/动态证据采�
 
 设备排查默认先 `fxapk doctor --no-fix`；修复前核对该设备和操作类别的授权。专用测试机身份不等于清数据、替换样本或行为修改授权。
 
+抓包报告网络受限时，先区分运行环境的网络权限、设备上的 App 流量和第三方归属查询。`auto --offline` 只关第三方归属查询。见[采集与探针记录](USAGE.md#采集与探针记录)。
+
 **脱敏只管 `digest`。** 以下出口原样输出高敏值，运行时各自向 stderr 提醒一行：`jsonl` / `diff` / `lead show|restore|replay` / `corpus events|ls|seen|shared-config|shared-native|shared-build-env|link-candidates` / `probe-leads` / `pcap-leads`，以及 `export` CSV、HTML/PDF、文书、corpus 存证、`case_correlation.json`、`report.json` 本身。判断方法：它的 stdout 会不会出现线索值。`corpus link-discover|link-explain|link-groups` 默认 `--evidence-values omit`，显式 `raw` 即恢复原值；`link-labels-validate|link-evaluate|link-readiness|link-train` 只输出聚合结果。不要对用户说「已全部脱敏」。名单以 `fxapk.core.redact.UNREDACTED_AGENT_COMMANDS` 为准，接线与文档同步由 `tests/test_redact.py` 锁定。
 
 ## 3. 行为铁律：先跑 fxapk，据产物决策
@@ -135,7 +137,7 @@ REA 插件默认关闭：即使已安装也不导入、不注册命令、不用�
 ```bash
 pip install -e .                       # Python >= 3.11
 cp .env.example .env                   # 本地密钥，绝不入库
-fxapk selfcheck                        # 能力自检；不逐源检查 API key，命中看报告 source_status
+fxapk selfcheck --offline              # 检查工具和设备可用性，不检查第三方富化连通性
 git config core.hooksPath .githooks    # 提交前泄漏扫描，改代码必开
 ```
 
