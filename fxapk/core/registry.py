@@ -16,8 +16,6 @@ from abc import ABC, abstractmethod
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
-import yaml
-
 from fxapk.core import device, tools
 from fxapk.core.models import AnalyzerResult, EnrichmentResult, Endpoint
 
@@ -375,6 +373,8 @@ def load_rules_dir(subdir: str) -> list[dict]:
             base = base / part
         if not base.is_dir():
             return []
+        import yaml
+
         for entry in sorted(base.iterdir(), key=lambda e: e.name):
             if not entry.name.endswith(".yaml"):
                 continue
@@ -415,6 +415,8 @@ def load_rules(name: str) -> dict | list:
         return {}
 
     try:
+        import yaml
+
         data = yaml.safe_load(text)
     except Exception:
         logger.exception("解析规则失败：rules/%s.yaml", stem)
