@@ -1486,6 +1486,10 @@ def corpus_regress_cmd(
                     "findings_added": d.findings_added,
                     "findings_removed": d.findings_removed,
                     "notes": d.notes,
+                    **(
+                        {"version_conflict_sides": d.version_conflict_sides}
+                        if d.version_conflict_sides else {}
+                    ),
                 }
                 for d in diffs if (d.changed or not changed_only)
             ],
@@ -1499,6 +1503,8 @@ def corpus_regress_cmd(
         f"  两版都有的样本 {s['compared']} 个，其中有变化 {s['changed']} 个；"
         f"仅旧版有 {s['only_in_from']}、仅新版有 {s['only_in_to']}"
     )
+    if conflict_pairs := s.get("version_conflict_pairs"):
+        typer.echo(f"  ⚠ {conflict_pairs} 个样本版本出处冲突，未计入回归统计")
     for label, key in (("仅旧版有", "only_in_from_samples"), ("仅新版有", "only_in_to_samples")):
         if s[key]:
             typer.echo(f"    {label}（未参与对比）：{', '.join(x[:12] for x in s[key])}")
@@ -1532,6 +1538,10 @@ def corpus_regress_cmd(
     for d in shown:
         case_label = "、".join(d.case_ids) if d.case_ids else "—"
         typer.echo(f"\n  [{d.sample_sha256[:12]}] {d.package_name or '?'}  案={case_label}")
+        if d.version_conflict_sides:
+            for note in d.notes:
+                typer.echo(f"    {note}")
+            continue
         if d.status_from != d.status_to:
             typer.echo(f"    状态 {d.status_from} → {d.status_to}")
         if d.counts_from != d.counts_to:

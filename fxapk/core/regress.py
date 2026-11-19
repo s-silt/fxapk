@@ -68,6 +68,8 @@ class SampleDiff:
     findings_removed: list[str] = field(default_factory=list)
     # 备注：方向明确的变化，供人一眼看到
     notes: list[str] = field(default_factory=list)
+    #: Reports may be readable but explicitly disagree about which build produced them.
+    version_conflict_sides: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -239,6 +241,12 @@ def resolve_revision(spec: str, revisions: list[str]) -> tuple[str | None, str]:
     )
 
 
+def _has_version_provenance_conflict(report: dict | None) -> bool:
+    meta = report.get("meta") if report is not None else None
+    provenance = meta.get("tool_version_provenance") if isinstance(meta, dict) else None
+    return isinstance(provenance, dict) and provenance.get("consistency") == "conflict"
+
+
 def diff_versions(
     corpus_dir: str | Path, entries: list[dict], version_from: str, version_to: str
 ) -> tuple[list[SampleDiff], dict[str, Any]]:
@@ -277,10 +285,15 @@ def diff_versions(
             #   visibility 字段，信投影会把「老行没记」读成「没有受限主张」。与 advice_counts 同路径。
             visibility_from=corpus.visibility_summary(ra),
             visibility_to=corpus.visibility_summary(rb),
+            version_conflict_sides=tuple(
+                side for side, report in (("from", ra), ("to", rb))
+                if _has_version_provenance_conflict(report)
+            ),
         )
-        fa, fb = _safe_finding_ids(ea), _safe_finding_ids(eb)
-        d.findings_added = sorted(fb - fa)
-        d.findings_removed = sorted(fa - fb)
+        if not d.version_conflict_sides:
+            fa, fb = _safe_finding_ids(ea), _safe_finding_ids(eb)
+            d.findings_added = sorted(fb - fa)
+            d.findings_removed = sorted(fa - fb)
         d.notes = _direction_notes(d)
         diffs.append(d)
 
@@ -331,7 +344,12 @@ def _direction_notes(d: SampleDiff) -> list[str]:
         label for label, adv in (("旧版", d.advice_from), ("新版", d.advice_to)) if adv is None
     ]
     if unreadable:
-        return [f"⚠ {'、'.join(unreadable)}报告读不到（缺文件或坏 JSON），线索与闭环无法对比"]
+        notes.append(f"⚠ {'、'.join(unreadable)}报告读不到（缺文件或坏 JSON），线索与闭环无法对比")
+    if d.version_conflict_sides:
+        labels = "、".join("旧版" if side == "from" else "新版" for side in d.version_conflict_sides)
+        notes.append(f"⚠ {labels}报告版本出处冲突，不判定回归方向")
+    if notes:
+        return notes
 
     # 载入失败 → 成功：方向明确的改善（实测两个样本正是从整包被拒变为可分析）
     if d.status_from in ("failed", "error") and d.status_to not in ("failed", "error", None):
@@ -422,12 +440,14 @@ def _summarize(
     diffs: list[SampleDiff], only_a: list[str], only_b: list[str],
     version_from: str, version_to: str,
 ) -> dict[str, Any]:
-    changed = [d for d in diffs if d.changed]
-    added = Counter(f for d in diffs for f in d.findings_added)
-    removed = Counter(f for d in diffs for f in d.findings_removed)
-    # ★只统计**两侧都读得到**的样本：把读不到当 0 会凭空做出一份「降噪」战绩。
-    comparable = [d for d in diffs if d.advice_from is not None and d.advice_to is not None]
-    unreadable = len(diffs) - len(comparable)
+    qualified = [d for d in diffs if not d.version_conflict_sides]
+    conflict_pairs = len(diffs) - len(qualified)
+    changed = [d for d in qualified if d.changed]
+    added = Counter(f for d in qualified for f in d.findings_added)
+    removed = Counter(f for d in qualified for f in d.findings_removed)
+    # Reports with conflicting provenance and reports that could not be read are different gaps.
+    comparable = [d for d in qualified if d.advice_from is not None and d.advice_to is not None]
+    unreadable = sum(d.advice_from is None or d.advice_to is None for d in diffs)
     inv_from = sum((d.advice_from or {}).get(ADVICE_INVESTIGATE, 0) for d in comparable)
     inv_to = sum((d.advice_to or {}).get(ADVICE_INVESTIGATE, 0) for d in comparable)
     return {
@@ -437,6 +457,7 @@ def _summarize(
         "version_to_short": short_revision(version_to),
         "compared": len(diffs),
         "changed": len(changed),
+        **({"version_conflict_pairs": conflict_pairs} if conflict_pairs else {}),
         "only_in_from": len(only_a),
         "only_in_to": len(only_b),
         "only_in_from_samples": list(only_a),
@@ -448,34 +469,34 @@ def _summarize(
         "advice_unreadable": unreadable,
         "advice_investigate_from": inv_from,
         "advice_investigate_to": inv_to,
-        "became_analyzable": sum(1 for d in diffs if any("由分析失败转为可分析" in n for n in d.notes)),
-        "became_unanalyzable": sum(1 for d in diffs if any("由可分析转为分析失败" in n for n in d.notes)),
+        "became_analyzable": sum(1 for d in qualified if any("由分析失败转为可分析" in n for n in d.notes)),
+        "became_unanalyzable": sum(1 for d in qualified if any("由可分析转为分析失败" in n for n in d.notes)),
         # 闭环状态取自报告全文，读不到时 closure_* 恒为 None，不得计入降级
         "closure_downgraded": sum(
-            1 for d in diffs
+            1 for d in qualified
             if d.advice_from is not None and d.advice_to is not None
             and d.closure_from == "complete" and d.closure_to != "complete"
         ),
-        "hardening_newly_detected": sum(1 for d in diffs if not d.hardened_from and d.hardened_to),
+        "hardening_newly_detected": sum(1 for d in qualified if not d.hardened_from and d.hardened_to),
         # ---- 证据可见性（中性计数，不给总评）----
         "visibility_comparable": sum(
-            1 for d in diffs if d.visibility_from is not None and d.visibility_to is not None
+            1 for d in qualified if d.visibility_from is not None and d.visibility_to is not None
         ),
         # 受限主张解除 = 须人核重点（警示消失即漏报放大）
         "visibility_blocked_cleared": sum(
-            1 for d in diffs
+            1 for d in qualified
             if d.visibility_from is not None and d.visibility_to is not None
             and set(d.visibility_from["blocked_claims"]) - set(d.visibility_to["blocked_claims"])
         ),
         "visibility_blocked_added": sum(
-            1 for d in diffs
+            1 for d in qualified
             if d.visibility_from is not None and d.visibility_to is not None
             and set(d.visibility_to["blocked_claims"]) - set(d.visibility_from["blocked_claims"])
         ),
         # ★只数「新版报告读得到、却没有可见性求值」；报告根本读不到走 advice_unreadable 口径，
         #   不折进来。反方向（旧版无求值 → 新版有）是旧 schema 升级，绝不与本计数合并。
         "visibility_assessment_lost": sum(
-            1 for d in diffs
+            1 for d in qualified
             if d.visibility_from is not None and d.visibility_to is None and d.advice_to is not None
         ),
     }

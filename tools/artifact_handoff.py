@@ -171,10 +171,14 @@ def inspect_handoff(
     artifact_id: str,
     outer_digest: str,
     accepted_inventory: str,
-    download: Callable[[], Path],
+    download: Callable[[str], Path],
 ) -> Check:
-    """Reject stale provenance before fetching, then inspect exactly that download."""
+    """Request the validated artifact ID, then verify its downloaded bytes.
+
+    The injected adapter is responsible for obtaining that ID from its transport;
+    this offline verifier cannot attest to what a remote service returned.
+    """
     identity = receipt_check(receiver, producer_context, artifact_id, outer_digest)
     if not identity.accepted:
         return identity
-    return archive_check(download(), accepted_inventory, outer_digest)
+    return archive_check(download(artifact_id), accepted_inventory, outer_digest)

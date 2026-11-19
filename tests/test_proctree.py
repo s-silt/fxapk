@@ -427,3 +427,66 @@ def test_descendant_failure_observation_precedes_fallback(
         assert "fixture-pid-before-cleanup: unreadable" in stderr
         assert "424242" not in stderr
         assert calls == ["observe", "cleanup"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX Linux process scan")
+@pytest.mark.parametrize(
+    ("observations", "unverified"),
+    [
+        (("zombie",), False),
+        (("gone",), False),
+        (("denied",), True),
+        (("running",), True),
+        (("older",), False),
+        (("zombie", "denied"), True),
+        (("denied", "gone"), True),
+    ],
+)
+def test_posix_scan_only_drops_confirmed_terminal_observations(
+    monkeypatch, observations, unverified
+):
+    from types import SimpleNamespace
+
+    pgid = 123
+
+    class Observation:
+        def __init__(self, pid, outcome):
+            self.pid = pid
+            self.outcome = outcome
+            self.status_count = 0
+
+        def status(self):
+            self.status_count += 1
+            if self.status_count == 1:
+                return psutil.STATUS_RUNNING
+            if self.outcome == "gone":
+                raise psutil.NoSuchProcess(self.pid)
+            if self.outcome == "denied":
+                raise psutil.AccessDenied(self.pid)
+            return psutil.STATUS_ZOMBIE if self.outcome == "zombie" else psutil.STATUS_RUNNING
+
+        def uids(self):
+            return SimpleNamespace(real=1000)
+
+        def environ(self):
+            raise psutil.AccessDenied(self.pid)
+
+        def create_time(self):
+            return 5.0 if self.outcome == "older" else 15.0
+
+    monkeypatch.setattr(
+        psutil, "process_iter",
+        lambda attrs: [Observation(600 + i, o) for i, o in enumerate(observations)],
+    )
+    monkeypatch.setattr(
+        proctree,
+        "os",
+        SimpleNamespace(getpid=lambda: 999, getuid=lambda: 1000, getpgid=lambda pid: 456),
+    )
+    monkeypatch.setattr(proctree, "_POSIX_TOKENS", {pgid: "synthetic"})
+    monkeypatch.setattr(proctree, "_POSIX_STARTED", {pgid: 10.0})
+    monkeypatch.setattr(proctree, "_POSIX_UNVERIFIED", set())
+
+    assert not list(proctree._posix_owned_processes(pgid))
+
+    assert (pgid in proctree._POSIX_UNVERIFIED) is unverified

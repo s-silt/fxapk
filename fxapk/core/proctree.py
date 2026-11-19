@@ -728,6 +728,11 @@ else:
     _POSIX_STARTED: dict[int, float] = {}
     _POSIX_UNVERIFIED: set[int] = set()
 
+    def _posix_mark_unverified(pgid: int, stage: str) -> None:
+        if pgid not in _POSIX_UNVERIFIED:
+            logger.debug("POSIX tree verification unavailable: stage=%s", stage)
+        _POSIX_UNVERIFIED.add(pgid)
+
     def _posix_owned_processes(pgid: int):
         """Keep Process identities when signaling; never expose environment contents."""
         import psutil
@@ -756,7 +761,14 @@ else:
                     continue
                 except psutil.AccessDenied:
                     pass
-                _POSIX_UNVERIFIED.add(pgid)
+                try:
+                    confirmed_terminal = proc.status() == psutil.STATUS_ZOMBIE
+                except (psutil.NoSuchProcess, ProcessLookupError):
+                    confirmed_terminal = True
+                except (psutil.AccessDenied, PermissionError):
+                    confirmed_terminal = False
+                if not confirmed_terminal:
+                    _posix_mark_unverified(pgid, "ownership_scan")
 
     def _posix_group_pids(pgid: int) -> list[int]:
         """已知仍存活的受控成员；读权限缺口另记，不能当成无后代。"""
@@ -778,7 +790,7 @@ else:
                 except psutil.NoSuchProcess:
                     pass
                 except psutil.AccessDenied:
-                    _POSIX_UNVERIFIED.add(pgid)
+                    _posix_mark_unverified(pgid, "individual_signal")
             if not owned or time.monotonic() >= deadline:
                 break
             time.sleep(_QUIESCE_INTERVAL)

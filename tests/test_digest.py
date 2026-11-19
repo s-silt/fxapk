@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from fxapk import cli
@@ -599,3 +600,45 @@ def test_digest_surfaces_jadx_index_status() -> None:
     # 旧报告（无该键）：整段省略，不出现空壳。
     d3 = build_digest({"meta": {}, "leads": []})
     assert "jadx_index" not in d3
+
+
+@pytest.mark.parametrize(
+    "report_fields",
+    [
+        {"completeness": 1.0},
+        {"analysis_status": "unrecognized", "completeness": 1.0},
+        {"analysis_status": [], "completeness": 1.0},
+        {"analysis_status": None, "completeness": 1.0},
+        {"analysis_status": "complete"},
+        {"analysis_status": "complete", "completeness": None},
+        {"analysis_status": "complete", "completeness": True},
+    ],
+)
+def test_integrity_requires_reported_status_and_completeness(report_fields) -> None:
+    result = build_digest({"leads": [], **report_fields})
+    assert result["integrity"]["reliable"] is False
+    assert result["integrity"]["warnings"]
+
+
+@pytest.mark.parametrize("raw", ["null", "[]", '"text"', "42", "true", "{"])
+def test_cli_digest_requires_json_object(tmp_path, raw) -> None:
+    report_path = tmp_path / "report.json"
+    report_path.write_text(raw, encoding="utf-8")
+    result = runner.invoke(cli.app, ["digest", str(report_path)])
+    assert result.exit_code == 1
+    assert not result.stdout
+    assert "错误" in result.stderr
+
+
+def test_build_digest_non_object_remains_tolerant() -> None:
+    assert build_digest(None) == {"error": "report 非 dict", "leads": []}
+
+
+def test_cli_digest_keeps_partial_legacy_json_readable(tmp_path) -> None:
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps({"meta": {}, "leads": []}), encoding="utf-8")
+    result = runner.invoke(cli.app, ["digest", str(report_path)])
+    assert result.exit_code == 0
+    assert "未记录工具版本" in result.stderr
+    summary = json.loads(result.stdout)
+    assert summary["integrity"]["reliable"] is False
