@@ -245,3 +245,38 @@ def test_diff_accepts_offline_review_task_ids_starting_with_a_hyphen() -> None:
     assert notes == {
         "state": "recorded", "failed": ["offline_review:-trace"], "skipped": ["manifest"],
     }
+
+
+@pytest.mark.parametrize(
+    ("old_package", "new_package", "warn"),
+    [
+        ("com.example.old", "com.example.new", True),
+        ("com.example.new", "com.example.old", True),
+        ("com.example.same", "com.example.same", False),
+        (None, "com.example.new", False),
+        ("com.example.old", " ", False),
+        (123, "com.example.new", False),
+    ],
+)
+def test_cli_identifies_cross_package_reports_without_suppressing_deltas(
+    tmp_path: Path, old_package: str | int | None, new_package: str, warn: bool,
+) -> None:
+    old_data = {
+        "meta": {"package_name": old_package},
+        "endpoints": [{"kind": "domain", "value": "synthetic.example.invalid"}],
+    }
+    new_data = {"meta": {"package_name": new_package}, "endpoints": []}
+    files = (tmp_path / "old.json", tmp_path / "new.json")
+    for path, data in zip(files, (old_data, new_data), strict=True):
+        path.write_text(json.dumps(data), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "fxapk.cli", "diff", *map(str, files), "--offline"],
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert ("不能当作同一应用的版本变化" in result.stderr) is warn
+    assert "com.example." not in result.stderr
+    expected = diff_reports(old_data, new_data)
+    expected.pop("manifest_declarations")
+    expected.pop("analysis_notes")
+    assert json.loads(result.stdout) == expected
