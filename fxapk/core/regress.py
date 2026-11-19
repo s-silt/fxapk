@@ -56,7 +56,7 @@ class SampleDiff:
     # 计数类（None 表示该版无此样本）
     counts_from: dict[str, int] = field(default_factory=dict)
     counts_to: dict[str, int] = field(default_factory=dict)
-    #: None = 该版报告读不到（缺文件/坏 JSON），与「读到了但零线索」的 {} 严格区分。
+    #: None = 分档不可观察（报告未通过校验或 leads 缺失/坏形状），不等于确证零线索 {}。
     advice_from: dict[str, int] | None = None
     advice_to: dict[str, int] | None = None
     #: 证据可见性指纹（:func:`corpus.visibility_summary`）。None = 该版报告没有可见性求值——
@@ -70,6 +70,12 @@ class SampleDiff:
     notes: list[str] = field(default_factory=list)
     #: Reports may be readable but explicitly disagree about which build produced them.
     version_conflict_sides: tuple[str, ...] = ()
+    #: The stored report could not be read and validated; independent of the lead array.
+    unreadable_report_sides: tuple[str, ...] = ()
+
+    @property
+    def comparison_blocked(self) -> bool:
+        return bool(self.version_conflict_sides or self.unreadable_report_sides)
 
     @property
     def changed(self) -> bool:
@@ -97,12 +103,12 @@ def _load_report(corpus_dir: Path, entry: dict) -> dict | None:
 
 
 def advice_counts(report: dict | None) -> dict[str, int] | None:
-    """报告里各 advice 档的线索条数；**报告不可读时返回 None**。★这是判断「降噪是否有效」的核心指标。
+    """报告里各 advice 档的线索条数；报告不可读或 leads 不是列表时返回 None。
 
     manifest 只存线索总数，不分档；而「建议调证」条数才是办案人实际面对的清单长度——
     实测一次降噪把它从 89 压到 24，总数却只从 107 降到 87，只看总数完全看不出来。
 
-    ★``None`` 与 ``{}`` 必须分开：前者是「这份报告读不到」，后者是「读到了，确实零线索」。曾把
+    ★``None`` 与 ``{}`` 必须分开：前者是「线索分档不可观察」，后者是「观察到了，确实零线索」。曾把
     两者都折叠成 ``{}``，于是报告文件缺失会被渲染成「建议调证 24 → 0（降噪）」——凭空捏造一个
     并不存在的改进。本模块的立意就是别把缺失当不存在，不能在自己内部先犯这个错。
     """
@@ -271,14 +277,14 @@ def diff_versions(
             package_name=eb.get("package_name") or ea.get("package_name"),
             case_ids=case_ids,
             case_id=case_ids[0] if len(case_ids) == 1 else None,
-            status_from=ea.get("analysis_status"),
-            status_to=eb.get("analysis_status"),
+            status_from=ea.get("analysis_status") if ra is not None else None,
+            status_to=eb.get("analysis_status") if rb is not None else None,
             closure_from=_closure_status(ra),
             closure_to=_closure_status(rb),
-            hardened_from=ea.get("is_hardened"),
-            hardened_to=eb.get("is_hardened"),
-            counts_from=_safe_counts(ea),
-            counts_to=_safe_counts(eb),
+            hardened_from=ea.get("is_hardened") if ra is not None else None,
+            hardened_to=eb.get("is_hardened") if rb is not None else None,
+            counts_from=_safe_counts(ea) if ra is not None else {},
+            counts_to=_safe_counts(eb) if rb is not None else {},
             advice_from=advice_counts(ra),
             advice_to=advice_counts(rb),
             # ★读报告全文而非 manifest 投影：upsert 按主键幂等跳过，存量行在 reindex 前没有
@@ -289,8 +295,11 @@ def diff_versions(
                 side for side, report in (("from", ra), ("to", rb))
                 if _has_version_provenance_conflict(report)
             ),
+            unreadable_report_sides=tuple(
+                side for side, report in (("from", ra), ("to", rb)) if report is None
+            ),
         )
-        if not d.version_conflict_sides:
+        if not d.comparison_blocked:
             fa, fb = _safe_finding_ids(ea), _safe_finding_ids(eb)
             d.findings_added = sorted(fb - fa)
             d.findings_removed = sorted(fa - fb)
@@ -340,15 +349,13 @@ def _direction_notes(d: SampleDiff) -> list[str]:
     # ★任一侧报告读不到 → 这两版之间的「线索/闭环」根本无从比较，只如实说读不到，绝不下结论。
     #   曾把读不到折叠成空值，于是缺一份报告就会渲染出「建议调证 24 → 0（降噪）」和
     #   「闭环 complete → None（降级）」——凭空捏造并不存在的改进与劣化。
-    unreadable = [
-        label for label, adv in (("旧版", d.advice_from), ("新版", d.advice_to)) if adv is None
-    ]
-    if unreadable:
-        notes.append(f"⚠ {'、'.join(unreadable)}报告读不到（缺文件或坏 JSON），线索与闭环无法对比")
+    if d.unreadable_report_sides:
+        labels = "、".join("旧版" if side == "from" else "新版" for side in d.unreadable_report_sides)
+        notes.append(f"⚠ {labels}报告读不到或无法校验，不判定回归方向")
     if d.version_conflict_sides:
         labels = "、".join("旧版" if side == "from" else "新版" for side in d.version_conflict_sides)
         notes.append(f"⚠ {labels}报告版本出处冲突，不判定回归方向")
-    if notes:
+    if d.comparison_blocked:
         return notes
 
     # 载入失败 → 成功：方向明确的改善（实测两个样本正是从整包被拒变为可分析）
@@ -367,10 +374,13 @@ def _direction_notes(d: SampleDiff) -> list[str]:
     if d.closure_from != "complete" and d.closure_to == "complete":
         notes.append(f"闭环 {d.closure_from} → complete（须人核：是否证据确实变足）")
     # 建议调证条数：只报变化幅度，不判好坏
-    a = (d.advice_from or {}).get(ADVICE_INVESTIGATE, 0)
-    b = (d.advice_to or {}).get(ADVICE_INVESTIGATE, 0)
-    if a != b:
-        notes.append(f"建议调证 {a} → {b}（{'降噪' if b < a else '新增'}，须抽样核对是否误杀/误报）")
+    if d.advice_from is None or d.advice_to is None:
+        notes.append("⚠ 报告可读，但至少一版线索分档不可比")
+    else:
+        a = d.advice_from.get(ADVICE_INVESTIGATE, 0)
+        b = d.advice_to.get(ADVICE_INVESTIGATE, 0)
+        if a != b:
+            notes.append(f"建议调证 {a} → {b}（{'降噪' if b < a else '新增'}，须抽样核对是否误杀/误报）")
     notes.extend(_visibility_notes(d))
     return notes
 
@@ -440,13 +450,16 @@ def _summarize(
     diffs: list[SampleDiff], only_a: list[str], only_b: list[str],
     version_from: str, version_to: str,
 ) -> dict[str, Any]:
-    qualified = [d for d in diffs if not d.version_conflict_sides]
-    conflict_pairs = len(diffs) - len(qualified)
+    qualified = [d for d in diffs if not d.comparison_blocked]
+    blocked_pairs = len(diffs) - len(qualified)
+    conflict_pairs = sum(bool(d.version_conflict_sides) for d in diffs)
+    unreadable_report_pairs = sum(bool(d.unreadable_report_sides) for d in diffs)
     changed = [d for d in qualified if d.changed]
     added = Counter(f for d in qualified for f in d.findings_added)
     removed = Counter(f for d in qualified for f in d.findings_removed)
     # Reports with conflicting provenance and reports that could not be read are different gaps.
     comparable = [d for d in qualified if d.advice_from is not None and d.advice_to is not None]
+    advice_only_gaps = len(qualified) - len(comparable)
     unreadable = sum(d.advice_from is None or d.advice_to is None for d in diffs)
     inv_from = sum((d.advice_from or {}).get(ADVICE_INVESTIGATE, 0) for d in comparable)
     inv_to = sum((d.advice_to or {}).get(ADVICE_INVESTIGATE, 0) for d in comparable)
@@ -457,7 +470,9 @@ def _summarize(
         "version_to_short": short_revision(version_to),
         "compared": len(diffs),
         "changed": len(changed),
+        **({"comparison_blocked_pairs": blocked_pairs} if blocked_pairs else {}),
         **({"version_conflict_pairs": conflict_pairs} if conflict_pairs else {}),
+        **({"unreadable_report_pairs": unreadable_report_pairs} if unreadable_report_pairs else {}),
         "only_in_from": len(only_a),
         "only_in_to": len(only_b),
         "only_in_from_samples": list(only_a),
@@ -466,6 +481,7 @@ def _summarize(
         "findings_removed_total": dict(removed.most_common()),
         # 建议调证合计的分母：仅两侧报告都可读的样本数（其余样本不参与合计）
         "advice_comparable": len(comparable),
+        **({"advice_only_gaps": advice_only_gaps} if advice_only_gaps else {}),
         "advice_unreadable": unreadable,
         "advice_investigate_from": inv_from,
         "advice_investigate_to": inv_to,

@@ -762,3 +762,98 @@ def test_regress_excludes_explicit_version_conflict_from_claims(tmp_path, confli
     assert readable.exit_code == 0
     assert "1 个样本版本出处冲突，未计入回归统计" in readable.stdout
     assert "+ NEW" not in readable.stdout and "- OLD" not in readable.stdout
+
+
+@pytest.mark.parametrize("missing_sides", [("from",), ("to",), ("from", "to")])
+def test_unreadable_report_cannot_contribute_unverified_direction(tmp_path, missing_sides):
+    roots = [
+        _report("unreadable", "2.0.0", status="failed", findings=["OLD"]),
+        _report("unreadable", "2.1.0", hardened=True, findings=["UNVERIFIED"]),
+        _report("control", "2.0.0", status="failed"),
+        _report("control", "2.1.0", findings=["CONTROL"]),
+    ]
+    root = _seed(tmp_path, roots)
+    rows = corpus.load_materialized_manifest(root)
+    for label, version in (("from", "2.0.0"), ("to", "2.1.0")):
+        if label in missing_sides:
+            [row] = [
+                x for x in rows
+                if x["sample_sha256"] == corpus.sample_identity(roots[0])[0]
+                and x["tool_version"] == version
+            ]
+            (root / row["report_path"]).unlink()
+
+    diffs, summary = regress.load_and_diff(root, "2.0.0@dd", "2.1.0@dd")
+    assert summary["compared"] == 2
+    assert summary["changed"] == 1
+    assert summary["unreadable_report_pairs"] == 1
+    assert summary["findings_added_total"] == {"CONTROL": 1}
+    assert not summary["findings_removed_total"]
+    assert summary["hardening_newly_detected"] == 0
+    assert summary["became_analyzable"] == 1
+    blocked = next(d for d in diffs if d.unreadable_report_sides == missing_sides)
+    assert blocked.notes and "读不到" in blocked.notes[0]
+    assert not blocked.findings_added and not blocked.findings_removed
+    for label in missing_sides:
+        assert getattr(blocked, f"status_{label}") is None
+        assert getattr(blocked, f"hardened_{label}") is None
+
+
+def test_readable_legacy_without_lead_array_is_not_missing_report(tmp_path):
+    first = _report("legacy", "2.0.0", status="failed")
+    second = _report("legacy", "2.1.0", findings=["CONTROL"], hardened=True)
+    del first["leads"]
+    root = _seed(tmp_path, [first, second])
+    [detail], summary = regress.load_and_diff(root, "2.0.0@dd", "2.1.0@dd")
+    assert not detail.unreadable_report_sides
+    assert "unreadable_report_pairs" not in summary
+    assert summary["advice_comparable"] == 0
+    assert summary["advice_only_gaps"] == 1
+    assert summary["findings_added_total"] == {"CONTROL": 1}
+    assert summary["hardening_newly_detected"] == 1
+    assert any("线索分档" in note and "不可比" in note for note in detail.notes)
+    assert not any("报告读不到" in note for note in detail.notes)
+
+
+def test_cli_reports_unreadable_side_without_publishing_a_delta(tmp_path):
+    from typer.testing import CliRunner
+
+    from fxapk import cli
+
+    missing_new = _report("missing-fixture", "2.1.0", findings=["DO-NOT-COUNT"], hardened=True)
+    root = _seed(tmp_path, [
+        _report("missing-fixture", "2.0.0", status="failed", findings=["OLD"]),
+        missing_new,
+    ])
+    (root / corpus.report_relpath(missing_new)).unlink()
+    args = ["corpus", "regress", "--corpus", str(root), "--from", "2.0.0@dd", "--to", "2.1.0@dd"]
+    output = CliRunner().invoke(cli.app, [*args, "--json"])
+    assert output.exit_code == 0, output.output
+    doc = json.loads(output.stdout)
+    [item] = doc["diffs"]
+    assert item["unreadable_report_sides"] == ["to"]
+    assert item["status"] == ["failed", None]
+    assert item["findings_added"] == [] and item["findings_removed"] == []
+    assert doc["summary"]["compared"] == 1 and doc["summary"]["changed"] == 0
+
+    readable = CliRunner().invoke(cli.app, args)
+    assert readable.exit_code == 0, readable.output
+    assert "至少一版报告读不到，未计入回归统计" in readable.stdout
+    assert "DO-NOT-COUNT" not in readable.stdout
+    assert "加固新检出 0" in readable.stdout
+
+
+def test_unreadable_and_conflicting_provenance_keep_both_reasons(tmp_path):
+    first = _report("mixed", "2.0.0")
+    second = _report("mixed", "2.1.0", findings=["UNVERIFIED"], hardened=True)
+    second["meta"]["tool_version_provenance"] = {"consistency": "conflict"}
+    root = _seed(tmp_path, [first, second])
+    (root / corpus.report_relpath(first)).unlink()
+    [delta], summary = regress.load_and_diff(root, "2.0.0@dd", "2.1.0@dd")
+    assert delta.unreadable_report_sides == ("from",)
+    assert delta.version_conflict_sides == ("to",)
+    assert summary["unreadable_report_pairs"] == summary["version_conflict_pairs"] == 1
+    assert summary["comparison_blocked_pairs"] == 1
+    assert "advice_only_gaps" not in summary
+    assert len(delta.notes) == 2
+    assert not delta.findings_added and summary["hardening_newly_detected"] == 0
