@@ -24,6 +24,9 @@ fxapk dex --help
 查询，不会连接设备。`dex query` 仍需显式调用，并在隔离进程中执行。
 插件源码采用 MIT 许可（见 `LICENSE`）；第三方依赖遵循各自许可。
 
-依赖锁定见 `requirements.lock`。Linux 的 `RLIMIT_AS` 已在代码里实现，但本仓库的
-实跑记录只覆盖 Windows 作业对象。macOS 上 `RLIMIT_AS` 不可用，`dex query` 以
-`memory_limit_unavailable` 拒绝执行，不降级运行。
+依赖锁定见 `requirements.lock`。安装后先运行 `fxapk dex capabilities`：
+`available: true` 只表示固定版本的隔离进程可用，不表示已运行查询，也不表示有检出结果。
+
+Linux CI 用固定依赖实跑合成 DEX 查询（不是发布 wheel 的安装验收）。Linux 按
+`RLIMIT_AS` 限内存，不限制进程数；Windows 使用作业对象。macOS 上 `RLIMIT_AS`
+不可用，`dex query` 以 `memory_limit_unavailable` 拒绝执行，不降级运行。
