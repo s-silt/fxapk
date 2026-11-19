@@ -10,8 +10,6 @@ from functools import lru_cache
 from importlib.resources import files
 from typing import Any
 
-import yaml
-
 _CATEGORIES = ("all", "free", "registered", "paid")
 
 
@@ -19,6 +17,8 @@ _CATEGORIES = ("all", "free", "registered", "paid")
 def _catalog() -> dict[str, Any]:
     # Both loaders are safe constructors; use libyaml when available to avoid
     # a large one-time pure-Python parse on the first pre-report projection.
+    import yaml
+
     loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
     payload = yaml.load(files("fxapk").joinpath("rules/source_access.yaml").read_text(encoding="utf-8"), Loader=loader)
     if not isinstance(payload, dict) or not isinstance(payload.get("sources"), list):

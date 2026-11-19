@@ -15,18 +15,12 @@ import json as _json
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from fxapk.core import corpus as _corpus
 from fxapk.core import corpus_catalog as _catalog
-from fxapk.core import linkage as _linkage
-from fxapk.core import linkage_discovery as _linkage_discovery
-from fxapk.core import linkage_evaluation as _linkage_evaluation
-from fxapk.core import linkage_labels as _linkage_labels
-from fxapk.core import linkage_ml as _linkage_ml
-from fxapk.core import linkage_review as _linkage_review
-from fxapk.core import linkage_training as _linkage_training
 from fxapk.core.atomic import atomic_create_bytes
 from fxapk.core.integrity import sha256_file, sha256_hex
 from fxapk.core.json_contract import (
@@ -40,6 +34,10 @@ from fxapk.core.json_io import (
     read_bytes_bounded,
 )
 from fxapk.core.redact import safe_exception_diagnostic, safe_exception_text, warn_unredacted_agent_output
+
+if TYPE_CHECKING:
+    from fxapk.core import linkage_labels as _linkage_labels
+    from fxapk.core import linkage_ml as _linkage_ml
 
 logger = logging.getLogger(__name__)
 
@@ -435,6 +433,9 @@ def corpus_link_candidates(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """按可解释技术锚生成串案候选；分数是复核优先级，不是同主体概率。"""
+    from fxapk.core import linkage as _linkage
+    from fxapk.core import linkage_ml as _linkage_ml
+
     # ★纯空白的 --case 是输入错误：静默退化成无过滤会让人把全量结果当成过滤后的结果。
     if case and not case.strip():
         raise typer.BadParameter("不能是纯空白", param_hint="--case")
@@ -461,6 +462,8 @@ def corpus_link_candidates(
 
 def _load_private_linkage_labels(path: Path) -> _linkage_labels.LinkageLabelSet:
     """Load labels outside a git worktree and map safe failures to CLI exits."""
+    from fxapk.core import linkage_labels as _linkage_labels
+
     if _inside_git_worktree(path):
         typer.echo("错误：标签文件必须位于 git 工作树外，避免私有标签被误提交。", err=True)
         raise typer.Exit(code=2)
@@ -480,6 +483,8 @@ def _load_private_linkage_labels(path: Path) -> _linkage_labels.LinkageLabelSet:
 
 def _load_private_linkage_model(path: Path) -> _linkage_ml.LinkageModelArtifact:
     """Load a strict aggregate-only challenger artifact outside the worktree."""
+    from fxapk.core import linkage_ml as _linkage_ml
+
     if _inside_git_worktree(path):
         typer.echo("错误：实验模型文件必须位于 git 工作树外，避免被误提交。", err=True)
         raise typer.Exit(code=2)
@@ -504,6 +509,8 @@ def corpus_link_labels_validate(
     ),
 ) -> None:
     """严格校验私有串案标签；只输出聚合计数，不回显任何标签值。"""
+    from fxapk.core import linkage_labels as _linkage_labels
+
     validated = _load_private_linkage_labels(labels)
     try:
         _linkage_labels.build_linkage_ground_truth(validated)
@@ -548,6 +555,9 @@ def corpus_link_evaluate(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """用私有标签离线评测串案候选；stdout 只含聚合指标。"""
+    from fxapk.core import linkage_evaluation as _linkage_evaluation
+    from fxapk.core import linkage_labels as _linkage_labels
+
     if engine != "rules-v2":
         raise typer.BadParameter("当前仅支持 rules-v2", param_hint="--engine")
     validated = _load_private_linkage_labels(labels)
@@ -599,6 +609,9 @@ def corpus_link_discover(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """从已确认关系组中发现重复技术锚；只供人工复核，不自动改规则或并案。"""
+    from fxapk.core import linkage_discovery as _linkage_discovery
+    from fxapk.core import linkage_labels as _linkage_labels
+
     if evidence_values not in {"omit", "raw"}:
         raise typer.BadParameter("仅支持 omit 或 raw", param_hint="--evidence-values")
     if min_member_fraction <= 0.0:
@@ -656,6 +669,8 @@ def corpus_link_explain(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """解释一个规则候选的支持、排除、覆盖缺口和 caps；默认不输出原始标识符。"""
+    from fxapk.core import linkage_review as _linkage_review
+
     _validate_evidence_values(evidence_values)
     if evidence_values == "raw":
         warn_unredacted_agent_output(
@@ -701,6 +716,8 @@ def corpus_link_groups(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """按真实候选边生成 review_groups；传递相连不会被伪造成直接关联。"""
+    from fxapk.core import linkage_review as _linkage_review
+
     _validate_evidence_values(evidence_values)
     if evidence_values == "raw":
         warn_unredacted_agent_output(
@@ -746,6 +763,11 @@ def corpus_link_readiness(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """检查两档门槛：生产训练档（顶层，原样 fail-closed）与 rules-v2 封顶回归档（只 gate 规则封顶声明）。"""
+    from fxapk.core import linkage_evaluation as _linkage_evaluation
+    from fxapk.core import linkage_labels as _linkage_labels
+    from fxapk.core import linkage_ml as _linkage_ml
+    from fxapk.core import linkage_training as _linkage_training
+
     if not 0.0 < test_fraction < 1.0:
         raise typer.BadParameter("必须在 (0, 1) 范围内", param_hint="--test-fraction")
     if not 0 <= seed <= 2**32 - 1:
@@ -817,6 +839,10 @@ def corpus_link_train(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """在默认数据门槛和组隔离门通过后训练实验 challenger；当前数据不足会明确阻断。"""
+    from fxapk.core import linkage_labels as _linkage_labels
+    from fxapk.core import linkage_ml as _linkage_ml
+    from fxapk.core import linkage_training as _linkage_training
+
     if _inside_git_worktree(model_out):
         typer.echo("错误：实验模型输出必须位于 git 工作树外，避免被误提交。", err=True)
         raise typer.Exit(code=2)

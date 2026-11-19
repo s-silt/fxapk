@@ -11,9 +11,7 @@ from copy import deepcopy
 from dataclasses import replace
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
-
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from typing import TYPE_CHECKING, Any
 
 from fxapk.core import infra
 from fxapk.core.coverage import collect_coverage
@@ -29,6 +27,9 @@ from fxapk.core.models import (
     LeadCategory,
     Report,
 )
+
+if TYPE_CHECKING:
+    from jinja2 import Environment
 
 _TEMPLATE_NAME = "report.html.j2"
 
@@ -373,6 +374,8 @@ def _build_environment(template_dir: str) -> Environment:
     使打包形态（PyInstaller onefile，资源不是真实目录）下仍能定位模板，且保持原有
     FileSystemLoader + autoescape/trim_blocks/lstrip_blocks 行为不变（最小化偏移）。
     """
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+
     env = Environment(
         loader=FileSystemLoader(template_dir),
         autoescape=select_autoescape(["html", "htm", "xml", "j2"]),
