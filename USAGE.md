@@ -102,6 +102,18 @@
 
 ## 采集与探针记录
 
+**抓包提示「网络受限」时，先看提示出现在哪里。**
+
+- **运行环境拒绝连接**：主机可能分别限制出站连接、本机回环和设备访问。fxapk 参数不能改变这些权限。
+- **手机或 App 在开始抓包后无网**：先看设备自身连通性，再看日志中的代理启动、ADB 转发和代理恢复记录。没抓到流量不等于 App 没联网。
+- **第三方归属查询失败**：这不等于抓包失败。`auto --offline` 只关闭第三方联网富化，不阻断设备上的 App 流量。`capture` 没有 `--offline` 参数。
+
+**运行前注意：** `auto --no-fix` 只关闭体检修复，仍可能安装和运行 App。`capture --mode floor-only` 不新设代理，但可能清理由 fxapk 上次运行遗留的代理。只在已授权的测试设备上采集。
+
+**看退出结果：** `capture` 的采集错误、跳过、降级分别为 1、2、3；归档失败单独报告。`auto --strict-case` 的 0、5、6 是闭环结果；写出失败可能返回 1，人工取消返回 130。
+
+**只检查能力、不查富化连通性：** 用 `fxapk selfcheck --offline`。当前单用 `--no-probe` 不会阻止富化连通性探测。`--offline` 仍会检查本机工具与设备可用性。
+
 - `recover-runtime` 仅观察显式计划中的已运行进程；`proc_mem` 读取选定页，不采 JNI，`frida` 观察 DEX/JNI。最多 32 段、合计 32 MiB、每段 8 MiB，要求页对齐并核对进程启动标识。取得的 DEX 原字节接入 `analyze --offline --extra-dex`、方法验证和真实 JADX 子进程。重分析从报告顶层读取 `analysis_status`，后续成功不抹掉此前失败；`unpack` 请求的重分析失败时返回 error 并保留已取得 DEX。命令不安装/启动 App，不部署 Frida、不改代理或目标方法；详见 [RECOVERY-PIPELINE.md](RECOVERY-PIPELINE.md)。
 - `no-proxy` 观察轮不请求 TLS 校验修改；MITM 轮与原版 `floor-only` 轮分别留档。
   OkHttp 不再次执行请求正文的 `writeTo()`，正文标为 `not_read_non_interference`；
