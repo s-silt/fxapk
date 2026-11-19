@@ -66,11 +66,13 @@ This reference lists public core top-level commands and groups. Use each entryâ€
 
 When the reports record different non-empty package names, the command warns on stderr that these are differences between reports, not version changes in the same app. The comparison still runs, and stdout JSON is unchanged.
 
-Use `--report-details` to include the next two fields. Without it, the top-level keys stay unchanged.
+Use `--report-details` to include the fields below. Without it, the top-level keys stay unchanged.
 
-`manifest_declarations` compares numeric `min_sdk` and `target_sdk` values read from reports with the same package name. Each field is evaluated separately. If either side lacks a reliable number, the field is `not_observed`; the command does not substitute a default. Matching package names do not prove matching signers.
+`manifest_declarations` compares numeric `min_sdk` and `target_sdk` values read from reports with the same package name. Each field is evaluated separately. If either side lacks a reliable number, or its Manifest is untrustworthy (for example, APK validation failed), the field is `not_observed`. Even a recorded number from that side is not compared, and no default is substituted. Matching package names do not prove matching signers.
 
 `analysis_notes` lists failures and skips recorded by each report, without free-form error messages. `not_recorded` means no analyzer status was recorded; `invalid` means the status records are unusable. These notes neither certify list coverage nor change any counts or deltas.
+
+`coverage_observations.java` shows what JADX covered in each report, separately from analyzer execution. It exposes only the known partial-output (`producer_partial`) and file-count-limit (`scan_limit_hit`) codes, not raw diagnostics. An older report that only says JADX succeeded, without a coverage receipt, is `unknown`. This does not change endpoint differences or certify exhaustive coverage.
 
 ## Privacy and output
 

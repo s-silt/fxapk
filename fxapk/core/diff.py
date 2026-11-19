@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Literal, TypedDict
 
+from fxapk.core.visibility import manifest_observation_unavailable
+
 
 _ABSENT = object()
 
@@ -75,7 +77,10 @@ def _declared_sdk(report: dict, meta: dict, field: str) -> _Declaration:
     manifest = [
         row for row in statuses if isinstance(row, dict) and row.get("name") == "manifest"
     ] if isinstance(statuses, list) else []
-    if len(manifest) != 1 or manifest[0].get("status") != "ran" or meta.get("manifest_anomaly"):
+    if (
+        len(manifest) != 1 or manifest[0].get("status") != "ran"
+        or meta.get("manifest_anomaly") or manifest_observation_unavailable(meta)
+    ):
         return {"value": None, "reason": "manifest_unobserved"}
     value = meta.get(field)
     if type(value) is not int or value <= 0:

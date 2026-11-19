@@ -242,6 +242,7 @@ def test_empty_manifest_records_error_no_crash() -> None:
     assert result.error is not None
     # 即便解析失败，meta 仍带 ctx 回退包名。
     assert result.meta["package_name"] == "com.empty.app"
+    assert result.meta["manifest_parse_reason"] == "manifest_xml_empty"
     assert result.findings == []
 
 
@@ -249,6 +250,7 @@ def test_malformed_xml_records_error_no_crash() -> None:
     result = _run("<manifest><application></manifest", package_name="com.broken.app")
     assert result.error is not None
     assert result.meta["package_name"] == "com.broken.app"
+    assert result.meta["manifest_parse_reason"] == "manifest_xml_malformed"
 
 
 def test_xxe_dtd_entity_is_rejected() -> None:

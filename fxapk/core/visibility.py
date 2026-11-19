@@ -95,7 +95,7 @@ INSUFFICIENT = _INSUFFICIENT
 #: 每个可见性维度实际消费的 ``report.meta`` 原始信号键。快照会记录本轮见到的键集合，
 #: 让后续刷新能区分「合法新增信号」与「旧报告被裁掉了部分输入」。
 _INPUT_KEYS_BY_SOURCE: dict[str, tuple[str, ...]] = {
-    "manifest": ("apk_validation_ok",),
+    "manifest": ("apk_validation_ok", "manifest_analysis_failed", "manifest_parse_reason"),
     "dex": (
         "dex_available", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
         "is_hardened", "hardening_structural", "extra_dex_visibility", "artifact_lineage",
@@ -132,13 +132,25 @@ def _meta(report: Any) -> dict:
 
 
 def _manifest_visibility(meta: dict) -> tuple[str, list[str]]:
-    """Manifest 校验是稀疏事件：键缺失表示本次没有校验失败事件。"""
+    """区分 APK 校验拒绝和清单分析失败；缺信号沿用旧报告兼容口径。"""
     if meta.get("apk_validation_ok") is False:
         return VIS_UNAVAILABLE, [
             "APK 合法性校验未通过（apk_validation_ok=False）："
             "Manifest/包名/组件/权限面不可信，相关『未发现』不构成完整结论"
         ]
+    if meta.get("manifest_analysis_failed") is True:
+        reason = meta.get("manifest_parse_reason")
+        if not isinstance(reason, str) or reason not in ("manifest_xml_empty", "manifest_xml_malformed"):
+            reason = "manifest_analyzer_error"
+        return VIS_UNAVAILABLE, [
+            f"Manifest 分析未成功完成（{reason}）：清单面不能作穷尽性结论"
+        ]
     return VIS_COMPLETE, []
+
+
+def manifest_observation_unavailable(meta: dict) -> bool:
+    """Share authoritative Manifest coverage failures with report consumers."""
+    return _manifest_visibility(meta)[0] == VIS_UNAVAILABLE
 
 
 def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
@@ -275,6 +287,20 @@ def _java_visibility(meta: dict) -> tuple[str, list[str]]:
             "旧报告：jadx_status=ok 但无 coverage receipt，读失败/截断/清理无从核对，完整性未评估"
         ]
     return VIS_UNKNOWN, ["Java 面无扫描信号（jadx 未运行，或旧报告）"]
+
+
+def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
+    """Project Java coverage without emitting report-supplied diagnostic text."""
+    meta = _meta(report)
+    state, _ = _java_visibility(meta)
+    receipt = meta.get("jadx_receipt")
+    raw = receipt.get("reason_codes") if isinstance(receipt, dict) else None
+    allowed = ("producer_partial", "scan_limit_hit")
+    codes = (
+        sorted({code for code in raw if isinstance(code, str) and code in allowed})
+        if state == VIS_PARTIAL and isinstance(raw, list) else []
+    )
+    return {"state": state, "reason_codes": codes}
 
 
 def _native_visibility(meta: dict) -> tuple[str, list[str]]:
@@ -475,10 +501,16 @@ def _next_actions(sources: dict, remediation: str, meta: dict) -> list[str]:
     runtime = sources.get("runtime", {}).get("visibility")
 
     if sources.get("manifest", {}).get("visibility") == VIS_UNAVAILABLE:
-        actions.append(
-            "Manifest 校验失败：重新取得原始 APK，并用 Android 安装/解析工具交叉核验包名、组件与权限；"
-            "在核验前保留 DEX/JADX 阳性发现，但不得把 Manifest 面的『未发现』当成不存在"
-        )
+        if meta.get("apk_validation_ok") is False:
+            actions.append(
+                "Manifest 校验失败：重新取得原始 APK，并用 Android 安装/解析工具交叉核验包名、组件与权限；"
+                "在核验前保留 DEX/JADX 阳性发现，但不得把 Manifest 面的『未发现』当成不存在"
+            )
+        else:
+            actions.append(
+                "Manifest 覆盖不足：核对清单格式与分析日志，保留其他来源的阳性发现；"
+                "未核实前不得把清单面的『未发现』当成不存在"
+            )
 
     if dex in (VIS_STUB_ONLY, VIS_UNAVAILABLE) and remediation != REM_REANALYZED:
         actions.append(

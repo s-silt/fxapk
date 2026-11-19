@@ -213,3 +213,79 @@ def test_jadx_execution_receipt_reaches_visibility(fake_ctx, monkeypatch) -> Non
     assert vis["sources"]["java"]["visibility"] == "failed"
     assert "static_endpoint_exhaustive" in vis["blocked_claims"]
     assert "no_hardcoded_credential" in vis["blocked_claims"]
+
+
+def test_manifest_analyzer_error_blocks_exhaustive_claim_and_survives_refresh(fake_ctx, monkeypatch):
+    from fxapk.core.closure import refresh_visibility_snapshot
+    from fxapk.core.models import AnalyzerResult
+
+    class _ManifestWithError:
+        name = "manifest"
+        requires = []
+
+        def analyze(self, ctx):
+            return AnalyzerResult(analyzer="manifest", error="synthetic parse failure")
+
+    _stub_discovery(monkeypatch, analyzers=[_ManifestWithError()])
+    report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
+    assert "manifest" in report.critical_failures
+    assert report.meta.get("apk_validation_ok") is not False
+    assert report.meta["visibility"]["sources"]["manifest"]["visibility"] == "unavailable"
+    assert "static_endpoint_exhaustive" in report.meta["visibility"]["blocked_claims"]
+
+    refresh_visibility_snapshot(report.meta)
+    source = report.meta["visibility"]["sources"]["manifest"]
+    assert source["visibility"] == "unavailable"
+    assert any("manifest_analyzer_error" in why for why in source["why"])
+    assert all("synthetic parse failure" not in why for why in source["why"])
+
+    report.meta.pop("manifest_analysis_failed")
+    refresh_visibility_snapshot(report.meta)
+    cropped = report.meta["visibility"]
+    assert cropped["sources"]["manifest"]["visibility"] == "unavailable"
+    assert any("Manifest 覆盖不足" in action for action in cropped["next_actions"])
+    assert all("Manifest 校验失败" not in action for action in cropped["next_actions"])
+
+
+def test_manifest_parse_reason_reaches_json_and_digest(tmp_path, monkeypatch):
+    import json
+
+    from typer.testing import CliRunner
+
+    from fxapk import cli
+    from fxapk.analyzers.manifest import ManifestAnalyzer
+    from fxapk.report.json import dump
+    from tests.conftest import FakeContext
+
+    _stub_discovery(monkeypatch, analyzers=[ManifestAnalyzer()])
+    cases = [
+        ("", "manifest_xml_empty"),
+        ("<manifest><application></manifest", "manifest_xml_malformed"),
+        ("<manifest><application/></manifest>", None),
+    ]
+    for index, (xml, expected) in enumerate(cases):
+        report = pipeline.run(FakeContext(manifest_xml=xml), AnalysisConfig(online=False))
+        assert report.meta.get("manifest_parse_reason") == expected
+        assert ("manifest" in report.critical_failures) == (expected is not None)
+        path = tmp_path / f"report-{index}.json"
+        dump(report, str(path))
+        result = CliRunner().invoke(cli.app, ["digest", str(path)])
+        assert result.exit_code == 0, result.output
+        evidence = json.loads(result.stdout)["visibility"]
+        if expected is None:
+            assert evidence["sources"]["manifest"] == "complete"
+        else:
+            assert evidence["sources"]["manifest"] == "unavailable"
+            assert any(expected in note for note in evidence["notes"])
+
+
+def test_unknown_manifest_parse_reason_uses_stable_fallback() -> None:
+    from fxapk.core import visibility
+
+    private_text = "unrecognized synthetic marker"
+    assessment = visibility.assess({"meta": {
+        "manifest_analysis_failed": True,
+        "manifest_parse_reason": private_text,
+    }})
+    assert all(private_text not in note for note in assessment["notes"])
+    assert any("manifest_analyzer_error" in note for note in assessment["notes"])
