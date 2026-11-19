@@ -937,10 +937,11 @@ def test_jadx_coverage_report_html(jadx_coverage_report: _JadxCoverageReport) ->
         assert mark in section
         row = section.split(mark, 1)[1].split("</p>", 1)[0]
         assert ("2/3" if mode == "limited" else "3/3") in row
-    if mode in {"at_byte_limit", "over_byte_limit"}:
+    if mode == "limited" or mode in {"at_byte_limit", "over_byte_limit"}:
         truncated = mode == "over_byte_limit"
         java_row = section.split("<td>java</td>", 1)[1].split("</tr>", 1)[0]
-        assert ("<td>partial</td>" if truncated else "<td>complete</td>") in java_row
+        assert ("<td>partial</td>" if mode == "limited" or truncated else "<td>complete</td>") in java_row
+        assert ("scan_limit_hit" in java_row) is (mode == "limited")
         assert ("source_file_truncated" in java_row) is truncated
 
 
@@ -951,10 +952,9 @@ def test_jadx_coverage_report_digest(jadx_coverage_report: _JadxCoverageReport) 
     expected_state = "partial" if mode in {"limited", "legacy"} or truncated else "complete"
     assert visibility["sources"]["java"] == expected_state
     assert visibility["sources"]["dex"] == "complete"
-    assert any(
-        note.startswith("[java] ") and "source_file_truncated" in note
-        for note in visibility["notes"]
-    ) is truncated
+    java_notes = [note for note in visibility["notes"] if note.startswith("[java] ")]
+    assert any("scan_limit_hit" in note for note in java_notes) is (mode in {"limited", "legacy"})
+    assert any("source_file_truncated" in note for note in java_notes) is truncated
     if mode == "legacy":
         assert "java_scan" not in visibility
     else:
