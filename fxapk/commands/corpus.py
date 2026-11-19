@@ -1490,6 +1490,10 @@ def corpus_regress_cmd(
                         {"version_conflict_sides": d.version_conflict_sides}
                         if d.version_conflict_sides else {}
                     ),
+                    **(
+                        {"unreadable_report_sides": d.unreadable_report_sides}
+                        if d.unreadable_report_sides else {}
+                    ),
                 }
                 for d in diffs if (d.changed or not changed_only)
             ],
@@ -1521,11 +1525,11 @@ def corpus_regress_cmd(
         f"  建议调证线索合计 {s['advice_investigate_from']} → {s['advice_investigate_to']}"
         f"（基于两版报告都读得到的 {s['advice_comparable']} 个样本）"
     )
-    if s["advice_unreadable"]:
-        # 读不到的样本不参与任何线索/闭环结论——不说出来，用户会以为合计覆盖了全部样本。
-        typer.echo(
-            f"  ⚠ 另有 {s['advice_unreadable']} 个样本至少一版报告读不到，未计入上面的合计"
-        )
+    unreadable = s.get("unreadable_report_pairs", 0)
+    if unreadable:
+        typer.echo(f"  ⚠ 另有 {unreadable} 个样本至少一版报告读不到，未计入回归统计")
+    if lead_gaps := s.get("advice_only_gaps", 0):
+        typer.echo(f"  ⚠ 另有 {lead_gaps} 个样本报告可读但线索分档不可比，未计入线索合计")
     if s["findings_added_total"]:
         typer.echo(f"  新增检出（按 id）：{s['findings_added_total']}")
     if s["findings_removed_total"]:
@@ -1538,7 +1542,7 @@ def corpus_regress_cmd(
     for d in shown:
         case_label = "、".join(d.case_ids) if d.case_ids else "—"
         typer.echo(f"\n  [{d.sample_sha256[:12]}] {d.package_name or '?'}  案={case_label}")
-        if d.version_conflict_sides:
+        if d.comparison_blocked:
             for note in d.notes:
                 typer.echo(f"    {note}")
             continue
