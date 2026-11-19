@@ -125,3 +125,25 @@ def test_gate_rejects_nonclean_results_even_with_prior_junit(
     assert any(diagnostic in problem for problem in receipt["problems"])
     if variant in {"skip", "xpass"}:
         assert receipt["pytest_exit"] == 0
+
+
+def test_gate_scripts_keep_lf_in_autocrlf_checkout(tmp_path: Path) -> None:
+    repo = ToyRepo(tmp_path)
+    source = GATE.parents[1]
+    scripts = (".githooks/pre-commit", "tools/fixed_jadx_gate.py")
+    for relative in (".gitattributes", *scripts):
+        path = repo.path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((source / relative).read_bytes())
+    repo.git("add", "--", ".gitattributes", *scripts)
+    tree = repo.git("write-tree")
+    commit = repo.git("commit-tree", tree, "-m", "synthetic source tree")
+    repo.git("update-ref", "HEAD", commit)
+
+    checkout = tmp_path / "checkout"
+    repo.git("clone", "--quiet", "-c", "core.autocrlf=true", "--", str(repo.path), str(checkout))
+    assert repo.git("-C", str(checkout), "status", "--porcelain") == ""
+    for relative in scripts:
+        checked_out = (checkout / relative).read_bytes()
+        assert b"\r\n" not in checked_out, relative
+        assert checked_out == (source / relative).read_bytes(), relative
