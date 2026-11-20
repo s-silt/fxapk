@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 from textwrap import dedent
+from types import FrameType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -276,10 +279,145 @@ def test_worker_timeout_is_distinct_from_dispatcher_deadline(prior_candidate: Re
     assert outcome == {"phase": "worker", "reason": "timeout", "process_group_empty": True, "supervisor_exit": 124}
 
 
+@pytest.mark.parametrize("cleanup", ["confirmed", "wait_timeout", "signal_denied"])
+def test_cancel_after_worker_handle_acquired(
+    prior_candidate: ReplayFixture, monkeypatch: pytest.MonkeyPatch, cleanup: str,
+) -> None:
+    def default_interrupt(_number: int, _frame: FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    original = {signal.SIGINT: default_interrupt, signal.SIGTERM: signal.SIG_DFL}
+    handlers = original.copy()
+
+    def install(number, handler):
+        previous = handlers[number]
+        handlers[number] = handler
+        return previous
+
+    monkeypatch.setattr(dispatcher, "signal", SimpleNamespace(
+        SIGINT=signal.SIGINT, SIGTERM=signal.SIGTERM, SIGKILL=signal.SIGKILL, signal=install,
+    ))
+    monkeypatch.setattr(dispatcher, "become_subreaper", lambda: None)
+    wait_calls = []
+    group_signals = []
+    launches = []
+    intercepted = False
+    cleanup_confirmed = cleanup == "confirmed"
+
+    class Worker:
+        pid = 123
+        returncode = None
+        running = True
+
+        def wait(self, *, timeout):
+            wait_calls.append(timeout)
+            if self.running:
+                raise subprocess.TimeoutExpired("synthetic-worker", timeout)
+            return 0
+
+    worker = Worker()
+
+    def killpg(pgid, number):
+        assert pgid == worker.pid
+        if number == 0:
+            assert not worker.running
+            raise ProcessLookupError
+        assert number == signal.SIGKILL
+        group_signals.append(number)
+        # A second ordinary cancellation during cleanup must be deferred too.
+        handlers[signal.SIGINT](signal.SIGINT, None)
+        if cleanup == "signal_denied":
+            raise PermissionError
+        worker.running = not cleanup_confirmed
+
+    def waitpid(pid, options):
+        assert pid == -worker.pid and options == os.WNOHANG
+        raise ChildProcessError
+
+    monkeypatch.setattr(dispatcher.os, "killpg", killpg)
+    monkeypatch.setattr(dispatcher.os, "waitpid", waitpid)
+
+    def cancel_after_assignment(frame: FrameType, event: str, _arg: object):
+        nonlocal intercepted
+        if (frame.f_code is dispatcher.bounded.__code__ and event == "line"
+                and not intercepted and frame.f_locals.get("proc") is worker):
+            intercepted = True
+            assert not wait_calls
+            handlers[signal.SIGINT](signal.SIGINT, frame)
+        return cancel_after_assignment
+
+    def fake_popen(command, *, cwd, stdout, **_kwargs):
+        if command[3] == "--worker":
+            # Even an accepted-looking payload from an interrupted worker must be ignored.
+            stdout.write(b'{"accepted":true}')
+            return worker
+        assert command[3] == "--supervise"
+        launches.append(cwd)
+        parent_handlers = handlers.copy()
+        handlers.update(original)  # A separately launched interpreter has independent handlers.
+        previous_trace = sys.gettrace()
+        try:
+            sys.settrace(cancel_after_assignment)
+            status, outcome = dispatcher.supervise(
+                cwd, Path(command[5]), command[6], command[7], Path(command[8]), command[9], float(command[10]),
+            )
+        except KeyboardInterrupt:
+            # Model the old supervisor exiting without a result or worker cleanup.
+            status = -signal.SIGINT
+        else:
+            stdout.write(dispatcher.encode({"schema": dispatcher.SCHEMA, **outcome}))
+        finally:
+            sys.settrace(previous_trace)
+            assert handlers == original
+            handlers.update(parent_handlers)
+        return SimpleNamespace(returncode=status, wait=lambda *, timeout: status)
+
+    monkeypatch.setattr(dispatcher.subprocess, "Popen", fake_popen)
+    args = request_for(prior_candidate)
+    code, outcome = dispatcher.submit(args, prior_candidate.ledger)
+
+    assert intercepted and group_signals == [signal.SIGKILL], "acquired worker was not cleaned up"
+    if cleanup == "signal_denied":
+        assert not wait_calls
+    else:
+        assert len(wait_calls) == 1 and 0 < wait_calls[0] <= dispatcher.CLEANUP_LIMIT
+    assert worker.running is not cleanup_confirmed
+    expected_code, state = (130, "interrupted") if cleanup_confirmed else (1, "failed")
+    assert code == expected_code and outcome["state"] == state
+    assert outcome["failure"] == {
+        "phase": "worker", "reason": "interrupted" if cleanup_confirmed else "cleanup_unverified",
+        "process_group_empty": cleanup_confirmed, "supervisor_exit": 130 if cleanup_confirmed else 2,
+    }
+    assert "receipt" not in outcome
+    assert dispatcher.submit(args, prior_candidate.ledger) == (code, {**outcome, "replayed": True})
+    assert len(launches) == 1 and handlers == original
+
+
 def test_dispatcher_rejects_supervisor_that_exits_after_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     with subprocess.Popen([sys.executable, "-I", "-c", "pass"]) as proc:
         assert proc.wait(timeout=5) == 0
         times = iter((1.0, 3.0))
         with monkeypatch.context() as patch:
             patch.setattr(dispatcher.time, "monotonic", lambda: next(times))
-            assert dispatcher.wait_supervisor(proc, 2.0, [False]) == "dispatcher_timeout"
+            assert dispatcher.wait_child(proc, 2.0, [False]) == "timeout"
+
+
+def test_cancel_while_reading_completed_worker_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    requested = [False]
+    worker = SimpleNamespace(pid=123, returncode=0, wait=lambda *, timeout: 0)
+    monkeypatch.setattr(dispatcher, "become_subreaper", lambda: None)
+    monkeypatch.setattr(dispatcher, "stop_flag", lambda: nullcontext(requested))
+    monkeypatch.setattr(dispatcher.subprocess, "Popen", lambda *args, **kwargs: worker)
+    monkeypatch.setattr(dispatcher, "reap_exited", lambda pgid: None)
+    monkeypatch.setattr(dispatcher, "group_exists", lambda pgid: False)
+    monkeypatch.setattr(dispatcher, "stop_group", lambda proc: pytest.fail("empty group must not be signalled"))
+
+    def read_receipt(path: Path, rc: int) -> tuple[int, dict[str, Any]]:
+        assert path.name == "worker.stdout" and rc == 0
+        requested[0] = True
+        return 0, {"accepted": True}
+
+    monkeypatch.setattr(dispatcher, "read_worker_receipt", read_receipt)
+    assert dispatcher.bounded(["synthetic-worker"], tmp_path, 1) == (
+        130, {"accepted": False, "phase": "worker", "reason": "interrupted", "process_group_empty": True},
+    )
