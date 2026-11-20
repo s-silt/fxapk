@@ -1,8 +1,12 @@
 """Opt-in diagnostics for synthetic tests; never serialize arbitrary runtime data."""
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 import json
+import logging
 import sys
+from threading import get_ident
 
 _TESTS = frozenset({"ownership_access", "recovery_reanalysis", "diagnostic_contract", "ownership_descendants", "recovery_vectors", "recovery_unicorn"})
 _STAGES = frozenset({"ownership_read", "reanalyze", "cleanup", "termination_check", "validation_result", "positive_result", "negative_result"})
@@ -22,6 +26,44 @@ def _label(value: object, allowed: frozenset[str]) -> str:
     return value if type(value) is str and value in allowed else "unknown"
 
 
+_POSIX_VERIFICATION_STAGES = frozenset({"ownership_scan", "individual_signal"})
+_STAGE_NOT_SUPPLIED = object()
+
+
+@contextmanager
+def observe_posix_verification_stage() -> Iterator[Callable[[], str]]:
+    """Read the first existing allowlisted DEBUG stage during one test call."""
+    logger = logging.getLogger("fxapk.core.proctree")
+    level, effective_level = logger.level, logger.getEffectiveLevel()
+    caller = get_ident()
+    observed = "unknown"
+
+    def collect(record: logging.LogRecord) -> bool:
+        nonlocal observed
+        if (
+            observed == "unknown" and record.thread == caller and record.name == logger.name
+            and record.levelno == logging.DEBUG and type(record.msg) is str
+            and record.msg == "POSIX tree verification unavailable: stage=%s"
+            and type(record.args) is tuple and len(record.args) == 1
+        ):
+            observed = _label(record.args[0], _POSIX_VERIFICATION_STAGES)
+        # Newly enabled DEBUG records remain invisible to existing handlers.
+        return record.levelno >= effective_level
+
+    logger.addFilter(collect)
+    logger.setLevel(min(logging.DEBUG, effective_level))
+    try:
+        yield lambda: observed
+    finally:
+        logger.setLevel(level)
+        logger.removeFilter(collect)
+
+
+def emit_posix_verification_stage(observed: str) -> None:
+    stage = _label(observed, _POSIX_VERIFICATION_STAGES)
+    print(f"observed-posix-tree-verification-stage: {stage}", file=sys.stderr)
+
+
 class FirstFailureDiagnostic:
     """Freeze the first observation and emit it only on assertion failure.
 
@@ -36,7 +78,8 @@ class FirstFailureDiagnostic:
         self._first: dict[str, object] | None = None
 
     def observe(self, *, stage: object, ownership: object = None,
-                read_error: object = None, reasons: object = None) -> None:
+                read_error: object = None, reasons: object = None,
+                posix_verification_stage: object = _STAGE_NOT_SUPPLIED) -> None:
         if self._first is not None:
             return
         safe_reasons = ["unknown"]
@@ -48,6 +91,8 @@ class FirstFailureDiagnostic:
             "read_error": _label(read_error, frozenset({"AccessDenied", "PermissionError"})),
             "reasons": safe_reasons,
         }
+        if posix_verification_stage is not _STAGE_NOT_SUPPLIED and "tree_state_unverified" in safe_reasons:
+            self._first["posix_verification_stage"] = _label(posix_verification_stage, _POSIX_VERIFICATION_STAGES)
 
     def __enter__(self) -> FirstFailureDiagnostic:
         return self
