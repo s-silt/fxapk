@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -82,22 +84,100 @@ def test_unobserved_failure_is_unknown_and_preserves_exception(capsys):
     assert payload["reasons"] == ["unknown"]
 
 
-def test_deliberate_pytest_failure_stays_nonzero(tmp_path):
+_DELIBERATE_FAILURE = "fxapk-first-failure-sentinel"
+
+
+def _probe_source(assertion: str) -> str:
     helper = Path(__file__).with_name("first_failure_diagnostic.py")
-    test = tmp_path / "test_deliberate.py"
-    test.write_text(
+    return (
         "import runpy\n"
         f"Diagnostic = runpy.run_path({str(helper)!r})['FirstFailureDiagnostic']\n"
-        "def test_failure():\n"
+        "def test_probe():\n"
         "    with Diagnostic('diagnostic_contract', 'master') as diagnostic:\n"
         "        diagnostic.observe(stage='reanalyze')\n"
-        "        assert False\n", encoding="utf-8",
+        f"        {assertion}\n"
     )
-    result = subprocess.run([sys.executable, "-m", "pytest", "-q", "--tb=short", str(test)],
-                            capture_output=True, text=True, encoding="utf-8", timeout=30)
-    assert result.returncode == 1
-    assert "1 failed" in result.stdout
-    assert result.stdout.count("first-failure: ") == 1
+
+
+def _run_diagnostic_probe(tmp_path: Path, source: str) -> subprocess.CompletedProcess[str]:
+    test = tmp_path / "test_deliberate.py"
+    test.write_text(source, encoding="utf-8")
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    # The child tests one generated file, independently of the outer runner.
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("PYTEST_PLUGINS", None)
+    env.update(PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTHONIOENCODING="utf-8")
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-c", "pytest.ini", "--noconftest",
+             "--tb=short", "--color=no", "-p", "no:cacheprovider", test.name],
+            cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("nested pytest: timeout", pytrace=False)
+    except (OSError, UnicodeError) as exc:
+        problem = "start_failed" if isinstance(exc, OSError) else "invalid_output_encoding"
+        pytest.fail(f"nested pytest: {problem}", pytrace=False)
+
+
+def _check_diagnostic_probe(result: subprocess.CompletedProcess[str], *, deliberate_failure: bool) -> None:
+    lines = result.stdout.splitlines() + result.stderr.splitlines()
+    assertion = re.compile(rf"E[ \t]+AssertionError: {re.escape(_DELIBERATE_FAILURE)}")
+    sentinel = any(assertion.fullmatch(line) for line in lines)
+    diagnostics = [line for line in lines if line.startswith("first-failure: ")]
+    expected = "first-failure: " + json.dumps({
+        "test": "diagnostic_contract", "worker": "master", "stage": "reanalyze",
+        "ownership": "unknown", "read_error": "unknown", "reasons": ["unknown"],
+    }, sort_keys=True)
+    if deliberate_failure:
+        accepted = result.returncode == 1 and sentinel and diagnostics == [expected]
+    else:
+        child_passed = any(re.fullmatch(r"1 passed in [0-9.]+s", line) for line in lines)
+        accepted = result.returncode == 0 and child_passed and not sentinel and not diagnostics
+    if not accepted:
+        # Preserve only a fixed exception label. Paths and arbitrary output can
+        # appear in either stream, so do not include excerpts in the failure.
+        error = re.search(
+            r"(?m)^E[ \t]+(AssertionError|FileNotFoundError|ImportError|ModuleNotFoundError|"
+            r"OSError|PermissionError|SyntaxError):",
+            result.stdout[-8192:] + "\n" + result.stderr[-8192:],
+        )
+        kind = error[1] if error else "unknown"
+        pytest.fail(f"nested pytest: exit={result.returncode}, sentinel={sentinel}, "
+                    f"expected_diagnostic={diagnostics == [expected]}, error_type={kind}", pytrace=False)
+
+
+def test_deliberate_pytest_failure_stays_nonzero(tmp_path):
+    result = _run_diagnostic_probe(tmp_path, _probe_source(f"assert False, {_DELIBERATE_FAILURE!r}"))
+    _check_diagnostic_probe(result, deliberate_failure=True)
+
+
+def test_deliberate_pytest_success_is_quiet(tmp_path):
+    result = _run_diagnostic_probe(tmp_path, _probe_source("assert True"))
+    _check_diagnostic_probe(result, deliberate_failure=False)
+
+
+def test_deliberate_pytest_skip_is_not_a_successful_control(tmp_path):
+    source = "import pytest\n\ndef test_probe():\n    pytest.skip('synthetic-private-context')\n"
+    result = _run_diagnostic_probe(tmp_path, source)
+    with pytest.raises(pytest.fail.Exception) as caught:
+        _check_diagnostic_probe(result, deliberate_failure=False)
+    assert str(caught.value) == (
+        "nested pytest: exit=0, sentinel=False, expected_diagnostic=False, error_type=unknown"
+    )
+
+
+@pytest.mark.parametrize(("source", "status", "kind", "diagnostic"), [
+    ("raise ModuleNotFoundError('synthetic-private-context')\n", 2, "ModuleNotFoundError", False),
+    (_probe_source("assert False, 'synthetic-private-context'"), 1, "AssertionError", True),
+])
+def test_deliberate_pytest_rejects_unexpected_failure(tmp_path, source, status, kind, diagnostic):
+    result = _run_diagnostic_probe(tmp_path, source)
+    with pytest.raises(pytest.fail.Exception) as caught:
+        _check_diagnostic_probe(result, deliberate_failure=True)
+    assert str(caught.value) == (f"nested pytest: exit={status}, sentinel=False, "
+                                 f"expected_diagnostic={diagnostic}, error_type={kind}")
 
 
 def test_unobserved_reasons_differ_from_observed_empty(capsys):
