@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import struct
 import sys
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, Literal, NoReturn
 
 import pytest
 
@@ -36,29 +37,46 @@ def emu_options(**extra):
                         {"args": [9, 5], "expected_return": 14}], **extra}
 
 
-def execute(code, options, tmp_path):
+def execute(code: bytes, options: dict[str, Any], tmp_path: Path) -> dict[str, Any]:
     import uuid
     return runner.isolated_review(code, {**options, "kind": "emulate", "id": uuid.uuid4().hex}, tmp_path)
 
 
+def _observe_recovery_execution(
+    code: bytes,
+    options: dict[str, Any],
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+    *,
+    test: Literal["recovery_unicorn", "recovery_vectors"],
+    stage: Literal["positive_result", "negative_result", "validation_result"],
+) -> tuple[dict[str, Any], FirstFailureDiagnostic]:
+    """Observe one worker call, then let its caller diagnose the real assertions."""
+    details: dict[str, str] = {}
+    with observe_posix_verification_stage(details=details) as observed:
+        result = execute(code, options, tmp_path)
+    worker = getattr(request.config, "workerinput", {}).get("workerid", "master")
+    diagnostic = FirstFailureDiagnostic(test, worker)
+    diagnostic.observe(stage=stage, reasons=result.get("reason_codes"),
+                       posix_verification_stage=observed(),
+                       posix_probe=details.get("posix_probe"), posix_error=details.get("posix_error"))
+    return result, diagnostic
+
+
 @pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")
-def test_real_unicorn_calls_and_negative_vectors(tmp_path, request):
+def test_real_unicorn_calls_and_negative_vectors(tmp_path: Path, request: pytest.FixtureRequest) -> None:
     pytest.importorskip("unicorn")
     code = bytes.fromhex("0000018bc0035fd6")  # add x0,x0,x1; ret
-    worker = getattr(request.config, "workerinput", {}).get("workerid", "master")
-    with observe_posix_verification_stage() as positive_observed:
-        good = execute(code, emu_options(), tmp_path)
-    positive = FirstFailureDiagnostic("recovery_unicorn", worker)
-    positive.observe(stage="positive_result", reasons=good.get("reason_codes"),
-                     posix_verification_stage=positive_observed())
+    good, positive = _observe_recovery_execution(
+        code, emu_options(), tmp_path, request, test="recovery_unicorn", stage="positive_result",
+    )
     with positive:
         positive_matches = good["state"] == "ok" and all(row["returned"] for row in good["vectors"])
         assert positive_matches
-    with observe_posix_verification_stage() as observed:
-        bad = execute(code, emu_options(vectors=[{"args": [1, 2], "expected_return": 4}]), tmp_path)
-    negative = FirstFailureDiagnostic("recovery_unicorn", worker)
-    negative.observe(stage="negative_result", reasons=bad.get("reason_codes"),
-                     posix_verification_stage=observed())
+    bad, negative = _observe_recovery_execution(
+        code, emu_options(vectors=[{"args": [1, 2], "expected_return": 4}]),
+        tmp_path, request, test="recovery_unicorn", stage="negative_result",
+    )
     with negative:
         negative_matches = bad["state"] == "failed" and "emulation_output_mismatch" in bad["reason_codes"]
         assert negative_matches
@@ -67,58 +85,104 @@ def test_real_unicorn_calls_and_negative_vectors(tmp_path, request):
         assert algorithm_is_not_independent
 
 
-@pytest.mark.parametrize(("failure_stage", "verification_stage"), [
-    ("positive_result", "ownership_scan"),
-    ("positive_result", "individual_signal"),
-    ("positive_result", "unknown"),
-    ("negative_result", "ownership_scan"),
-    ("negative_result", "individual_signal"),
-    ("negative_result", "unknown"),
-    (None, None),
+@pytest.mark.parametrize(("target", "failure_stage", "verification_stage", "metadata"), [
+    ("arithmetic", "positive_result", "ownership_scan", "valid"),
+    ("arithmetic", "positive_result", "ownership_scan", None),
+    ("arithmetic", "positive_result", "individual_signal", "valid"),
+    ("arithmetic", "positive_result", "unknown", None),
+    ("arithmetic", "negative_result", "ownership_scan", "opaque_probe"),
+    ("arithmetic", "negative_result", "ownership_scan", "opaque_error"),
+    ("arithmetic", "negative_result", "individual_signal", None),
+    ("arithmetic", "negative_result", "unknown", None),
+    ("budget", "validation_result", "ownership_scan", "valid"),
+    ("budget", "validation_result", "ownership_scan", "invalid_label"),
+    ("budget", "validation_result", "individual_signal", None),
+    ("budget", "validation_result", "unknown", None),
+    ("arithmetic", None, None, None),
+    ("budget", None, None, None),
+    ("arithmetic", "execute_error", None, None),
+    ("budget", "execute_error", None, None),
+    ("arithmetic", "dependency_missing", None, None),
+    ("budget", "dependency_missing", None, None),
 ])
-def test_unicorn_diagnostic_distinguishes_worker_and_vector(
+def test_recovery_execution_diagnostic_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     request: pytest.FixtureRequest,
+    caplog: pytest.LogCaptureFixture,
     capsys: pytest.CaptureFixture[str],
+    target: str,
     failure_stage: str | None,
     verification_stage: str | None,
+    metadata: str | None,
 ) -> None:
     import subprocess
     from types import ModuleType
 
     from fxapk.core import proctree
 
-    # This contract uses local fake receipts, even without the optional engine.
-    monkeypatch.setitem(sys.modules, "unicorn", ModuleType("unicorn"))
+    unicorn = None if failure_stage == "dependency_missing" else ModuleType("unicorn")
+    monkeypatch.setitem(sys.modules, "unicorn", unicorn)
     receipts: list[Path] = []
     reads: list[Path] = []
     real_read = runner.read_bytes
+    logger = proctree.logger
+    template = "POSIX tree verification unavailable: stage=%s"
+    execute_error = AssertionError("synthetic execute error")
+
+    class Opaque:
+        def __repr__(self) -> str:
+            raise AssertionError("opaque logging metadata must not be formatted")
+
+        __str__ = __repr__
+
+        def __eq__(self, other: object) -> bool:
+            raise AssertionError("opaque logging metadata must not be compared")
+
+        def __hash__(self) -> int:
+            raise AssertionError("opaque logging metadata must not be hashed")
+
+    first_extra: dict[str, object] = {}
+    if metadata == "valid":
+        first_extra = {"posix_probe": "environ", "posix_error": "AccessDenied"}
+    elif metadata == "opaque_probe":
+        first_extra = {"posix_probe": Opaque(), "posix_error": "AccessDenied"}
+    elif metadata == "opaque_error":
+        first_extra = {"posix_probe": "environ", "posix_error": Opaque()}
+    elif metadata == "invalid_label":
+        first_extra = {"posix_probe": "synthetic-unreviewed-probe", "posix_error": "PermissionError"}
+
+    later_extra = {"posix_probe": "getpgid", "posix_error": "PermissionError"}
 
     def fake_worker(argv: list[str], **_kwargs: object) -> proctree.OwnedRun:
-        negative = bool(receipts)
-        result_stage = "negative_result" if negative else "positive_result"
+        result_stage = "negative_result" if receipts else "positive_result"
+        if target == "budget":
+            result_stage = "validation_result"
         unavailable = result_stage == failure_stage
         destination = Path(argv[-1])
         receipts.append(destination)
-        payload = (
-            {"state": "failed", "reason_codes": ["emulation_output_mismatch"]}
-            if negative else
-            {"state": "ok", "reason_codes": [], "vectors": [{"returned": True}, {"returned": True}],
-             "independent_algorithm": False}
-        )
+        if failure_stage == "execute_error":
+            logger.debug(template, "ownership_scan")
+            raise execute_error
+        if result_stage == "validation_result":
+            payload = {"state": "failed", "reason_codes": ["emulation_budget_exhausted"]}
+        elif result_stage == "negative_result":
+            payload = {"state": "failed", "reason_codes": ["emulation_output_mismatch"]}
+        else:
+            payload = {"state": "ok", "reason_codes": [], "vectors": [{"returned": True}, {"returned": True}],
+                       "independent_algorithm": False}
         destination.write_text(json.dumps(payload), encoding="utf-8")
-        if unavailable:
-            proctree.logger.debug("POSIX tree verification unavailable: stage=%s", "unreviewed-private-stage")
-        if not unavailable or verification_stage != "unknown":
-            # Emit a distinct event for a successful control too; it must not
-            # leak into the next call's observation or produce output by itself.
-            successful_stage = "individual_signal" if negative else "ownership_scan"
-            observed = verification_stage if unavailable else successful_stage
-            proctree.logger.debug("POSIX tree verification unavailable: stage=%s", observed)
+        logger.debug(template, "synthetic-unreviewed-stage", extra=later_extra)
+        if not unavailable:
+            logger.debug(template, "ownership_scan", extra=later_extra)
+        elif verification_stage != "unknown":
+            logger.debug(template, verification_stage, extra=first_extra)
+            logger.debug(template, verification_stage, extra=later_extra)
+            later_stage = "individual_signal" if verification_stage == "ownership_scan" else "ownership_scan"
+            logger.debug(template, later_stage, extra=later_extra)
         return proctree.OwnedRun(
-            returncode=0, stdout="", stderr="", timed_out=False, ownership_complete=True,
-            termination_complete=not unavailable, forced_tree_kill=False,
+            returncode=0, stdout="", stderr="synthetic-worker-private-stderr", timed_out=False,
+            ownership_complete=True, termination_complete=not unavailable, forced_tree_kill=False,
             reason_codes=("tree_state_unverified",) if unavailable else (),
         )
 
@@ -130,31 +194,58 @@ def test_unicorn_diagnostic_distinguishes_worker_and_vector(
     def reject_spawn(*_args: object, **_kwargs: object) -> NoReturn:
         pytest.fail("the synthetic diagnostic contract must not spawn a worker")
 
+    def run_assertions() -> None:
+        if target == "budget":
+            test_execution_budgets_and_missing_environment_fail_explicitly(
+                "00000014", "emulation_budget_exhausted", tmp_path, request,
+            )
+        else:
+            test_real_unicorn_calls_and_negative_vectors(tmp_path, request)
+
     monkeypatch.setattr(proctree, "run_owned", fake_worker)
     monkeypatch.setattr(runner, "read_bytes", observe_read)
     monkeypatch.setattr(subprocess, "Popen", reject_spawn)
 
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        original = (logger.level, tuple(logger.filters))
+        if failure_stage is None:
+            run_assertions()
+        elif failure_stage == "dependency_missing":
+            with pytest.raises(pytest.skip.Exception):
+                run_assertions()
+        else:
+            with pytest.raises(AssertionError) as caught:
+                run_assertions()
+            if failure_stage == "execute_error":
+                assert caught.value is execute_error
+        assert (logger.level, tuple(logger.filters)) == original
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    if failure_stage in {"dependency_missing", "execute_error"}:
+        assert not err and not reads and len(receipts) == int(failure_stage == "execute_error")
+        return
+
+    expected_calls = 2 if target == "arithmetic" and failure_stage != "positive_result" else 1
+    assert len(receipts) == expected_calls
     if failure_stage is None:
-        test_real_unicorn_calls_and_negative_vectors(tmp_path, request)
-        assert capsys.readouterr() == ("", "")
-        assert len(receipts) == 2 and reads == receipts
+        assert err == "" and reads == receipts
     else:
-        with pytest.raises(AssertionError):
-            test_real_unicorn_calls_and_negative_vectors(tmp_path, request)
-        output = capsys.readouterr()
-        lines = output.err.splitlines()
-        assert output.out == "" and len(lines) == 1
-        assert lines[0].startswith("first-failure: ")
-        failure = json.loads(lines[0].removeprefix("first-failure: "))
-        assert set(failure) == {
-            "test", "worker", "stage", "ownership", "read_error", "reasons", "posix_verification_stage",
+        assert reads == receipts[:-1]
+        lines = err.splitlines()
+        assert len(lines) == 1 and lines[0].startswith("first-failure: ")
+        expected = {
+            "test": "recovery_vectors" if target == "budget" else "recovery_unicorn",
+            "worker": getattr(request.config, "workerinput", {}).get("workerid", "master"),
+            "stage": failure_stage,
+            "ownership": "unknown",
+            "read_error": "unknown",
+            "reasons": ["review_worker_process_tree_incomplete", "tree_state_unverified"],
+            "posix_verification_stage": verification_stage,
         }
-        assert failure["test"] == "recovery_unicorn" and failure["stage"] == failure_stage
-        assert failure["reasons"] == ["review_worker_process_tree_incomplete", "tree_state_unverified"]
-        assert failure["posix_verification_stage"] == verification_stage
-        assert "unreviewed-private-stage" not in output.err
-        expected_calls = 1 if failure_stage == "positive_result" else 2
-        assert len(receipts) == expected_calls and reads == receipts[:-1]
+        if verification_stage == "ownership_scan" and metadata == "valid":
+            expected.update(posix_probe="environ", posix_error="AccessDenied")
+        assert json.loads(lines[0].removeprefix("first-failure: ")) == expected
 
 
 @pytest.mark.parametrize("hex_code,reason", [
@@ -163,10 +254,17 @@ def test_unicorn_diagnostic_distinguishes_worker_and_vector(
     ("000040f9c0035fd6", "emulation_fault"),  # ldr x0,[x0];ret -> unmapped
 ])
 @pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")
-def test_execution_budgets_and_missing_environment_fail_explicitly(hex_code, reason, tmp_path):
+def test_execution_budgets_and_missing_environment_fail_explicitly(
+    hex_code: str, reason: str, tmp_path: Path, request: pytest.FixtureRequest,
+) -> None:
     pytest.importorskip("unicorn")
-    value = execute(bytes.fromhex(hex_code), emu_options(instruction_limit=16), tmp_path)
-    assert value["state"] == "failed" and reason in value["reason_codes"]
+    value, diagnostic = _observe_recovery_execution(
+        bytes.fromhex(hex_code), emu_options(instruction_limit=16),
+        tmp_path, request, test="recovery_vectors", stage="validation_result",
+    )
+    with diagnostic:
+        failure_matches = value["state"] == "failed" and reason in value["reason_codes"]
+        assert failure_matches
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")
