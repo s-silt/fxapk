@@ -469,7 +469,18 @@ def launch(
                 # The supervisor still holds the inherited lock. Do not detach its worker by killing it.
                 return stop, {"reason": "stop_unconfirmed"}
         if stop:
-            # Discard even a well-formed success emitted after our deadline.
+            # A late success is never usable. Only carry the supervisor's exact
+            # negative cleanup record for this job across the outer stop.
+            if proc.returncode == 2:
+                cleanup = {"phase": "worker", "reason": "cleanup_unverified", "process_group_empty": False}
+                expected = encode({"schema": SCHEMA, "accepted": False, **cleanup, "quarantine": str(work)}) + b"\n"
+                try:
+                    stdout.seek(0)
+                    matched = stdout.read(len(expected) + 1) == expected
+                except (OSError, ValueError):
+                    matched = False
+                if matched:
+                    return stop, {**cleanup, "supervisor_exit": 2}
             return stop, {"reason": "supervisor_exit_observed", "supervisor_exit": proc.returncode}
 
         stdout.seek(0)
