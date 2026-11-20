@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from tests.first_failure_diagnostic import FirstFailureDiagnostic
+from tests.first_failure_diagnostic import FirstFailureDiagnostic, observe_posix_verification_stage
 
 
 def _payload(capsys):
@@ -144,3 +145,61 @@ def test_reanalysis_late_assertions_emit_filtered_diagnostic(monkeypatch, tmp_pa
         assert "synthetic-private-path-or-command" not in json.dumps(payload)
     else:
         assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(("first", "later"), [
+    ("ownership_scan", "individual_signal"),
+    ("individual_signal", "ownership_scan"),
+])
+def test_posix_stage_observer_filters_records_and_preserves_first(caplog, capsys, first, later):
+    class Opaque:
+        def __str__(self):
+            raise AssertionError("unreviewed argument must not be formatted")
+
+    logger = logging.getLogger("fxapk.core.proctree")
+    template = "POSIX tree verification unavailable: stage=%s"
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        with observe_posix_verification_stage() as observed:
+            foreign = logging.LogRecord("another.logger", logging.DEBUG, "", 0, template, (later,), None)
+            other_thread = logging.LogRecord(logger.name, logging.DEBUG, "", 0, template, (later,), None)
+            other_thread.thread = -1
+            logger.handle(foreign)
+            logger.handle(other_thread)
+            logger.debug(f"POSIX tree verification unavailable: stage={later}")
+            logger.debug(template, "unreviewed-private-stage")
+            logger.debug(template, Opaque())
+            logger.debug(template, later, "extra")
+            assert observed() == "unknown"
+
+            logger.debug(template, first)
+            logger.debug(template, later)
+            logger.info("preexisting logging remains visible")
+            assert observed() == first
+        assert observed() == first and logger.level == logging.INFO
+
+    assert [record.getMessage() for record in caplog.records if record.name == logger.name] == [
+        "preexisting logging remains visible",
+    ]
+    assert capsys.readouterr() == ("", "")
+
+
+def test_posix_stage_observer_restores_inherited_level_and_filters_on_error(caplog):
+    logger = logging.getLogger("fxapk.core.proctree")
+    inherited_from = "fxapk.core"
+    existing = logging.Filter()
+    sentinel = RuntimeError("original exception")
+    with caplog.at_level(logging.INFO, logger=inherited_from):
+        with caplog.at_level(logging.NOTSET, logger=logger.name):
+            logger.addFilter(existing)
+            try:
+                original_filters = tuple(logger.filters)
+                with pytest.raises(RuntimeError) as caught:
+                    with observe_posix_verification_stage():
+                        assert logger.isEnabledFor(logging.DEBUG)
+                        raise sentinel
+                assert caught.value is sentinel
+                assert logger.level == logging.NOTSET
+                assert logger.getEffectiveLevel() == logging.INFO
+                assert tuple(logger.filters) == original_filters
+            finally:
+                logger.removeFilter(existing)

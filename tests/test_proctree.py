@@ -6,13 +6,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 import importlib.util
 import logging
 import os
 import sys
-from threading import get_ident
 import time
 from pathlib import Path
 
@@ -20,7 +17,11 @@ import psutil
 import pytest
 
 from fxapk.core import proctree
-from tests.first_failure_diagnostic import FirstFailureDiagnostic
+from tests.first_failure_diagnostic import (
+    FirstFailureDiagnostic,
+    emit_posix_verification_stage,
+    observe_posix_verification_stage,
+)
 
 #: 「java 等价物」孙进程：长睡眠、输出全部 DEVNULL（不占父的 stdout 管道，
 #: 免得 communicate 等孙进程 EOF——真实 jadx 的这类挂起由 timeout 兜底，与本测无关）。
@@ -127,39 +128,10 @@ def _fixture_pid_state_before_cleanup(pid: int) -> str:
         return "unreadable"
 
 
-@contextmanager
-def _observe_posix_verification_stage() -> Iterator[list[str]]:
-    logger = proctree.logger
-    level, effective_level = logger.level, logger.getEffectiveLevel()
-    caller = get_ident()
-    observed: list[str] = []
-
-    def collect(record: logging.LogRecord) -> bool:
-        if (
-            not observed and record.thread == caller and record.name == logger.name
-            and record.levelno == logging.DEBUG and type(record.msg) is str
-            and record.msg == "POSIX tree verification unavailable: stage=%s"
-            and type(record.args) is tuple and len(record.args) == 1
-            and type(record.args[0]) is str
-            and record.args[0] in {"ownership_scan", "individual_signal"}
-        ):
-            observed.append(record.args[0])
-        # Only the filter sees DEBUG messages newly enabled by this scope.
-        return record.levelno >= effective_level
-
-    logger.addFilter(collect)
-    logger.setLevel(min(logging.DEBUG, effective_level))
-    try:
-        yield observed
-    finally:
-        logger.setLevel(level)
-        logger.removeFilter(collect)
-
-
 def test_descendants_after_root_exit_force_killed(request) -> None:
     """根进程正常退出但孙进程脱管（daemon 化 java 形态）→ 检出、强杀整树、
     forced_tree_kill=True（该次运行不得算完整覆盖）。"""
-    with _observe_posix_verification_stage() as observed:
+    with observe_posix_verification_stage() as observed:
         res = proctree.run_owned([sys.executable, "-c", _SPAWN_SLEEPER], timeout=30.0)
     diagnostic = FirstFailureDiagnostic("ownership_descendants", getattr(request.config, "workerinput", {}).get("workerid", "master"))
     diagnostic.observe(stage="termination_check", ownership=res.ownership_complete, reasons=res.reason_codes)
@@ -176,8 +148,7 @@ def test_descendants_after_root_exit_force_killed(request) -> None:
             "fixture-pid-before-cleanup: " + _fixture_pid_state_before_cleanup(pid),
             file=sys.stderr,
         )
-        stage = observed[0] if observed else "unknown"
-        print(f"observed-posix-tree-verification-stage: {stage}", file=sys.stderr)
+        emit_posix_verification_stage(observed())
         raise
     finally:
         _kill_if_alive(pid)

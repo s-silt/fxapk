@@ -10,7 +10,11 @@ import pytest
 
 from fxapk.core.offline_review import acquisition, dex, jni, recover, runner
 from fxapk.dynamic import recovery
-from tests.first_failure_diagnostic import FirstFailureDiagnostic
+from tests.first_failure_diagnostic import (
+    FirstFailureDiagnostic,
+    emit_posix_verification_stage,
+    observe_posix_verification_stage,
+)
 
 
 def plan_task(identifier, kind, path, **options):
@@ -48,15 +52,89 @@ def test_real_unicorn_calls_and_negative_vectors(tmp_path, request):
     with positive:
         positive_matches = good["state"] == "ok" and all(row["returned"] for row in good["vectors"])
         assert positive_matches
-    bad = execute(code, emu_options(vectors=[{"args": [1, 2], "expected_return": 4}]), tmp_path)
+    with observe_posix_verification_stage() as observed:
+        bad = execute(code, emu_options(vectors=[{"args": [1, 2], "expected_return": 4}]), tmp_path)
     negative = FirstFailureDiagnostic("recovery_unicorn", worker)
     negative.observe(stage="negative_result", reasons=bad.get("reason_codes"))
-    with negative:
-        negative_matches = bad["state"] == "failed" and "emulation_output_mismatch" in bad["reason_codes"]
-        assert negative_matches
+    try:
+        with negative:
+            negative_matches = bad["state"] == "failed" and "emulation_output_mismatch" in bad["reason_codes"]
+            assert negative_matches
+    except AssertionError:
+        emit_posix_verification_stage(observed())
+        raise
     with positive:
         algorithm_is_not_independent = good["independent_algorithm"] is False
         assert algorithm_is_not_independent
+
+
+@pytest.mark.parametrize("stage", ["ownership_scan", "individual_signal", "unknown", None])
+def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
+    monkeypatch, tmp_path, request, capsys, stage,
+):
+    import subprocess
+    from types import ModuleType
+
+    from fxapk.core import proctree
+
+    # This contract uses local fake receipts, even without the optional engine.
+    monkeypatch.setitem(sys.modules, "unicorn", ModuleType("unicorn"))
+    receipts = []
+    reads = []
+    real_read = runner.read_bytes
+
+    def fake_worker(argv, **_kwargs):
+        negative = bool(receipts)
+        unavailable = negative and stage is not None
+        destination = Path(argv[-1])
+        receipts.append(destination)
+        payload = (
+            {"state": "failed", "reason_codes": ["emulation_output_mismatch"]}
+            if negative else
+            {"state": "ok", "reason_codes": [], "vectors": [{"returned": True}, {"returned": True}],
+             "independent_algorithm": False}
+        )
+        destination.write_text(json.dumps(payload), encoding="utf-8")
+        if not negative or stage != "unknown":
+            # Also emit in the verified mock, to check that success stays quiet.
+            proctree.logger.debug(
+                "POSIX tree verification unavailable: stage=%s",
+                (stage or "individual_signal") if negative else "ownership_scan",
+            )
+        return proctree.OwnedRun(
+            returncode=0, stdout="", stderr="", timed_out=False, ownership_complete=True,
+            termination_complete=not unavailable, forced_tree_kill=False,
+            reason_codes=("tree_state_unverified",) if unavailable else (),
+        )
+
+    def observe_read(path, *args, **kwargs):
+        assert path in receipts
+        reads.append(path)
+        return real_read(path, *args, **kwargs)
+
+    def reject_spawn(*_args, **_kwargs):
+        pytest.fail("the synthetic diagnostic contract must not spawn a worker")
+
+    monkeypatch.setattr(proctree, "run_owned", fake_worker)
+    monkeypatch.setattr(runner, "read_bytes", observe_read)
+    monkeypatch.setattr(subprocess, "Popen", reject_spawn)
+
+    if stage is None:
+        test_real_unicorn_calls_and_negative_vectors(tmp_path, request)
+        assert capsys.readouterr() == ("", "")
+        assert len(receipts) == 2 and reads == receipts
+    else:
+        with pytest.raises(AssertionError):
+            test_real_unicorn_calls_and_negative_vectors(tmp_path, request)
+        output = capsys.readouterr()
+        lines = output.err.splitlines()
+        assert output.out == "" and len(lines) == 2
+        assert lines[0].startswith("first-failure: ")
+        failure = json.loads(lines[0].removeprefix("first-failure: "))
+        assert failure["test"] == "recovery_unicorn" and failure["stage"] == "negative_result"
+        assert failure["reasons"] == ["review_worker_process_tree_incomplete", "tree_state_unverified"]
+        assert lines[1] == f"observed-posix-tree-verification-stage: {stage}"
+        assert len(receipts) == 2 and reads == receipts[:1]
 
 
 @pytest.mark.parametrize("hex_code,reason", [
