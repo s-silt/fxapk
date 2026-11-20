@@ -12,7 +12,6 @@ from fxapk.core.offline_review import acquisition, dex, jni, recover, runner
 from fxapk.dynamic import recovery
 from tests.first_failure_diagnostic import (
     FirstFailureDiagnostic,
-    emit_posix_verification_stage,
     observe_posix_verification_stage,
 )
 
@@ -55,14 +54,11 @@ def test_real_unicorn_calls_and_negative_vectors(tmp_path, request):
     with observe_posix_verification_stage() as observed:
         bad = execute(code, emu_options(vectors=[{"args": [1, 2], "expected_return": 4}]), tmp_path)
     negative = FirstFailureDiagnostic("recovery_unicorn", worker)
-    negative.observe(stage="negative_result", reasons=bad.get("reason_codes"))
-    try:
-        with negative:
-            negative_matches = bad["state"] == "failed" and "emulation_output_mismatch" in bad["reason_codes"]
-            assert negative_matches
-    except AssertionError:
-        emit_posix_verification_stage(observed())
-        raise
+    negative.observe(stage="negative_result", reasons=bad.get("reason_codes"),
+                     posix_verification_stage=observed())
+    with negative:
+        negative_matches = bad["state"] == "failed" and "emulation_output_mismatch" in bad["reason_codes"]
+        assert negative_matches
     with positive:
         algorithm_is_not_independent = good["independent_algorithm"] is False
         assert algorithm_is_not_independent
@@ -95,6 +91,8 @@ def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
              "independent_algorithm": False}
         )
         destination.write_text(json.dumps(payload), encoding="utf-8")
+        if negative:
+            proctree.logger.debug("POSIX tree verification unavailable: stage=%s", "unreviewed-private-stage")
         if not negative or stage != "unknown":
             # Also emit in the verified mock, to check that success stays quiet.
             proctree.logger.debug(
@@ -128,12 +126,16 @@ def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
             test_real_unicorn_calls_and_negative_vectors(tmp_path, request)
         output = capsys.readouterr()
         lines = output.err.splitlines()
-        assert output.out == "" and len(lines) == 2
+        assert output.out == "" and len(lines) == 1
         assert lines[0].startswith("first-failure: ")
         failure = json.loads(lines[0].removeprefix("first-failure: "))
+        assert set(failure) == {
+            "test", "worker", "stage", "ownership", "read_error", "reasons", "posix_verification_stage",
+        }
         assert failure["test"] == "recovery_unicorn" and failure["stage"] == "negative_result"
         assert failure["reasons"] == ["review_worker_process_tree_incomplete", "tree_state_unverified"]
-        assert lines[1] == f"observed-posix-tree-verification-stage: {stage}"
+        assert failure["posix_verification_stage"] == stage
+        assert "unreviewed-private-stage" not in output.err
         assert len(receipts) == 2 and reads == receipts[:1]
 
 

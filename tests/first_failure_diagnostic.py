@@ -27,6 +27,7 @@ def _label(value: object, allowed: frozenset[str]) -> str:
 
 
 _POSIX_VERIFICATION_STAGES = frozenset({"ownership_scan", "individual_signal"})
+_STAGE_NOT_SUPPLIED = object()
 
 
 @contextmanager
@@ -77,7 +78,8 @@ class FirstFailureDiagnostic:
         self._first: dict[str, object] | None = None
 
     def observe(self, *, stage: object, ownership: object = None,
-                read_error: object = None, reasons: object = None) -> None:
+                read_error: object = None, reasons: object = None,
+                posix_verification_stage: object = _STAGE_NOT_SUPPLIED) -> None:
         if self._first is not None:
             return
         safe_reasons = ["unknown"]
@@ -89,6 +91,8 @@ class FirstFailureDiagnostic:
             "read_error": _label(read_error, frozenset({"AccessDenied", "PermissionError"})),
             "reasons": safe_reasons,
         }
+        if posix_verification_stage is not _STAGE_NOT_SUPPLIED and "tree_state_unverified" in safe_reasons:
+            self._first["posix_verification_stage"] = _label(posix_verification_stage, _POSIX_VERIFICATION_STAGES)
 
     def __enter__(self) -> FirstFailureDiagnostic:
         return self
