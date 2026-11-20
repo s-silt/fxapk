@@ -52,7 +52,10 @@ class ReplayFixture:
         self.git("add", "--", path.name)
         self.base = self.git("commit-tree", self.git("write-tree"), "-m", "Synthetic base")
         path.write_text("after\n", encoding="utf-8")
-        self.git("add", "--", path.name)
+        nested = self.repo / "nested"
+        nested.mkdir()
+        (nested / "child.txt").write_text("synthetic nested content\n", encoding="utf-8")
+        self.git("add", "--", path.name, "nested")
         self.tree = self.git("write-tree")
         self.commit = self.git("commit-tree", self.tree, "-p", self.base, "-m", self.message)
         self.git("update-ref", "HEAD", self.commit)
@@ -117,7 +120,7 @@ def test_replay_validates_exact_existing_commit_and_tree(prior_candidate: Replay
     prior_candidate.assert_unchanged(original)
 
 
-@pytest.mark.parametrize("loss", ["missing_repo", "missing_tree", "changed_head"])
+@pytest.mark.parametrize("loss", ["missing_repo", "missing_tree", "missing_blob", "missing_subtree", "changed_head"])
 def test_replay_refuses_changed_or_unavailable_objects(prior_candidate: ReplayFixture, loss: str) -> None:
     original = prior_candidate.seed("succeeded")
     if loss == "missing_repo":
@@ -127,6 +130,13 @@ def test_replay_refuses_changed_or_unavailable_objects(prior_candidate: ReplayFi
         (prior_candidate.repo / ".git" / "objects" / tree[:2] / tree[2:]).unlink()
         assert prior_candidate.git("rev-parse", "HEAD") == prior_candidate.commit
         assert prior_candidate.git("cat-file", "-t", prior_candidate.commit) == "commit"
+    elif loss in {"missing_blob", "missing_subtree"}:
+        path = "note.txt" if loss == "missing_blob" else "nested"
+        oid = prior_candidate.git("rev-parse", f"HEAD:{path}")
+        loose = prior_candidate.repo / ".git" / "objects" / oid[:2] / oid[2:]
+        loose.rename(prior_candidate.work / "unavailable-object")
+        assert prior_candidate.git("rev-parse", "HEAD") == prior_candidate.commit
+        assert prior_candidate.git("cat-file", "-t", prior_candidate.tree) == "tree"
     else:
         prior_candidate.git("update-ref", "HEAD", prior_candidate.base, prior_candidate.commit)
         assert prior_candidate.git("rev-parse", "HEAD") == prior_candidate.base

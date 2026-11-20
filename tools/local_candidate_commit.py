@@ -380,8 +380,9 @@ def verify_receipt(
         or checked_git(repo, "remote", deadline=deadline)
     ):
         raise Rejected("receipt", "git_candidate_mismatch")
-    # A commit header can name an object that has disappeared.
-    checked_git(repo, "cat-file", "-e", f"{tree}^{{tree}}", deadline=deadline)
+    # Commit/tree IDs can survive partial object loss. Require local connectivity
+    # of the candidate tree without traversing its commit ancestry or fetching.
+    checked_git(repo, "rev-list", "--objects", "--missing=error", f"{tree}^{{tree}}", deadline=deadline)
     checked_git(repo, "cat-file", "-e", f"{base}^{{commit}}", deadline=deadline)
 
 
