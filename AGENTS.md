@@ -24,6 +24,8 @@ fxapk 是 APK 调证取证分析 CLI：按能力门控做静态/动态证据采�
 - 合并前等 CI 绿（`gh run watch <id> --exit-status`）；不 `--no-verify`，不 force push master；未经指示不主动 commit。
 - 走 JADX 报告固定回归时，在仓库根目录暂存候选后运行 `sh .githooks/pre-commit --fixed-jadx`。需要已装 pytest 和项目测试依赖；默认临时目录有 Git 祖先时，用 `--scratch <目录>` 指定可写的独立临时目录。命令只在暂存快照上执行 18 个合成 JADX JSON、HTML、digest 用例，通过回执含 `index_tree`。退出码 0 为通过，1 为回归拒绝或暂存快照发生变化，2 为准备失败。仅在可信仓库中运行，提交前核对回执树仍是待提交树。
 
+单机 Linux 候选提交用 `python -I tools/local_candidate_commit.py --state-dir <私有账本目录> submit --task-id <ID> --source <本地Git对象库> --base <完整父SHA> --tree <预期树SHA> --patch <可信补丁> --patch-sha256 <补丁SHA256> --message <说明> --scratch <无Git祖先的独立目录>`。只运行预先审查的本地合成候选与固定门禁，支持相同任务重放。保留临时仓以便重验。同 ID 换输入返回 3，锁被占用返回 75，已通过返回 0，拒绝返回 1，输入或候选不可核验返回 2，门禁进程超时返回 124，派发器期限到期返回 125，中断返回 130。`--timeout` 和 `--deadline` 分别默认 120 秒、130 秒，停止信号另有最多 4 秒的等待。将 `submit` 换成 `status` 并去掉其参数可看历史状态和失败原因。通过证明以重新核对本地 Git 对象的成功 `submit` 回执为准。超时或中断保留现场且不自动重派，临时仓可能残留提交。只支持单机本地账本，清理范围限受控进程组，未验证掉电恢复。
+
 ## 2. 三条默认行为：新机器第一次跑之前先告诉用户
 
 | 默认行为 | 会发生什么 | 避开方式 |
