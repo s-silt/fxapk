@@ -521,3 +521,82 @@ def test_posix_scan_only_drops_confirmed_terminal_observations(
     assert not list(proctree._posix_owned_processes(pgid))
 
     assert (pgid in proctree._POSIX_UNVERIFIED) is unverified
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux ownership-token probe")
+@pytest.mark.parametrize(("first_probe", "first_error"), [
+    ("environ", "AccessDenied"),
+    ("getpgid", "PermissionError"),
+])
+def test_posix_scan_logs_only_first_decisive_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    first_probe: str,
+    first_error: str,
+) -> None:
+    from types import SimpleNamespace
+
+    pgid, own_uid = 987654320, 1000
+    error_payload = "synthetic-private-process-name"
+    error_path = "/synthetic/private/permission-path"
+    env_token = "synthetic-private-ownership-token"
+    denied_pids = {987654322, 987654323}
+
+    def reject_real_access(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the diagnostic contract must not inspect or start a real process")
+
+    def getpgid(pid: int) -> int:
+        if pid in denied_pids:
+            raise PermissionError(13, error_payload, error_path)
+        return 10
+
+    def fake_process(pid: int, *, uid: int = own_uid, started: float = 11.0) -> SimpleNamespace:
+        def read_environ() -> dict[str, str]:
+            raise psutil.AccessDenied(pid, error_payload)
+
+        return SimpleNamespace(
+            pid=pid, status=lambda: psutil.STATUS_RUNNING, uids=lambda: SimpleNamespace(real=uid),
+            create_time=lambda: started, environ=read_environ, kill=reject_real_access,
+        )
+
+    older = fake_process(987654324, started=9.0)
+    other_uid = fake_process(987654323, uid=own_uid + 1)
+    denied_environ = fake_process(987654321)
+    denied_getpgid = fake_process(987654322)
+    process_table = [older, other_uid]
+    monkeypatch.setattr(psutil, "Process", reject_real_access)
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter(process_table))
+    monkeypatch.setattr(proctree, "subprocess", SimpleNamespace(Popen=reject_real_access))
+    monkeypatch.setattr(
+        proctree, "os", SimpleNamespace(getpid=lambda: 1, getuid=lambda: own_uid, getpgid=getpgid),
+    )
+    monkeypatch.setattr(proctree, "_POSIX_TOKENS", {pgid: env_token})
+    monkeypatch.setattr(proctree, "_POSIX_STARTED", {pgid: 10.0})
+    monkeypatch.setattr(proctree, "_POSIX_UNVERIFIED", set())
+
+    with caplog.at_level(logging.DEBUG, logger=proctree.logger.name):
+        assert list(proctree._posix_owned_processes(pgid)) == []
+        assert pgid not in proctree._POSIX_UNVERIFIED
+        assert not caplog.records
+
+        process_table.extend(
+            (denied_environ, denied_getpgid) if first_probe == "environ"
+            else (denied_getpgid, denied_environ),
+        )
+        assert list(proctree._posix_owned_processes(pgid)) == []
+        assert pgid in proctree._POSIX_UNVERIFIED
+        process_table.reverse()
+        assert list(proctree._posix_owned_processes(pgid)) == []
+
+    record, = caplog.records
+    assert record.name == proctree.logger.name and record.levelno == logging.DEBUG
+    assert record.getMessage() == "POSIX tree verification unavailable: stage=ownership_scan"
+    default_keys = vars(logging.makeLogRecord({})).keys()
+    extras = {
+        key: value for key, value in vars(record).items()
+        if key not in default_keys and key not in {"message", "asctime"}
+    }
+    assert extras == {"posix_probe": first_probe, "posix_error": first_error}
+    assert record.exc_info is None and record.stack_info is None
+    for raw in (error_payload, error_path, env_token, str(pgid), *(str(proc.pid) for proc in process_table)):
+        assert raw not in caplog.text

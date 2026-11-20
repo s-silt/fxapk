@@ -728,9 +728,9 @@ else:
     _POSIX_STARTED: dict[int, float] = {}
     _POSIX_UNVERIFIED: set[int] = set()
 
-    def _posix_mark_unverified(pgid: int, stage: str) -> None:
+    def _posix_mark_unverified(pgid: int, stage: str, *, extra: dict[str, str] | None = None) -> None:
         if pgid not in _POSIX_UNVERIFIED:
-            logger.debug("POSIX tree verification unavailable: stage=%s", stage)
+            logger.debug("POSIX tree verification unavailable: stage=%s", stage, extra=extra)
         _POSIX_UNVERIFIED.add(pgid)
 
     def _posix_owned_processes(pgid: int):
@@ -741,17 +741,22 @@ else:
         for proc in psutil.process_iter(["pid"]):
             if proc.pid == os.getpid():
                 continue
+            probe = "status"
             try:
                 if proc.status() == psutil.STATUS_ZOMBIE:
                     continue
+                probe = "getpgid"
                 if os.getpgid(proc.pid) == pgid:
                     yield proc
-                elif token and sys.platform == "linux" and proc.uids().real == os.getuid():
-                    if token in proc.environ().get(_POSIX_TOKEN_ENV, "").split(","):
-                        yield proc
+                elif token and sys.platform == "linux":
+                    probe = "uids"
+                    if proc.uids().real == os.getuid():
+                        probe = "environ"
+                        if token in proc.environ().get(_POSIX_TOKEN_ENV, "").split(","):
+                            yield proc
             except (psutil.NoSuchProcess, ProcessLookupError):
                 continue
-            except (psutil.AccessDenied, PermissionError):
+            except (psutil.AccessDenied, PermissionError) as denied:
                 try:
                     if sys.platform == "linux" and proc.uids().real != os.getuid():
                         continue
@@ -768,7 +773,10 @@ else:
                 except (psutil.AccessDenied, PermissionError):
                     confirmed_terminal = False
                 if not confirmed_terminal:
-                    _posix_mark_unverified(pgid, "ownership_scan")
+                    error = "PermissionError" if issubclass(type(denied), PermissionError) else "AccessDenied"
+                    _posix_mark_unverified(
+                        pgid, "ownership_scan", extra={"posix_probe": probe, "posix_error": error},
+                    )
 
     def _posix_group_pids(pgid: int) -> list[int]:
         """已知仍存活的受控成员；读权限缺口另记，不能当成无后代。"""
