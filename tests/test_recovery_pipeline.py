@@ -5,6 +5,7 @@ import json
 import struct
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -45,9 +46,11 @@ def test_real_unicorn_calls_and_negative_vectors(tmp_path, request):
     pytest.importorskip("unicorn")
     code = bytes.fromhex("0000018bc0035fd6")  # add x0,x0,x1; ret
     worker = getattr(request.config, "workerinput", {}).get("workerid", "master")
-    good = execute(code, emu_options(), tmp_path)
+    with observe_posix_verification_stage() as positive_observed:
+        good = execute(code, emu_options(), tmp_path)
     positive = FirstFailureDiagnostic("recovery_unicorn", worker)
-    positive.observe(stage="positive_result", reasons=good.get("reason_codes"))
+    positive.observe(stage="positive_result", reasons=good.get("reason_codes"),
+                     posix_verification_stage=positive_observed())
     with positive:
         positive_matches = good["state"] == "ok" and all(row["returned"] for row in good["vectors"])
         assert positive_matches
@@ -64,10 +67,23 @@ def test_real_unicorn_calls_and_negative_vectors(tmp_path, request):
         assert algorithm_is_not_independent
 
 
-@pytest.mark.parametrize("stage", ["ownership_scan", "individual_signal", "unknown", None])
-def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
-    monkeypatch, tmp_path, request, capsys, stage,
-):
+@pytest.mark.parametrize(("failure_stage", "verification_stage"), [
+    ("positive_result", "ownership_scan"),
+    ("positive_result", "individual_signal"),
+    ("positive_result", "unknown"),
+    ("negative_result", "ownership_scan"),
+    ("negative_result", "individual_signal"),
+    ("negative_result", "unknown"),
+    (None, None),
+])
+def test_unicorn_diagnostic_distinguishes_worker_and_vector(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+    capsys: pytest.CaptureFixture[str],
+    failure_stage: str | None,
+    verification_stage: str | None,
+) -> None:
     import subprocess
     from types import ModuleType
 
@@ -75,13 +91,14 @@ def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
 
     # This contract uses local fake receipts, even without the optional engine.
     monkeypatch.setitem(sys.modules, "unicorn", ModuleType("unicorn"))
-    receipts = []
-    reads = []
+    receipts: list[Path] = []
+    reads: list[Path] = []
     real_read = runner.read_bytes
 
-    def fake_worker(argv, **_kwargs):
+    def fake_worker(argv: list[str], **_kwargs: object) -> proctree.OwnedRun:
         negative = bool(receipts)
-        unavailable = negative and stage is not None
+        result_stage = "negative_result" if negative else "positive_result"
+        unavailable = result_stage == failure_stage
         destination = Path(argv[-1])
         receipts.append(destination)
         payload = (
@@ -91,33 +108,33 @@ def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
              "independent_algorithm": False}
         )
         destination.write_text(json.dumps(payload), encoding="utf-8")
-        if negative:
+        if unavailable:
             proctree.logger.debug("POSIX tree verification unavailable: stage=%s", "unreviewed-private-stage")
-        if not negative or stage != "unknown":
-            # Also emit in the verified mock, to check that success stays quiet.
-            proctree.logger.debug(
-                "POSIX tree verification unavailable: stage=%s",
-                (stage or "individual_signal") if negative else "ownership_scan",
-            )
+        if not unavailable or verification_stage != "unknown":
+            # Emit a distinct event for a successful control too; it must not
+            # leak into the next call's observation or produce output by itself.
+            successful_stage = "individual_signal" if negative else "ownership_scan"
+            observed = verification_stage if unavailable else successful_stage
+            proctree.logger.debug("POSIX tree verification unavailable: stage=%s", observed)
         return proctree.OwnedRun(
             returncode=0, stdout="", stderr="", timed_out=False, ownership_complete=True,
             termination_complete=not unavailable, forced_tree_kill=False,
             reason_codes=("tree_state_unverified",) if unavailable else (),
         )
 
-    def observe_read(path, *args, **kwargs):
+    def observe_read(path: Path, *args: int, **kwargs: int) -> bytes:
         assert path in receipts
         reads.append(path)
         return real_read(path, *args, **kwargs)
 
-    def reject_spawn(*_args, **_kwargs):
+    def reject_spawn(*_args: object, **_kwargs: object) -> NoReturn:
         pytest.fail("the synthetic diagnostic contract must not spawn a worker")
 
     monkeypatch.setattr(proctree, "run_owned", fake_worker)
     monkeypatch.setattr(runner, "read_bytes", observe_read)
     monkeypatch.setattr(subprocess, "Popen", reject_spawn)
 
-    if stage is None:
+    if failure_stage is None:
         test_real_unicorn_calls_and_negative_vectors(tmp_path, request)
         assert capsys.readouterr() == ("", "")
         assert len(receipts) == 2 and reads == receipts
@@ -132,11 +149,12 @@ def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
         assert set(failure) == {
             "test", "worker", "stage", "ownership", "read_error", "reasons", "posix_verification_stage",
         }
-        assert failure["test"] == "recovery_unicorn" and failure["stage"] == "negative_result"
+        assert failure["test"] == "recovery_unicorn" and failure["stage"] == failure_stage
         assert failure["reasons"] == ["review_worker_process_tree_incomplete", "tree_state_unverified"]
-        assert failure["posix_verification_stage"] == stage
+        assert failure["posix_verification_stage"] == verification_stage
         assert "unreviewed-private-stage" not in output.err
-        assert len(receipts) == 2 and reads == receipts[:1]
+        expected_calls = 1 if failure_stage == "positive_result" else 2
+        assert len(receipts) == expected_calls and reads == receipts[:-1]
 
 
 @pytest.mark.parametrize("hex_code,reason", [
