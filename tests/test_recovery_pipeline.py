@@ -5,6 +5,7 @@ import json
 import struct
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -66,8 +67,12 @@ def test_real_unicorn_calls_and_negative_vectors(tmp_path, request):
 
 @pytest.mark.parametrize("stage", ["ownership_scan", "individual_signal", "unknown", None])
 def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
-    monkeypatch, tmp_path, request, capsys, stage,
-):
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+    capsys: pytest.CaptureFixture[str],
+    stage: str | None,
+) -> None:
     import subprocess
     from types import ModuleType
 
@@ -79,7 +84,7 @@ def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
     reads = []
     real_read = runner.read_bytes
 
-    def fake_worker(argv, **_kwargs):
+    def fake_worker(argv: list[str], **_kwargs: object) -> proctree.OwnedRun:
         negative = bool(receipts)
         unavailable = negative and stage is not None
         destination = Path(argv[-1])
@@ -105,12 +110,12 @@ def test_unicorn_negative_diagnostic_distinguishes_worker_and_vector(
             reason_codes=("tree_state_unverified",) if unavailable else (),
         )
 
-    def observe_read(path, *args, **kwargs):
+    def observe_read(path: Path, *args: int, **kwargs: int) -> bytes:
         assert path in receipts
         reads.append(path)
         return real_read(path, *args, **kwargs)
 
-    def reject_spawn(*_args, **_kwargs):
+    def reject_spawn(*_args: object, **_kwargs: object) -> NoReturn:
         pytest.fail("the synthetic diagnostic contract must not spawn a worker")
 
     monkeypatch.setattr(proctree, "run_owned", fake_worker)
