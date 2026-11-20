@@ -109,8 +109,9 @@ def _run_diagnostic_probe(tmp_path: Path, source: str) -> subprocess.CompletedPr
     env.pop("PYTEST_PLUGINS", None)
     env.update(PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTHONIOENCODING="utf-8")
     try:
+        # Show captured output for passing children so the silence check can see it.
         return subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-c", "pytest.ini", "--noconftest",
+            [sys.executable, "-m", "pytest", "-q", "-rP", "-c", "pytest.ini", "--noconftest",
              "--tb=short", "--color=no", "-p", "no:cacheprovider", test.name],
             cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", timeout=30,
         )
@@ -148,17 +149,32 @@ def _check_diagnostic_probe(result: subprocess.CompletedProcess[str], *, deliber
                     f"expected_diagnostic={diagnostics == [expected]}, error_type={kind}", pytrace=False)
 
 
-def test_deliberate_pytest_failure_stays_nonzero(tmp_path):
+def test_deliberate_pytest_failure_stays_nonzero(tmp_path: Path) -> None:
     result = _run_diagnostic_probe(tmp_path, _probe_source(f"assert False, {_DELIBERATE_FAILURE!r}"))
     _check_diagnostic_probe(result, deliberate_failure=True)
 
 
-def test_deliberate_pytest_success_is_quiet(tmp_path):
+def test_deliberate_pytest_success_is_quiet(tmp_path: Path) -> None:
     result = _run_diagnostic_probe(tmp_path, _probe_source("assert True"))
     _check_diagnostic_probe(result, deliberate_failure=False)
 
 
-def test_deliberate_pytest_skip_is_not_a_successful_control(tmp_path):
+def test_deliberate_pytest_rejects_diagnostic_from_passing_child(tmp_path: Path) -> None:
+    source = (
+        "import sys\n\n"
+        "def test_probe() -> None:\n"
+        "    print('first-failure: synthetic unexpected diagnostic', file=sys.stderr)\n"
+    )
+    result = _run_diagnostic_probe(tmp_path, source)
+    assert result.returncode == 0
+    with pytest.raises(pytest.fail.Exception, match=r"^nested pytest: exit=0, sentinel=False,"):
+        _check_diagnostic_probe(result, deliberate_failure=False)
+    assert "first-failure: synthetic unexpected diagnostic" in (
+        result.stdout.splitlines() + result.stderr.splitlines()
+    )
+
+
+def test_deliberate_pytest_skip_is_not_a_successful_control(tmp_path: Path) -> None:
     source = "import pytest\n\ndef test_probe():\n    pytest.skip('synthetic-private-context')\n"
     result = _run_diagnostic_probe(tmp_path, source)
     with pytest.raises(pytest.fail.Exception) as caught:
@@ -172,7 +188,13 @@ def test_deliberate_pytest_skip_is_not_a_successful_control(tmp_path):
     ("raise ModuleNotFoundError('synthetic-private-context')\n", 2, "ModuleNotFoundError", False),
     (_probe_source("assert False, 'synthetic-private-context'"), 1, "AssertionError", True),
 ])
-def test_deliberate_pytest_rejects_unexpected_failure(tmp_path, source, status, kind, diagnostic):
+def test_deliberate_pytest_rejects_unexpected_failure(
+    tmp_path: Path,
+    source: str,
+    status: int,
+    kind: str,
+    diagnostic: bool,
+) -> None:
     result = _run_diagnostic_probe(tmp_path, source)
     with pytest.raises(pytest.fail.Exception) as caught:
         _check_diagnostic_probe(result, deliberate_failure=True)
@@ -231,9 +253,14 @@ def test_reanalysis_late_assertions_emit_filtered_diagnostic(monkeypatch, tmp_pa
     ("ownership_scan", "individual_signal"),
     ("individual_signal", "ownership_scan"),
 ])
-def test_posix_stage_observer_filters_records_and_preserves_first(caplog, capsys, first, later):
+def test_posix_stage_observer_filters_records_and_preserves_first(
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    first: str,
+    later: str,
+) -> None:
     class Opaque:
-        def __str__(self):
+        def __str__(self) -> str:
             raise AssertionError("unreviewed argument must not be formatted")
 
     logger = logging.getLogger("fxapk.core.proctree")
@@ -263,7 +290,9 @@ def test_posix_stage_observer_filters_records_and_preserves_first(caplog, capsys
     assert capsys.readouterr() == ("", "")
 
 
-def test_posix_stage_observer_restores_inherited_level_and_filters_on_error(caplog):
+def test_posix_stage_observer_restores_inherited_level_and_filters_on_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     logger = logging.getLogger("fxapk.core.proctree")
     inherited_from = "fxapk.core"
     existing = logging.Filter()

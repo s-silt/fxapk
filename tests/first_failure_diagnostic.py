@@ -27,12 +27,22 @@ def _label(value: object, allowed: frozenset[str]) -> str:
 
 
 _POSIX_VERIFICATION_STAGES = frozenset({"ownership_scan", "individual_signal"})
+_POSIX_PROBES = frozenset({"status", "getpgid", "uids", "environ"})
+_READ_ERRORS = frozenset({"AccessDenied", "PermissionError"})
 _STAGE_NOT_SUPPLIED = object()
 
 
+def _posix_probe_details(probe: object, error: object) -> dict[str, str]:
+    safe_probe = _label(probe, _POSIX_PROBES)
+    safe_error = _label(error, _READ_ERRORS)
+    if "unknown" in (safe_probe, safe_error):
+        return {}
+    return {"posix_probe": safe_probe, "posix_error": safe_error}
+
+
 @contextmanager
-def observe_posix_verification_stage() -> Iterator[Callable[[], str]]:
-    """Read the first existing allowlisted DEBUG stage during one test call."""
+def observe_posix_verification_stage(*, details: dict[str, str] | None = None) -> Iterator[Callable[[], str]]:
+    """Read the first stage, optionally populating a fresh details dictionary."""
     logger = logging.getLogger("fxapk.core.proctree")
     level, effective_level = logger.level, logger.getEffectiveLevel()
     caller = get_ident()
@@ -47,6 +57,10 @@ def observe_posix_verification_stage() -> Iterator[Callable[[], str]]:
             and type(record.args) is tuple and len(record.args) == 1
         ):
             observed = _label(record.args[0], _POSIX_VERIFICATION_STAGES)
+            if observed == "ownership_scan" and details is not None:
+                details.update(_posix_probe_details(
+                    getattr(record, "posix_probe", None), getattr(record, "posix_error", None),
+                ))
         # Newly enabled DEBUG records remain invisible to existing handlers.
         return record.levelno >= effective_level
 
@@ -79,7 +93,8 @@ class FirstFailureDiagnostic:
 
     def observe(self, *, stage: object, ownership: object = None,
                 read_error: object = None, reasons: object = None,
-                posix_verification_stage: object = _STAGE_NOT_SUPPLIED) -> None:
+                posix_verification_stage: object = _STAGE_NOT_SUPPLIED,
+                posix_probe: object = None, posix_error: object = None) -> None:
         if self._first is not None:
             return
         safe_reasons = ["unknown"]
@@ -88,11 +103,14 @@ class FirstFailureDiagnostic:
         self._first = {
             "stage": _label(stage, _STAGES),
             "ownership": "confirmed" if ownership is True else "false" if ownership is False else "unknown",
-            "read_error": _label(read_error, frozenset({"AccessDenied", "PermissionError"})),
+            "read_error": _label(read_error, _READ_ERRORS),
             "reasons": safe_reasons,
         }
         if posix_verification_stage is not _STAGE_NOT_SUPPLIED and "tree_state_unverified" in safe_reasons:
-            self._first["posix_verification_stage"] = _label(posix_verification_stage, _POSIX_VERIFICATION_STAGES)
+            posix_stage = _label(posix_verification_stage, _POSIX_VERIFICATION_STAGES)
+            self._first["posix_verification_stage"] = posix_stage
+            if posix_stage == "ownership_scan":
+                self._first.update(_posix_probe_details(posix_probe, posix_error))
 
     def __enter__(self) -> FirstFailureDiagnostic:
         return self
