@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import math
 from copy import deepcopy
 
 import pytest
@@ -159,6 +160,7 @@ def test_tls_probe_preserves_sni_verification_and_limits_material(monkeypatch, f
     from types import SimpleNamespace
     from fxapk.core import probe_target as pt
     closed = []
+    estimates: list[float] = []
     class Sock:
         def getpeername(self): return ("192.0.2.1", 443)
         def settimeout(self, value): assert 0 < value <= 15
@@ -176,11 +178,23 @@ def test_tls_probe_preserves_sni_verification_and_limits_material(monkeypatch, f
             raise pt.ssl.SSLError("rejected")
         return sock
     context.wrap_socket = wrap
-    monkeypatch.setattr(pt, "resolve_public", lambda *a, **k: ["192.0.2.1"])
-    monkeypatch.setattr(pt, "connect_first", lambda *a, **k: sock)
+    def resolve(*_args: object, timeout: float) -> list[str]:
+        estimates.append(timeout)
+        return ["192.0.2.1"]
+
+    def connect(*_args: object, timeout: float, **_kwargs: object) -> Sock:
+        estimates.append(timeout)
+        return sock
+
+    # The original deadline subtraction yields 15.000000000000057 here.
+    start = math.nextafter(511.0, -math.inf)
+    monkeypatch.setattr(pt, "time", SimpleNamespace(monotonic=lambda: start))
+    monkeypatch.setattr(pt, "resolve_public", resolve)
+    monkeypatch.setattr(pt, "connect_first", connect)
     monkeypatch.setattr(pt.ssl, "create_default_context", lambda: context)
     plan = pt.build_plan(report(), target="192.0.2.1", business_host="api.example.test", allow=["192.0.2.1"], max_bytes=1 if failure == "oversized" else 1024)
     result, der = pt.probe_tls(plan)
+    assert estimates == [15, 15]
     assert closed == [True]
     if failure in ("tls_rejected", "oversized"):
         assert result["outcome"] == "failed" and der == b""

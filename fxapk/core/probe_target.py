@@ -94,15 +94,17 @@ def probe_tls(plan: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
                            "sni": sni, "port": 443, "method": "TLS",
                            "observed_at": datetime.now(timezone.utc).isoformat(), "tls_verified": False}
     raw, secured, der = None, None, b""
-    deadline = time.monotonic() + min(plan["window"], 15)
+    timeout = min(plan["window"], 15)
+    deadline = time.monotonic() + timeout
+    # A rounded absolute deadline can subtract to slightly more than the budget.
     try:
-        addresses = resolve_public(plan["target"], 443, timeout=deadline - time.monotonic())
-        remaining = deadline - time.monotonic()
+        addresses = resolve_public(plan["target"], 443, timeout=min(timeout, deadline - time.monotonic()))
+        remaining = min(timeout, deadline - time.monotonic())
         if remaining <= 0:
             raise TimeoutError("resolution_budget_exceeded")
         raw = connect_first(addresses, 443, timeout=remaining, deadline=deadline)
         row["peer_ip"] = str(raw.getpeername()[0])
-        remaining = deadline - time.monotonic()
+        remaining = min(timeout, deadline - time.monotonic())
         if remaining <= 0:
             raise TimeoutError("connection_budget_exceeded")
         raw.settimeout(remaining)
