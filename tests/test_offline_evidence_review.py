@@ -4,11 +4,14 @@ import hashlib
 import json
 import socket
 import struct
+from dataclasses import fields
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from fxapk.cli import app
+from fxapk.core.models import Report
 from fxapk.core.offline_review import crypto, filesystem, native, runner, trace
 
 
@@ -142,6 +145,95 @@ def test_cli_failure_reaches_receipt_digest_html_and_continues(tmp_path):
     before = (out / "review.json").read_bytes()
     assert CliRunner().invoke(app, ["evidence-review", str(plan), "--out", str(out)]).exit_code == 2
     assert (out / "review.json").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("source_health", "expected_health", "reliable"),
+    [
+        pytest.param({}, {"analysis_status": None, "completeness": None},
+                     False, id="legacy-omitted-both"),
+        pytest.param({"completeness": 1.0}, {"analysis_status": None, "completeness": 1.0},
+                     False, id="omitted-status"),
+        pytest.param({"analysis_status": "complete"}, {"analysis_status": "complete", "completeness": None},
+                     False, id="omitted-completeness"),
+        pytest.param({"analysis_status": "complete", "completeness": 1.0},
+                     {"analysis_status": "complete", "completeness": 1.0}, True, id="healthy"),
+        pytest.param({"analysis_status": "partial", "completeness": 0.4},
+                     {"analysis_status": "partial", "completeness": 0.4}, False, id="partial"),
+        pytest.param({"analysis_status": "partial", "completeness": 1.0},
+                     {"analysis_status": "partial", "completeness": 1.0}, False, id="partial-with-full-count"),
+        pytest.param({"analysis_status": "failed", "completeness": 0.0},
+                     {"analysis_status": "failed", "completeness": 0.0}, False, id="failed"),
+        pytest.param({"analysis_status": "unknown", "completeness": 1.0},
+                     {"analysis_status": "unknown", "completeness": 1.0}, False, id="explicit-unknown"),
+        pytest.param({"analysis_status": "complete", "completeness": 0.0},
+                     {"analysis_status": "complete", "completeness": 0.0}, False, id="observed-zero"),
+        pytest.param({"analysis_status": None, "completeness": 1.0},
+                     {"analysis_status": None, "completeness": 1.0}, False, id="null-status"),
+        pytest.param({"analysis_status": "complete", "completeness": None},
+                     {"analysis_status": "complete", "completeness": None}, False, id="null-count"),
+        pytest.param({"analysis_status": "complete", "completeness": "synthetic-untrusted-value"},
+                     {"analysis_status": "complete", "completeness": None}, False, id="wrong-count"),
+        pytest.param({"analysis_status": "complete", "completeness": True},
+                     {"analysis_status": "complete", "completeness": None}, False, id="boolean-count"),
+        pytest.param({"analysis_status": "synthetic-untrusted-value", "completeness": 1.0},
+                     {"analysis_status": None, "completeness": 1.0}, False, id="untrusted-status-string"),
+        pytest.param({"analysis_status": {"note": "synthetic-untrusted-value"}, "completeness": 1.0},
+                     {"analysis_status": None, "completeness": 1.0}, False, id="untrusted-status-object"),
+        pytest.param({"analysis_status": "Complete", "completeness": 1.0},
+                     {"analysis_status": None, "completeness": 1.0}, False, id="noncanonical-status"),
+    ],
+)
+def test_cli_offline_revision_preserves_only_observed_analysis_health(
+    tmp_path: Path, source_health: dict[str, object],
+    expected_health: dict[str, object], reliable: bool,
+) -> None:
+    sample = "a" * 64
+    source = tmp_path / "source-report.json"
+    original = json.dumps({"package_name": "com.example.synthetic", "meta": {"sample_sha256": sample},
+                           "leads": [], **source_health}).encode()
+    source.write_bytes(original)
+    manifest = tmp_path / "plan.json"
+    manifest.write_text(json.dumps({
+        "schema_version": "fxapk.offline-review.v1", "sample_sha256": sample,
+        "tasks": [{"id": "synthetic-inert", "kind": "fixture_unsupported"}],
+    }), encoding="utf-8")
+    out = tmp_path / "review"
+    cli = CliRunner()
+
+    source_check = cli.invoke(app, ["digest", str(source)])
+    review = cli.invoke(app, ["evidence-review", str(manifest), "--report", str(source), "--out", str(out)])
+    assert (source_check.exit_code, review.exit_code) == (0, 5)
+    assert json.loads(source_check.stdout)["integrity"]["reliable"] is reliable
+    assert json.loads(review.stdout)["state"] == "partial"
+    assert source.read_bytes() == original
+
+    report_text = (out / "report.json").read_text(encoding="utf-8")
+    digest_text = (out / "digest.json").read_text(encoding="utf-8")
+    html_text = (out / "report.html").read_text(encoding="utf-8")
+    revision = json.loads(report_text)
+    assert set(revision) == {field.name for field in fields(Report)}
+    assert {key: revision[key] for key in ("analysis_status", "completeness")} == expected_health
+    digest = json.loads(digest_text)
+    integrity = digest["integrity"]
+    assert integrity["reliable"] is reliable
+    for field in ("analysis_status", "completeness"):
+        assert integrity[field] == expected_health.get(field)
+    assert bool(integrity["warnings"]) is (not reliable)
+    again = cli.invoke(app, ["digest", str(out / "report.json")])
+    assert again.exit_code == 0
+    assert json.loads(again.stdout)["integrity"] == integrity
+    assert "synthetic-untrusted-value" not in report_text + digest_text + html_text + again.stdout
+
+    receipt = json.loads((out / "review.json").read_text(encoding="utf-8"))
+    task = json.loads((out / "synthetic-inert.json").read_text(encoding="utf-8"))
+    assert (receipt["state"], receipt["publication"]) == ("partial", "ok")
+    assert (task["state"], task["reason_codes"], task["input_sha256"]) == (
+        "unsupported", ["review_kind_unsupported"], None,
+    )
+    assert digest["offline_evidence_review"]["tasks"][0]["reason_codes"] == ["review_kind_unsupported"]
+    assert "review_kind_unsupported" in html_text
+    assert not (out / "inputs").exists() and not list(out.glob("*-artifacts"))
 
 
 @pytest.mark.parametrize("identifiers", [["manifest"], ["REPORT"], ["A", "a"], ["NUL"]])
