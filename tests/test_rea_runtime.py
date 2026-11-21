@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -64,32 +65,46 @@ def test_timeout_is_failure_with_process_tree_receipt(runtime, tmp_path):
         assert tree["termination_complete"] is True
 
 
-@pytest.mark.parametrize("reason", ["tree_state_unverified", "survivors_after_kill"])
-def test_timeout_failure_emits_allowlisted_diagnostic(reason, tmp_path, capsys, monkeypatch):
+@pytest.mark.parametrize(("reasons", "details"), [
+    (["tree_state_unverified"], {"posix_verification_stage": "unknown"}),
+    (["tree_state_unverified"], {
+        "posix_verification_stage": "ownership_scan",
+        "posix_probe": "getpgid",
+        "posix_error": "PermissionError",
+    }),
+    (["survivors_after_kill", "process_exit_unverified"], {}),
+])
+def test_timeout_failure_emits_allowlisted_diagnostic(reasons, details, tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw1")
     tree = {
         "timed_out": True,
         "ownership_complete": True,
         "termination_complete": False,
-        "reason_codes": ["timeout", reason, "synthetic-private-marker"],
+        "reason_codes": ["timeout", *reasons, "synthetic-private-marker"],
         "pids": [1234],
     }
-    fake = SimpleNamespace(run_bounded=lambda *args, **kwargs: {"ok": False, "process_tree": tree})
+
+    def run_bounded(*args, **kwargs):
+        if details.get("posix_verification_stage") == "ownership_scan":
+            logging.getLogger("fxapk.core.proctree").debug(
+                "POSIX tree verification unavailable: stage=%s", "ownership_scan",
+                extra={"posix_probe": "getpgid", "posix_error": "PermissionError"},
+            )
+        return {"ok": False, "process_tree": tree}
+
+    fake = SimpleNamespace(run_bounded=run_bounded)
     with pytest.raises(AssertionError):
         test_timeout_is_failure_with_process_tree_receipt(fake, tmp_path)
     out, err = capsys.readouterr()
     assert out == ""
     assert err.count("first-failure: ") == 1
     payload = json.loads(err.removeprefix("first-failure: "))
-    expected = {
+    assert payload == {
         "test": "rea_runtime_timeout", "worker": "gw1", "stage": "termination_check",
         "ownership": "confirmed", "read_error": "unknown",
-        "reasons": sorted(["timeout", reason, "unknown"]),
+        "reasons": sorted(["timeout", *reasons, "unknown"]),
+        **details,
     }
-    if reason == "tree_state_unverified":
-        expected["posix_verification_stage"] = "unknown"
-    assert payload == expected
-
 
 def test_timeout_success_keeps_diagnostic_quiet(tmp_path, capsys):
     tree = {"timed_out": True, "ownership_complete": True, "termination_complete": True,

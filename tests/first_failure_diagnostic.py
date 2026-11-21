@@ -12,7 +12,8 @@ _TESTS = frozenset({"ownership_access", "recovery_reanalysis", "diagnostic_contr
 _STAGES = frozenset({"ownership_read", "reanalyze", "cleanup", "termination_check", "validation_result", "positive_result", "negative_result"})
 _REASONS = frozenset({
     "descendants_after_root_exit", "distinct_validation_inputs_required",
-    "tree_state_unverified", "survivors_after_kill", "timeout", "subprocess_timeout", "reanalyzed_extra_dex_not_loaded",
+    "tree_state_unverified", "survivors_after_kill", "process_exit_unverified", "timeout",
+    "subprocess_timeout", "reanalyzed_extra_dex_not_loaded",
     "reanalyzed_report_partial", "reanalyzed_report_failed",
     "review_worker_timeout", "review_worker_exit", "review_worker_process_tree_incomplete",
     "review_worker_receipt_missing", "review_worker_receipt_invalid", "review_worker_failed",
