@@ -663,6 +663,63 @@ def test_integrity_requires_reported_status_and_completeness(report_fields) -> N
     assert result["integrity"]["warnings"]
 
 
+@pytest.mark.parametrize(
+    ("completeness", "expected", "reliable"),
+    [(10**400, None, False), (1.25, 1.25, False), (True, None, False), (0, 0.0, False), (1, 1.0, True)],
+    ids=["source-integer-overflows-float", "finite-out-of-range", "boolean", "zero", "one"],
+)
+def test_cli_digest_reports_completeness_without_numeric_overflow(
+    tmp_path: Path, completeness: int | float, expected: float | None, reliable: bool,
+) -> None:
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps({
+        "leads": [], "analysis_status": "complete", "completeness": completeness,
+    }, allow_nan=False), encoding="utf-8")
+
+    result = runner.invoke(cli.app, ["digest", str(report_path)])
+
+    assert result.exit_code == 0, result.stderr
+    integrity = json.loads(result.stdout)["integrity"]
+    assert integrity["completeness"] == expected
+    assert integrity["reliable"] is reliable
+    if expected is None:
+        assert any("完整度字段异常" in warning for warning in integrity["warnings"])
+    elif expected > 1.0:
+        assert any("越界" in warning for warning in integrity["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "projected_status"),
+    [
+        ("complete", "complete"), ("partial", "partial"), ("failed", "failed"), ("unknown", "unknown"),
+        (" complete ", None), ("synthetic-marker", None), (["synthetic-marker"], None), (3, None),
+    ],
+)
+def test_integrity_projects_only_known_analysis_status(raw_status: object, projected_status: str | None) -> None:
+    result = build_digest({"leads": [], "analysis_status": raw_status, "completeness": 1.0})
+    integrity = result["integrity"]
+    assert integrity["analysis_status"] == projected_status
+    assert integrity["reliable"] is (projected_status == "complete")
+    if projected_status in (None, "unknown"):
+        assert any("分析状态缺失或无法识别" in warning for warning in integrity["warnings"])
+
+
+@pytest.mark.parametrize("redaction", ["--redact", "--no-redact"])
+def test_cli_digest_never_copies_unrecognized_status_payload(tmp_path: Path, redaction: str) -> None:
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps({
+        "leads": [], "analysis_status": {"label": "synthetic-marker"}, "completeness": 1.0,
+    }), encoding="utf-8")
+
+    result = runner.invoke(cli.app, ["digest", str(report_path), redaction])
+
+    assert result.exit_code == 0, result.stderr
+    integrity = json.loads(result.stdout)["integrity"]
+    assert integrity["analysis_status"] is None
+    assert integrity["reliable"] is False
+    assert "synthetic-marker" not in result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("raw", ["null", "[]", '"text"', "42", "true", "{"])
 def test_cli_digest_requires_json_object(tmp_path, raw) -> None:
     report_path = tmp_path / "report.json"
