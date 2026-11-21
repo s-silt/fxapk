@@ -232,10 +232,15 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
         detail = f"（失败阶段：{'、'.join(bad)}）" if bad else ""
         warnings.append(f"分析状态为 {status}{detail}：结论基础不完整，勿据此下确定性结论")
 
-    es = [s for s in _list(report.get("enricher_status")) if isinstance(s, dict)]
+    raw_enricher_status = report.get("enricher_status")
+    # A legacy omission is not evidence of malformed statistics. An explicitly
+    # invalid value, or a dropped row, must not look like a clean run.
+    dirty = "enricher_status" in report and not isinstance(raw_enricher_status, list)
     attempted = terminal_ok = 0
-    dirty = False
-    for s in es:
+    for s in _list(raw_enricher_status):
+        if not isinstance(s, dict):
+            dirty = True
+            continue
         a = _nonneg_count(s.get("attempted"))
         o = _nonneg_count(s.get("ok"))
         no_record = _nonneg_count(s.get("no_record")) if "no_record" in s else 0
@@ -251,7 +256,7 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
         terminal_ok += o + no_record
     enrich_rate = round(terminal_ok / attempted, 4) if attempted else None
     if dirty:
-        warnings.append("富化统计含异常条目（计数非法/ok>attempted）：命中率仅据可解析条目，结果可能不可信")
+        warnings.append("富化统计含异常条目（记录结构或计数非法）：命中率仅据可解析条目，结果可能不可信")
     if enrich_rate is not None and enrich_rate < _ENRICH_WARN:
         warnings.append(
             f"富化成功终态率 {enrich_rate} 低于 {_ENRICH_WARN}：富化源可能未跑全（限速/密钥/网络），勿据残缺证据下结论"

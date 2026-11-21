@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -204,6 +205,48 @@ def test_partial_status_makes_integrity_unreliable() -> None:
     integ = build_digest(report)["integrity"]
     assert integ["reliable"] is False
     assert any("partial" in w and "enrich" in w for w in integ["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("report_fields", "expected_rate", "malformed"),
+    [
+        pytest.param({}, None, False, id="legacy-missing"),
+        pytest.param({"enricher_status": []}, None, False, id="observed-empty"),
+        pytest.param({"enricher_status": [{"attempted": 10, "ok": 9}]}, 0.9, False, id="healthy"),
+        pytest.param(
+            {"enricher_status": [{"attempted": 10, "ok": 9}, "synthetic-unparsed-row"]},
+            0.9, True, id="mixed",
+        ),
+        pytest.param({"enricher_status": [None]}, None, True, id="null-row"),
+        pytest.param({"enricher_status": None}, None, True, id="explicit-null"),
+        pytest.param(
+            {"enricher_status": {"attempted": 10, "ok": 9}}, None, True, id="wrong-container",
+        ),
+    ],
+)
+def test_cli_digest_does_not_hide_malformed_enrichment_stats(
+    tmp_path: Path, report_fields: dict[str, object],
+    expected_rate: float | None, malformed: bool,
+) -> None:
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps({
+        "analysis_status": "complete", "completeness": 1.0,
+        "critical_failures": [], "leads": [], **report_fields,
+    }), encoding="utf-8")
+
+    result = runner.invoke(cli.app, ["digest", str(report_path)])
+
+    assert result.exit_code == 0
+    integrity = json.loads(result.stdout)["integrity"]
+    assert integrity["analysis_status"] == "complete"
+    assert integrity["enrichment_ok_rate"] == expected_rate
+    assert integrity["reliable"] is (not malformed)
+    if malformed:
+        assert len(integrity["warnings"]) == 1
+        assert "富化统计含异常条目" in integrity["warnings"][0]
+    else:
+        assert integrity["warnings"] == []
+    assert "synthetic-unparsed-row" not in result.stdout
 
 
 def test_integrity_no_enrichment_attempts_not_flagged() -> None:
