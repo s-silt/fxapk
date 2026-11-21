@@ -255,7 +255,9 @@ def _write_bytes_to_stream(stream: BinaryIO, data: bytes) -> None:
     stream.write(data)
 
 
-def atomic_write_text(path: str | os.PathLike[str], data: str) -> None:
+def atomic_write_text(
+    path: str | os.PathLike[str], data: str, *, newline: str | None = "",
+) -> None:
     """把 ``data`` 原子写入 ``path``（UTF-8）：同目录 tmp → ``os.replace`` 覆盖。
 
     临时文件通过 ``O_CREAT|O_EXCL`` 以 ``0o600`` 创建，而不是先公开创建再 chmod。
@@ -275,6 +277,8 @@ def atomic_write_text(path: str | os.PathLike[str], data: str) -> None:
         OSError: 写临时文件、同步数据或 ``os.replace`` 失败时抛出。
     """
 
+    # The default gives canonical LF bytes. Callers replacing existing
+    # text-mode output may opt into the previous platform newline convention.
     target = Path(path)
     temporary: Path | None = None
     descriptor: int | None = None
@@ -286,7 +290,7 @@ def atomic_write_text(path: str | os.PathLike[str], data: str) -> None:
             descriptor,
             "w",
             encoding="utf-8",
-            newline="",
+            newline=newline,
         )
         descriptor = None
         with stream:
