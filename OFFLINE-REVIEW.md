@@ -94,9 +94,13 @@ inputs produce explicit failures or coverage gaps; they are never silently skipp
 
 Outputs are `review.json`, per-task receipts, `report.json`, `digest.json` and `report.html`.
 Report/digest/HTML carry the task states and reasons. Raw strings, reconstructed buffers
-and filesystem paths stay in the per-task local receipts. The source report is not overwritten. Its existing analysis health is preserved; a
-standalone report derives health from the task results. The new revision projects the
-latest review only; retain prior review directories and their detailed receipts separately.
+and filesystem paths stay in the per-task local receipts. The source report is not overwritten.
+The revision preserves valid source analysis health and writes `null` for missing or
+invalid values; a standalone report derives health from the task results. Closing a case
+does not turn an explicit `null` into a measured result. A review exit code does not certify
+Phase-1 package eligibility: `fxapk case package` still requires an analysis status of
+`complete`, `partial`, or `failed`. The new revision projects the latest review only;
+retain prior review directories and their detailed receipts separately.
 Exit codes: 0 all requested work succeeded within its declared scope; 5 partial/unsupported;
 6 failed; 2 invalid command/manifest or publication failure. None means case closure.
 

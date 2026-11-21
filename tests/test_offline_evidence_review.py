@@ -176,6 +176,8 @@ def test_cli_failure_reaches_receipt_digest_html_and_continues(tmp_path):
                      {"analysis_status": "complete", "completeness": None}, False, id="wrong-count"),
         pytest.param({"analysis_status": "complete", "completeness": True},
                      {"analysis_status": "complete", "completeness": None}, False, id="boolean-count"),
+        pytest.param({"analysis_status": "complete", "completeness": 1.2},
+                     {"analysis_status": "complete", "completeness": None}, False, id="out-of-range-count"),
         pytest.param({"analysis_status": "synthetic-untrusted-value", "completeness": 1.0},
                      {"analysis_status": None, "completeness": 1.0}, False, id="untrusted-status-string"),
         pytest.param({"analysis_status": {"note": "synthetic-untrusted-value"}, "completeness": 1.0},
@@ -190,8 +192,12 @@ def test_cli_offline_revision_preserves_only_observed_analysis_health(
 ) -> None:
     sample = "a" * 64
     source = tmp_path / "source-report.json"
-    original = json.dumps({"package_name": "com.example.synthetic", "meta": {"sample_sha256": sample},
-                           "leads": [], **source_health}).encode()
+    original = json.dumps({
+        "package_name": "com.example.synthetic",
+        "meta": {"sample_sha256": sample, "tool_version": "1.5.4", "ruleset_digest": "b" * 16},
+        "leads": [],
+        **source_health,
+    }).encode()
     source.write_bytes(original)
     manifest = tmp_path / "plan.json"
     manifest.write_text(json.dumps({
@@ -234,6 +240,35 @@ def test_cli_offline_revision_preserves_only_observed_analysis_health(
     assert digest["offline_evidence_review"]["tasks"][0]["reason_codes"] == ["review_kind_unsupported"]
     assert "review_kind_unsupported" in html_text
     assert not (out / "inputs").exists() and not list(out.glob("*-artifacts"))
+
+    revision_path = out / "report.json"
+    receipt_path = out / "review.json"
+    receipt_bytes = receipt_path.read_bytes()
+    close = cli.invoke(app, ["case", "close", str(revision_path), "--offline"])
+    assert close.exit_code == 6, close.output  # no investigation target in this fixture
+    assert "闭环状态：failed" in close.stdout
+    persisted = json.loads(revision_path.read_text(encoding="utf-8"))
+    closure = persisted["meta"]["closure"]
+    assert closure["status"] == "failed"
+    static_gate = next(check for check in closure["checks"] if check["id"] == "static_health")
+    assert static_gate["status"] == {"complete": "pass", "failed": "fail"}.get(
+        expected_health["analysis_status"], "warn",
+    )
+    assert {key: persisted[key] for key in expected_health} == expected_health
+    after = cli.invoke(app, ["digest", str(revision_path)])
+    assert after.exit_code == 0
+    assert json.loads(after.stdout)["integrity"] == integrity
+    assert source.read_bytes() == original and receipt_path.read_bytes() == receipt_bytes
+
+    if expected_health["analysis_status"] in (None, "unknown"):
+        package_path = out / "case-package.json"
+        package = cli.invoke(app, [
+            "case", "package", str(revision_path), "--case-id", "synthetic-test",
+            "--producer", "synthetic", "--out", str(package_path),
+        ])
+        assert package.exit_code == 2
+        assert "invalid analysis status" in package.stderr
+        assert not package_path.exists()
 
 
 @pytest.mark.parametrize("identifiers", [["manifest"], ["REPORT"], ["A", "a"], ["NUL"]])

@@ -391,6 +391,9 @@ def test_cli_show_lists_suppression_sources(tmp_path: Path) -> None:
 def test_cli_restore_lifts_and_leaves_a_tombstone(tmp_path: Path) -> None:
     report = tmp_path / "report.json"
     _write_pressed_report(report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["completeness"] = None
+    report.write_text(json.dumps(payload), encoding="utf-8")
 
     res = runner.invoke(cli.app, [
         "lead", "restore", str(report), "--value", _VALUE.upper(),   # 大小写不敏感
@@ -398,6 +401,7 @@ def test_cli_restore_lifts_and_leaves_a_tombstone(tmp_path: Path) -> None:
     ])
 
     assert res.exit_code == 0, res.output
+    assert json.loads(report.read_text(encoding="utf-8"))["completeness"] is None
     revived = load_report(report)
     lead = revived.leads[0]
     assert lead.advice == infra.ADVICE_INVESTIGATE, "撤销后回到判据链结论"
@@ -552,6 +556,7 @@ def test_cli_restore_then_replay_survives_a_rerun(tmp_path: Path) -> None:
     # 样本身份靠 meta.sample_sha256 索引——两次运行是同一个 APK。
     payload = json.loads(first.read_text(encoding="utf-8"))
     payload["meta"]["sample_sha256"] = "a" * 64
+    payload["completeness"] = None
     first.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     res = runner.invoke(cli.app, [
@@ -561,6 +566,7 @@ def test_cli_restore_then_replay_survives_a_rerun(tmp_path: Path) -> None:
     ])
     assert res.exit_code == 0, res.output
     assert json.loads(res.stdout)["stored_in_corpus"] == 1
+    assert json.loads(first.read_text(encoding="utf-8"))["completeness"] is None
 
     # 重跑：全新的报告，同一个样本哈希，那条线索又被压上了。
     second = tmp_path / "run2" / "report.json"
@@ -568,6 +574,8 @@ def test_cli_restore_then_replay_survives_a_rerun(tmp_path: Path) -> None:
     _write_pressed_report(second)
     payload2 = json.loads(second.read_text(encoding="utf-8"))
     payload2["meta"]["sample_sha256"] = "a" * 64
+    payload2["analysis_status"] = None
+    payload2["completeness"] = None
     second.write_text(json.dumps(payload2, ensure_ascii=False), encoding="utf-8")
     assert load_report(second).leads[0].advice == infra.ADVICE_REVIEW, "前提：重跑后又被压着"
 
@@ -579,6 +587,8 @@ def test_cli_restore_then_replay_survives_a_rerun(tmp_path: Path) -> None:
     assert [r["status"] for r in out["results"]] == ["lifted_fully_restored"], (
         "该来源撤掉后没有别的来源压着，状态应是「已完全恢复」"
     )
+    persisted = json.loads(second.read_text(encoding="utf-8"))
+    assert persisted["completeness"] is None and persisted["analysis_status"] is None
     revived = load_report(second)
     assert revived.leads[0].advice == infra.ADVICE_INVESTIGATE, "重跑后的新报告也放回来了"
     assert revived.meta[MANUAL_RESTORES_KEY], "新报告也留下墓碑——后续回灌不会再压它"

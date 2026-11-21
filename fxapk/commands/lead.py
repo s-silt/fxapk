@@ -266,7 +266,7 @@ def lead_restore(
     corpus_root = resolve_corpus(corpus) if want_corpus else None
 
     path = Path(report)
-    rep = report_io.load_report(path)
+    rep, null_health = report_io.load_report_for_update(path)
     hits = [ld for ld in rep.leads if _match(ld, value, category or None)]
     if not hits:
         _fail(f"错误：报告里没有值为 {value!r} 的线索（--category={category or '不限'}）。", 1)
@@ -316,7 +316,7 @@ def lead_restore(
 
     stored = 0
     if corpus_root is None:
-        written = report_io.write_report(rep, path, render_existing_html=True)
+        written = report_io.write_report(rep, path, preserve_null_health=null_health)
     else:
         try:
             report_before = path.read_bytes()
@@ -327,7 +327,7 @@ def lead_restore(
             raise
         # ★账本写失败时报告必须回滚，否则报告已解除抑制而账本无凭据；身份依赖写出后的报告，所以无法先算账本。
         try:
-            written = report_io.write_report(rep, path, render_existing_html=True)
+            written = report_io.write_report(rep, path, preserve_null_health=null_health)
             raw = _load_report_payload(path)
             sha, synthetic = _corpus.sample_identity(raw)
             for lead in lifted:
@@ -404,7 +404,7 @@ def lead_replay(
                                    dry_run=dry_run, note="样本库里没有该样本的凭据"))
         return
 
-    rep = report_io.load_report(path)
+    rep, null_health = report_io.load_report_for_update(path)
     # ★每条凭据**恰好**产出一条结果，状态显式区分。消费方按工作流是 AI：只给 lifted/skipped
     #   两个列表的话，「凭据对应的线索本轮根本不存在」会落进两个列表之外（candidates>0 却
     #   两列表皆空），而「撤了一条但仍被别的来源压着」与「已完全恢复」在输出上分不开。
@@ -462,7 +462,7 @@ def lead_replay(
 
     written: list[str] = []
     if changed and not dry_run:
-        written = report_io.write_report(rep, path, render_existing_html=True)
+        written = report_io.write_report(rep, path, preserve_null_health=null_health)
     typer.echo(_replay_payload(sha, entries=entries, results=results, lifted=changed,
                                written=written, dry_run=dry_run))
 

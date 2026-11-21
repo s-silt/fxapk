@@ -22,7 +22,7 @@ from fxapk.core.case_package import (
 from fxapk.core.models import ANALYSIS_MODE_PASSIVE, ANALYSIS_MODES
 from fxapk.commands.phase2 import build_phase2_typer
 from fxapk.core.report_compat import report_revision_warnings
-from fxapk.core.report_io import load_report, write_report
+from fxapk.core.report_io import load_report_for_update, write_report
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ def close_command(
 ) -> None:
     """Close an existing report in place and refresh a sibling HTML report when present."""
     try:
-        report = load_report(report_json)
+        report, null_health = load_report_for_update(report_json)
     except (OSError, ValueError, UnicodeError) as exc:
         typer.echo(f"错误：报告读取失败：{report_json}（{type(exc).__name__}）", err=True)
         raise typer.Exit(code=_execution_failure_exit_code(strict=strict)) from exc
@@ -123,7 +123,9 @@ def close_command(
     try:
         closure = close_report(report, config)
         calculated = True
-        write_report(report, report_json, on_json_written=acknowledge_json)
+        write_report(
+            report, report_json, on_json_written=acknowledge_json, preserve_null_health=null_health,
+        )
     except Exception as exc:  # noqa: BLE001 - command boundary prints a safe summary
         # 记异常**调用栈位置**（文件:行:函数，末 5 帧），但**不含异常消息/源码行**——闭环会处理
         # provider 响应，异常消息可能夹带敏感响应片段/带 key 的 URL，``logger.exception`` 会把它

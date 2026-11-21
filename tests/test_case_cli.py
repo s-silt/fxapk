@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -33,6 +34,24 @@ def _write_report(tmp_path, *, tool_version: str | None = None) -> object:  # no
         str(path),
     )
     return path
+
+
+@pytest.mark.parametrize("completeness", [None, 1.2], ids=["omitted", "out-of-range"])
+def test_case_close_keeps_legacy_default_and_observed_out_of_range(
+    tmp_path: Path, completeness: float | None,
+) -> None:
+    report_path = tmp_path / "report.json"
+    data: dict[str, object] = {"package_name": "com.example.synthetic"}
+    if completeness is not None:
+        data["completeness"] = completeness
+    report_path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(cli.app, ["case", "close", str(report_path), "--offline"])
+
+    assert result.exit_code == 6
+    persisted = json.loads(report_path.read_text(encoding="utf-8"))
+    assert persisted["analysis_status"] == "complete"
+    assert persisted["completeness"] == (1.0 if completeness is None else completeness)
 
 
 def test_case_close_warns_on_revision_mismatch_without_blocking(
