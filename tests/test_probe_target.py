@@ -205,6 +205,89 @@ def test_tls_probe_preserves_sni_verification_and_limits_material(monkeypatch, f
         assert result["certificate_sha256"] == hashlib.sha256(der).hexdigest()
 
 
+@pytest.mark.parametrize(
+    ("window", "resolve_elapsed", "connect_elapsed", "expected_events", "expected_outcome"),
+    [
+        pytest.param(5, 0, 0, [
+            ("resolve", 5), ("connect", 5), ("socket", 5), "tls-context", "tls-wrap", "close",
+        ], "tls_binding_observed", id="short-window"),
+        pytest.param(15, 2, 2, [
+            ("resolve", 15), ("connect", 13), ("socket", 11), "tls-context", "tls-wrap", "close",
+        ], "tls_binding_observed", id="elapsed-time-reduces-budget"),
+        pytest.param(15, 15, 0, [
+            ("resolve", 15),
+        ], "failed", id="expired-before-connect"),
+        pytest.param(15, 2, 13, [
+            ("resolve", 15), ("connect", 13), "close",
+        ], "failed", id="expired-after-connect"),
+    ],
+)
+def test_tls_probe_spends_one_timeout_budget(
+    monkeypatch, window, resolve_elapsed, connect_elapsed, expected_events, expected_outcome,
+):
+    from types import SimpleNamespace
+    from fxapk.core import probe_target as pt
+
+    now = 512.0
+    events: list[tuple[str, float] | str] = []
+    peer_ip, host = "192.0.2.1", "api.example.test"
+    certificate = b"synthetic-der"
+
+    class Sock:
+        def getpeername(self):
+            return peer_ip, 443
+
+        def settimeout(self, value: float) -> None:
+            events.append(("socket", value))
+
+        def getpeercert(self, binary_form=False):
+            return certificate if binary_form else {"subjectAltName": [("DNS", host)]}
+
+        def close(self) -> None:
+            events.append("close")
+
+    sock = Sock()
+
+    def resolve(*_args: object, timeout: float) -> list[str]:
+        nonlocal now
+        events.append(("resolve", timeout))
+        now += resolve_elapsed
+        return [peer_ip]
+
+    def connect(*_args: object, timeout: float, **_kwargs: object) -> Sock:
+        nonlocal now
+        events.append(("connect", timeout))
+        now += connect_elapsed
+        return sock
+
+    def wrap(raw: Sock, *, server_hostname: str) -> Sock:
+        assert raw is sock and server_hostname == host
+        events.append("tls-wrap")
+        return sock
+
+    def create_context() -> SimpleNamespace:
+        events.append("tls-context")
+        return SimpleNamespace(wrap_socket=wrap)
+
+    monkeypatch.setattr(pt, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(pt, "resolve_public", resolve)
+    monkeypatch.setattr(pt, "connect_first", connect)
+    monkeypatch.setattr(pt.ssl, "create_default_context", create_context)
+    plan = pt.build_plan(report(), target=peer_ip, business_host=host, allow=[peer_ip], window=window)
+
+    result, der = pt.probe_tls(plan)
+
+    assert events == expected_events
+    assert result["outcome"] == expected_outcome
+    if expected_outcome == "failed":
+        assert result["error_type"] == "TimeoutError"
+        assert result["tls_verified"] is False
+        assert der == b""
+    else:
+        assert result["tls_verified"] is True
+        assert der == certificate
+
+
 def test_future_report_schema_is_not_written():
     from fxapk.core import probe_target as pt
     base = report()
