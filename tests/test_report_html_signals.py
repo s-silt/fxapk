@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from fxapk.core import infra
 from fxapk.core.models import (
     Confidence,
@@ -19,6 +21,7 @@ from fxapk.core.models import (
     LeadCategory,
     Report,
 )
+from fxapk.core.visibility import assess
 from fxapk.report import html as report_html
 from fxapk.report import letters
 
@@ -67,6 +70,48 @@ def _render_with_attribution(lead_value: str) -> str:
             [Endpoint(value="198.51.100.7", kind="ip", enrichment={"attribution": _ATTRIBUTION})],
         )
     )
+
+
+@pytest.mark.parametrize(("coverage", "dex_visibility"), [
+    ({"dex_available": False, "dex_parse_failed": True}, "unavailable"),
+    ({"dex_available": True, "main_dex_visibility": {"complete": False}}, "partial"),
+])
+def test_no_hardening_detection_does_not_imply_static_coverage(
+    coverage: dict[str, object], dex_visibility: str,
+) -> None:
+    report = _report([])
+    report.meta.update({"is_hardened": False, **coverage})
+    visibility = assess({"meta": report.meta})
+    assert visibility["sources"]["dex"]["visibility"] == dex_visibility
+    assert "static_endpoint_exhaustive" in visibility["blocked_claims"]
+    report.meta["visibility"] = visibility
+
+    out = report_html.render_to_string(report)
+
+    assert 'id="visibility"' in out and "<li>static_endpoint_exhaustive</li>" in out
+    assert "未检测到已知加固特征" in out
+    assert "静态端点视图较完整" not in out
+    assert "这不代表静态端点已查全" in out
+
+
+def test_no_hardening_detection_caveat_without_visibility_section() -> None:
+    report = _report([])
+    report.meta["is_hardened"] = False
+
+    out = report_html.render_to_string(report)
+
+    assert 'id="visibility"' not in out
+    assert "未检测到已知加固特征。这不代表静态端点已查全。" in out
+
+
+def test_detected_hardening_keeps_its_own_warning() -> None:
+    report = _report([])
+    report.meta.update({"is_hardened": True, "packer": "SYNTH-PACKER"})
+
+    out = report_html.render_to_string(report)
+
+    assert "检测到加固：SYNTH-PACKER。静态可见端点可能不完整" in out
+    assert "未检测到已知加固特征" not in out
 
 
 # ---------------------------------------------------------------------------
