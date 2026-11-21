@@ -826,7 +826,7 @@
     {% if is_hardened %}
     <div class="harden-warn">⚠ 检测到加固：{{ packer or "未知厂商" }}。静态可见端点可能不完整，建议人工脱壳 / 真机动态补全。加固厂商本身是高价值调证目标。</div>
     {% else %}
-    <div class="harden-ok">✔ 未检测到已知加固特征，静态端点视图较完整。</div>
+    <div class="harden-ok">✔ 未检测到已知加固特征。这不代表静态端点已查全。</div>
     {% endif %}
 
     {#- uni-app / 代码加密提示：plus.confusion 表示 uni 代码加密，静态抠取受限 -#}
