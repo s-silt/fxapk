@@ -826,7 +826,7 @@
     {% if is_hardened %}
     <div class="harden-warn">⚠ 检测到加固：{{ packer or "未知厂商" }}。静态可见端点可能不完整，建议人工脱壳 / 真机动态补全。加固厂商本身是高价值调证目标。</div>
     {% else %}
-    <div class="harden-ok">✔ 未检测到已知加固特征，静态端点视图较完整。</div>
+    <div class="harden-ok">✔ 未检测到已知加固特征。这不代表静态端点已查全。</div>
     {% endif %}
 
     {#- uni-app / 代码加密提示：plus.confusion 表示 uni 代码加密，静态抠取受限 -#}
@@ -965,26 +965,29 @@
       ★这一段管的是「未发现 ≠ 已穷尽」。此前 visibility 求值与各分析器的覆盖缺口只进
       report.json 与 digest（AI 读的那份），读 HTML 的人看不到「哪些维度没看全」
       「为什么降级」，于是把 count=0 读成"样本确实没有"。 -#}
-  {% set vis = meta.get("visibility") %}
+  {% set vis = visibility_view %}
   {% set cov = coverage_gaps %}
-  {% if vis or cov or java_scan %}
+  {% if vis or visibility_warning or cov or java_scan %}
   <section id="visibility">
     <h2>看到了多少 <span class="muted" style="font-size:13px;font-weight:400">（本次分析的可见范围；「未发现」只在可见范围内成立）</span></h2>
-    {% if vis and vis.get("blocked_claims") %}
+    {% if visibility_warning %}
+    <p class="muted">{{ visibility_warning }}</p>
+    {% endif %}
+    {% if vis and vis.blocked_claims %}
     <h3>不能下的结论</h3>
     <p class="muted">下列断言因输入不完整而<strong>不成立</strong>，报告中如出现类似措辞请以此处为准：</p>
-    <ul class="tight">{% for claim in vis.get("blocked_claims") %}<li>{{ claim }}</li>{% endfor %}</ul>
+    <ul class="tight">{% for claim in vis.blocked_claims %}<li>{{ claim }}</li>{% endfor %}</ul>
     {% endif %}
-    {% if vis and vis.get("sources") %}
+    {% if vis and vis.sources %}
     <h3>各来源可见性</h3>
     <table>
       <thead><tr><th>来源</th><th>可见性</th><th>依据</th></tr></thead>
       <tbody>
-      {% for name, info in vis.get("sources").items() %}
+      {% for name, info in vis.sources.items() %}
         <tr>
           <td>{{ name }}</td>
-          <td>{{ info.get("visibility") if info is mapping else info }}</td>
-          <td class="muted">{% if info is mapping %}{{ (info.get("why") or []) | join("；") }}{% endif %}</td>
+          <td>{{ info.visibility }}</td>
+          <td class="muted">{{ info.why | join("；") }}</td>
         </tr>
       {% endfor %}
       </tbody>

@@ -48,6 +48,11 @@ VIS_UNKNOWN = "unknown"          # 无从判断
 VIS_TIMEOUT = "timeout"          # 外部工具在自身 deadline 内未完成，被终止
 VIS_FAILED = "failed"            # 外部工具启动失败 / 执行失败 / 调度器故障
 
+VISIBILITY_LEVELS = frozenset({
+    VIS_COMPLETE, VIS_PARTIAL, VIS_STUB_ONLY, VIS_OPAQUE,
+    VIS_UNAVAILABLE, VIS_UNKNOWN, VIS_TIMEOUT, VIS_FAILED,
+})
+
 #: 补救状态：脱壳这类动作**做成功**与**结果已成为当前报告的输入**是两回事，必须分开。
 REM_NOT_ATTEMPTED = "not_attempted"
 REM_FAILED = "failed"
@@ -301,6 +306,20 @@ def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
         if state == VIS_PARTIAL and isinstance(raw, list) else []
     )
     return {"state": state, "reason_codes": codes}
+
+
+PERSISTED_VISIBILITY_INVALID_NOTE = "可见性字段结构异常；输入完整性未知"
+
+
+def persisted_visibility_containers_valid(raw: object) -> bool:
+    """Check persisted section containers without inferring visibility or reviewing their contents."""
+    return (
+        isinstance(raw, dict)
+        and isinstance(raw.get("sources", {}), dict)
+        and isinstance(raw.get("blocked_claims", []), list)
+        and isinstance(raw.get("notes", []), list)
+        and isinstance(raw.get("next_actions", []), list)
+    )
 
 
 def java_scan_counts(meta: object) -> dict[str, int] | None:
@@ -788,6 +807,7 @@ __all__ = [
     "REM_FAILED",
     "REM_NOT_ATTEMPTED",
     "REM_REANALYZED",
+    "VISIBILITY_LEVELS",
     "VIS_COMPLETE",
     "VIS_OPAQUE",
     "VIS_PARTIAL",

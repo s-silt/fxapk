@@ -14,7 +14,11 @@ from collections import Counter
 from typing import Any
 
 from fxapk.core.coverage import collect_coverage
-from fxapk.core.visibility import java_scan_counts
+from fxapk.core.visibility import (
+    PERSISTED_VISIBILITY_INVALID_NOTE,
+    java_scan_counts,
+    persisted_visibility_containers_valid,
+)
 from fxapk.core.admission import evaluate_usage
 from fxapk.core.evidence_scope import (
     project_serialized_closure,
@@ -564,7 +568,13 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
     """
     if not isinstance(raw, dict):
         return {"available": False, "note": "本报告无可见性求值（旧版本产出）；输入完整性未知"}
-    blocked = [c for c in (raw.get("blocked_claims") or []) if isinstance(c, str)]
+    if not persisted_visibility_containers_valid(raw):
+        return {"available": False, "note": PERSISTED_VISIBILITY_INVALID_NOTE}
+    sources = raw.get("sources", {})
+    blocked_claims = raw.get("blocked_claims", [])
+    notes = raw.get("notes", [])
+    next_actions = raw.get("next_actions", [])
+    blocked = [c for c in blocked_claims if isinstance(c, str)]
     raw_claims = raw.get("claims")
     claims: dict = raw_claims if isinstance(raw_claims, dict) else {}
     return {
@@ -572,7 +582,7 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
         "degraded": bool(raw.get("degraded")),
         "sources": {
             k: (v.get("visibility") if isinstance(v, dict) else None)
-            for k, v in (raw.get("sources") or {}).items()
+            for k, v in sources.items()
         },
         "remediation": raw.get("remediation"),
         # 无资格下的结论：AI 读到这些名字时，不得把对应的"未发现"当成"不存在"
@@ -584,9 +594,9 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
             }
             for c in blocked
         ],
-        "notes": [str(n) for n in (raw.get("notes") or [])],
+        "notes": [str(n) for n in notes],
         # 只说"哪里瞎了"是半截活：消费方还需要知道怎么补，否则拿到 degraded 报告也只能干看着。
-        "next_actions": [str(a) for a in (raw.get("next_actions") or [])],
+        "next_actions": [str(a) for a in next_actions],
     }
 
 

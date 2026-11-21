@@ -742,3 +742,48 @@ def test_cli_digest_keeps_partial_legacy_json_readable(tmp_path) -> None:
     assert "未记录工具版本" in result.stderr
     summary = json.loads(result.stdout)
     assert summary["integrity"]["reliable"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed"),
+    [
+        ("sources", [{"visibility": "partial"}]),
+        ("sources", "synthetic-shape-marker"),
+        ("sources", None),
+        ("blocked_claims", 7),
+        ("notes", "synthetic-shape-marker"),
+        ("next_actions", {"synthetic-shape-marker": True}),
+    ],
+    ids=["source-list", "source-string", "source-null", "claim-int", "notes-string", "actions-object"],
+)
+def test_cli_digest_preserves_other_sections_when_visibility_is_malformed(
+    tmp_path: Path, field: str, malformed: object,
+) -> None:
+    existing_visibility: dict[str, object] = {
+        "degraded": True,
+        "sources": {"java": {"visibility": "partial"}},
+        "blocked_claims": ["static_endpoint_exhaustive"],
+        "notes": ["synthetic coverage note"],
+        "next_actions": [],
+    }
+    existing_visibility[field] = malformed
+    report = {
+        "analysis_status": "complete",
+        "completeness": 1.0,
+        "meta": {"package_name": "com.example.synthetic", "visibility": existing_visibility},
+        "leads": [{"category": "DOMAIN", "value": "evidence.example", "confidence": "LOW"}],
+    }
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    result = runner.invoke(cli.app, ["digest", str(report_path)])
+
+    assert result.exit_code == 0, result.stderr
+    summary = json.loads(result.stdout)
+    assert summary["package"] == "com.example.synthetic"
+    assert [lead["value"] for lead in summary["leads"]] == ["evidence.example"]
+    visibility = summary["visibility"]
+    assert visibility["available"] is False
+    assert "未知" in visibility["note"]
+    assert not {"sources", "blocked_claims", "notes", "next_actions"}.intersection(visibility)
+    assert "synthetic-shape-marker" not in result.stdout + result.stderr

@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from fxapk.core import infra
 from fxapk.core.models import (
     Confidence,
@@ -19,6 +21,7 @@ from fxapk.core.models import (
     LeadCategory,
     Report,
 )
+from fxapk.core.visibility import assess
 from fxapk.report import html as report_html
 from fxapk.report import letters
 
@@ -67,6 +70,151 @@ def _render_with_attribution(lead_value: str) -> str:
             [Endpoint(value="198.51.100.7", kind="ip", enrichment={"attribution": _ATTRIBUTION})],
         )
     )
+
+
+@pytest.mark.parametrize(("coverage", "dex_visibility"), [
+    ({"dex_available": False, "dex_parse_failed": True}, "unavailable"),
+    ({"dex_available": True, "main_dex_visibility": {"complete": False}}, "partial"),
+])
+def test_no_hardening_detection_does_not_imply_static_coverage(
+    coverage: dict[str, object], dex_visibility: str,
+) -> None:
+    report = _report([])
+    report.meta.update({"is_hardened": False, **coverage})
+    visibility = assess({"meta": report.meta})
+    assert visibility["sources"]["dex"]["visibility"] == dex_visibility
+    assert "static_endpoint_exhaustive" in visibility["blocked_claims"]
+    report.meta["visibility"] = visibility
+
+    out = report_html.render_to_string(report)
+
+    assert 'id="visibility"' in out and "<li>static_endpoint_exhaustive</li>" in out
+    assert "未检测到已知加固特征" in out
+    assert "静态端点视图较完整" not in out
+    assert "这不代表静态端点已查全" in out
+
+
+def test_no_hardening_detection_caveat_without_visibility_section() -> None:
+    report = _report([])
+    report.meta["is_hardened"] = False
+
+    out = report_html.render_to_string(report)
+
+    assert 'id="visibility"' not in out
+    assert "未检测到已知加固特征。这不代表静态端点已查全。" in out
+
+
+def test_detected_hardening_keeps_its_own_warning() -> None:
+    report = _report([])
+    report.meta.update({"is_hardened": True, "packer": "SYNTH-PACKER"})
+
+    out = report_html.render_to_string(report)
+
+    assert "检测到加固：SYNTH-PACKER。静态可见端点可能不完整" in out
+    assert "未检测到已知加固特征" not in out
+
+
+@pytest.mark.parametrize(("why", "retained"), [
+    pytest.param(1, "", id="number"),
+    pytest.param("synthetic-private-why", "", id="text-is-not-a-list"),
+    pytest.param(["synthetic good dex reason", {"data": "synthetic-private-why"}],
+                 "synthetic good dex reason", id="mixed-list"),
+])
+def test_html_keeps_observed_sources_when_a_reason_is_malformed(why: object, retained: str) -> None:
+    report = _report([])
+    report.meta["visibility"] = {
+        "sources": {
+            "dex": {"visibility": "stub_only", "why": why},
+            "java": {"visibility": "partial", "why": ["synthetic good java reason"]},
+        },
+        "blocked_claims": ["static_endpoint_exhaustive"],
+    }
+
+    out = report_html.render_to_string(report)
+    section = out.split('id="visibility"', 1)[1].split("</section>", 1)[0]
+
+    assert "可见性字段结构异常；输入完整性未知" in section
+    assert "<li>static_endpoint_exhaustive</li>" in section
+    assert "<td>stub_only</td>" in section and "<td>partial</td>" in section
+    assert section.index("<td>dex</td>") < section.index("<td>java</td>")
+    assert "synthetic good java reason" in section
+    assert f'<td class="muted">{retained}</td>' in section
+    assert "synthetic-private-why" not in section and "s；y；n" not in section
+
+
+def test_html_preserves_valid_evidence_when_unused_visibility_notes_are_malformed() -> None:
+    report = _report([])
+    report.meta["visibility"] = {
+        "sources": {"dex": {"visibility": "stub_only", "why": ["synthetic dex reason"]}},
+        "blocked_claims": ["static_endpoint_exhaustive"],
+        "notes": "synthetic-private-note",
+    }
+
+    out = report_html.render_to_string(report)
+
+    assert "可见性字段结构异常；输入完整性未知" in out
+    assert "<li>static_endpoint_exhaustive</li>" in out
+    assert "<td>stub_only</td>" in out and "synthetic dex reason" in out
+    assert "synthetic-private-note" not in out
+
+
+def test_html_keeps_legacy_scalar_status_and_optional_reasons() -> None:
+    report = _report([])
+    report.meta["visibility"] = {
+        "sources": {
+            "dex": "stub_only", "java": {"visibility": "partial", "why": False},
+            "resource": {"visibility": "unknown"},
+        },
+    }
+
+    out = report_html.render_to_string(report)
+
+    assert "可见性字段结构异常；输入完整性未知" not in out
+    assert "<td>stub_only</td>" in out and "<td>partial</td>" in out and "<td>unknown</td>" in out
+
+
+@pytest.mark.parametrize("status", [
+    "complete", "partial", "stub_only", "opaque", "unavailable", "unknown", "timeout", "failed",
+])
+def test_html_preserves_canonical_visibility_levels_in_both_source_shapes(status: str) -> None:
+    report = _report([])
+    report.meta["visibility"] = {
+        "sources": {
+            "legacy": status, "mapped": {"visibility": status, "why": ["synthetic observation"]},
+        },
+        "blocked_claims": ["static_endpoint_exhaustive"],
+    }
+
+    out = report_html.render_to_string(report)
+
+    assert "可见性字段结构异常；输入完整性未知" not in out
+    assert out.count(f"<td>{status}</td>") == 2
+    assert "synthetic observation" in out and "<li>static_endpoint_exhaustive</li>" in out
+
+
+@pytest.mark.parametrize("status", [
+    pytest.param("synthetic-untrusted-visibility-level", id="unrecognized"),
+    pytest.param("Complete", id="wrong-case"),
+    pytest.param("", id="empty"),
+])
+def test_html_replaces_noncanonical_visibility_levels_in_both_source_shapes(status: str) -> None:
+    report = _report([])
+    report.meta["visibility"] = {
+        "sources": {
+            "legacy": status,
+            "mapped": {"visibility": status, "why": ["synthetic observation"]},
+            "java": {"visibility": "partial", "why": ["synthetic independent observation"]},
+        },
+        "blocked_claims": ["static_endpoint_exhaustive"],
+    }
+
+    out = report_html.render_to_string(report)
+
+    assert "可见性字段结构异常；输入完整性未知" in out
+    assert out.count("<td>unknown</td>") == 2
+    assert f"<td>{status}</td>" not in out
+    assert "<td>partial</td>" in out and "synthetic independent observation" in out
+    assert "synthetic observation" in out and "<li>static_endpoint_exhaustive</li>" in out
 
 
 # ---------------------------------------------------------------------------
