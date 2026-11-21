@@ -114,31 +114,53 @@ def stop_group(proc: subprocess.Popen[bytes]) -> bool:
         time.sleep(0.01)
 
 
+def stopped_worker(reason: str, clean: bool) -> tuple[int, dict[str, Any]]:
+    status = (124 if reason == "timeout" else 130) if clean else 2
+    return status, {
+        **rejected("worker", reason if clean else "cleanup_unverified"),
+        "process_group_empty": clean,
+    }
+
+
 def bounded(
     command: list[str], work: Path, seconds: float,
 ) -> tuple[int, dict[str, Any]]:
-    """Run the entire worker in one group. Never consume output after timeout."""
+    """Run the worker in one group and discard output after a timeout or cancellation."""
     become_subreaper()
     stdout = work / "worker.stdout"
-    with stdout.open("xb") as output, (work / "worker.stderr").open("xb") as errors:
-        proc = subprocess.Popen(
-            command, cwd=work, env=child_env(work), stdin=subprocess.DEVNULL,
-            stdout=output, stderr=errors, start_new_session=True,
-        )
-        try:
-            rc = proc.wait(timeout=seconds)
-        except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
-            clean = stop_group(proc)
-            timeout = isinstance(exc, subprocess.TimeoutExpired)
-            return (124 if timeout else 130) if clean else 2, {
-                **rejected("worker", ("timeout" if timeout else "interrupted") if clean else "cleanup_unverified"),
-                "process_group_empty": clean,
-            }
-        reap_exited(proc.pid)
-        if group_exists(proc.pid):
-            clean = stop_group(proc)
-            return 2, {**rejected("worker", "leftover_processes"), "process_group_empty": clean}
+    # A normal stop must not unwind Popen, the handoff to wait, or group cleanup.
+    with stop_flag() as requested:
+        with stdout.open("xb") as output, (work / "worker.stderr").open("xb") as errors:
+            if requested[0]:
+                return stopped_worker("interrupted", clean=True)
+            proc = subprocess.Popen(
+                command, cwd=work, env=child_env(work), stdin=subprocess.DEVNULL,
+                stdout=output, stderr=errors, start_new_session=True,
+            )
+            stop = wait_child(proc, time.monotonic() + seconds, requested)
+            if stop is not None or requested[0]:
+                try:
+                    clean = False
+                    if proc.returncode is not None:
+                        reap_exited(proc.pid)
+                        clean = not group_exists(proc.pid)
+                    if not clean:
+                        clean = stop_group(proc)
+                except OSError:
+                    clean = False
+                return stopped_worker(stop or "interrupted", clean=clean)
+            reap_exited(proc.pid)
+            if group_exists(proc.pid):
+                clean = stop_group(proc)
+                return 2, {**rejected("worker", "leftover_processes"), "process_group_empty": clean}
 
+        if requested[0]:
+            return stopped_worker("interrupted", clean=True)
+        receipt = read_worker_receipt(stdout, proc.returncode)
+        return stopped_worker("interrupted", clean=True) if requested[0] else receipt
+
+
+def read_worker_receipt(stdout: Path, rc: int | None) -> tuple[int, dict[str, Any]]:
     if stdout.stat().st_size > 65536:
         return 2, rejected("worker", "invalid_worker_receipt")
     try:
@@ -393,26 +415,28 @@ def stop_flag() -> Iterator[list[bool]]:
     def stop(_number: int, _frame: object) -> None:
         requested[0] = True
 
-    previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    previous = {}
     try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, stop)
         yield requested
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
 
 
-def wait_supervisor(proc: subprocess.Popen[bytes], deadline: float, requested: list[bool]) -> str | None:
-    """Use a dispatcher deadline independent of the supervisor's worker budget."""
+def wait_child(proc: subprocess.Popen[bytes], deadline: float, requested: list[bool]) -> str | None:
+    """Observe the cancellation flag without extending the caller's deadline."""
     while not requested[0]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return "dispatcher_timeout"
+            return "timeout"
         try:
             proc.wait(timeout=min(0.1, remaining))
         except subprocess.TimeoutExpired:
             continue
         if time.monotonic() >= deadline:
-            return "dispatcher_timeout"
+            return "timeout"
         return "interrupted" if requested[0] else None
     return "interrupted"
 
@@ -434,7 +458,9 @@ def launch(
             command, env=child_env(work), cwd=work, stdin=subprocess.DEVNULL,
             stdout=stdout, stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=(fd,),
         )
-        stop = wait_supervisor(proc, deadline, requested)
+        stop = wait_child(proc, deadline, requested)
+        if stop == "timeout":
+            stop = "dispatcher_timeout"
         if stop and proc.poll() is None:
             proc.send_signal(signal.SIGINT)
             try:
@@ -443,7 +469,18 @@ def launch(
                 # The supervisor still holds the inherited lock. Do not detach its worker by killing it.
                 return stop, {"reason": "stop_unconfirmed"}
         if stop:
-            # Discard even a well-formed success emitted after our deadline.
+            # A late success is never usable. Only carry the supervisor's exact
+            # negative cleanup record for this job across the outer stop.
+            if proc.returncode == 2:
+                cleanup = {"phase": "worker", "reason": "cleanup_unverified", "process_group_empty": False}
+                expected = encode({"schema": SCHEMA, "accepted": False, **cleanup, "quarantine": str(work)}) + b"\n"
+                try:
+                    stdout.seek(0)
+                    matched = stdout.read(len(expected) + 1) == expected
+                except (OSError, ValueError):
+                    matched = False
+                if matched:
+                    return stop, {**cleanup, "supervisor_exit": 2}
             return stop, {"reason": "supervisor_exit_observed", "supervisor_exit": proc.returncode}
 
         stdout.seek(0)
