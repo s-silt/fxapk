@@ -1556,7 +1556,10 @@ def _run_closure(
 
         try:
             paths = report_io.write_report(
-                report, Path(out_dir) / f"{base}.json", on_json_written=acknowledge_json,
+                report,
+                Path(out_dir) / f"{base}.json",
+                atomic_html_refresh=True,
+                on_json_written=acknowledge_json,
             )
         except (AutoCancelled, KeyboardInterrupt):
             # Cancellation may follow the atomic JSON replacement. Preserve

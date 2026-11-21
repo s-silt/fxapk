@@ -1,12 +1,14 @@
 """Cancellation at the case-closure boundary with synthetic reports and no device."""
 import json
+import os
 from pathlib import Path
+from typing import TextIO
 
 import pytest
 from typer.testing import CliRunner
 
 from fxapk import cli
-from fxapk.core import closure, report_io
+from fxapk.core import atomic, closure, report_io
 from fxapk.core.models import Report
 from fxapk.core.report_delivery import ReportDelivery
 from fxapk.dynamic import auto
@@ -44,17 +46,39 @@ def test_closure_interrupt_preserves_existing_report(
         path.write_bytes(stale_json)
     html_only = scenario in ("html_only_interrupt", "html_only_stale_json", "html_healthy")
     html_interrupt = scenario in ("html_interrupt", "html_only_interrupt")
+    unrelated_temp = out / ".fixture.html.synthetic-neighbor.tmp"
+    partial_writes: list[str] = []
     if html_interrupt:
-        from fxapk.report import html as report_html
+        out.mkdir()
+        unrelated_temp.write_bytes(b"unrelated temporary file")
+        write_text = Path.write_text
+        write_to_stream = atomic._write_text_to_stream
 
-        render_html = report_html.render
+        def write_prefix_then_interrupt(stream: TextIO, data: str) -> None:
+            prefix = data[:32]
+            assert 0 < len(prefix) < len(data)
+            assert stream.write(prefix) == len(prefix)
+            stream.flush()
+            partial_writes.append(prefix)
+            raise KeyboardInterrupt
 
-        def interrupt_refresh(*args, **kwargs):
-            if closed:
-                raise KeyboardInterrupt
-            return render_html(*args, **kwargs)
+        def interrupt_direct_write(
+            target: Path, data: str, encoding: str | None = None,
+            errors: str | None = None, newline: str | None = None,
+        ) -> int:
+            # Exercise the same failure if HTML is ever streamed to its final path.
+            if closed and target == html_path:
+                with target.open("w", encoding=encoding, errors=errors, newline=newline) as stream:
+                    write_prefix_then_interrupt(stream, data)
+            return write_text(target, data, encoding=encoding, errors=errors, newline=newline)
 
-        monkeypatch.setattr(report_html, "render", interrupt_refresh)
+        def interrupt_atomic_write(stream: TextIO, data: str) -> None:
+            if closed and "<!DOCTYPE html>" in data:
+                write_prefix_then_interrupt(stream, data)
+            write_to_stream(stream, data)
+
+        monkeypatch.setattr(Path, "write_text", interrupt_direct_write)
+        monkeypatch.setattr(atomic, "_write_text_to_stream", interrupt_atomic_write)
 
     def static(*_, out_dir, formats, delivery_sink, **__):
         paths = auto._write_reports(report, out_dir=out_dir, formats=formats, base="fixture",
@@ -97,10 +121,10 @@ def test_closure_interrupt_preserves_existing_report(
     if scenario == "html_failure":
         from fxapk.report import html as report_html
 
-        def reject_html(*_, **__):
+        def reject_html(_report: Report) -> str:
             raise OSError("synthetic HTML write failure before replacement")
 
-        monkeypatch.setattr(report_html, "render", reject_html)
+        monkeypatch.setattr(report_html, "render_to_string", reject_html)
     if scenario in ("json_failure", "html_only_stale_json"):
         def reject_json(target: Path, _raw: str) -> None:
             assert closed == [True] and target == path
@@ -133,6 +157,9 @@ def test_closure_interrupt_preserves_existing_report(
         assert str(html_path) in invocation.output and str(path) not in invocation.output
         return
     if html_interrupt:
+        assert len(partial_writes) == 1
+        assert list(out.glob(".fixture.html.*.tmp")) == [unrelated_temp]
+        assert unrelated_temp.read_bytes() == b"unrelated temporary file"
         expected = ("html", "json") if html_only else ("json",)
         assert result["report_paths"] == ([str(html_path), str(path)] if html_only else [str(path)])
         assert result["report_delivery"] == ReportDelivery(expected, expected, (), ())
@@ -144,11 +171,15 @@ def test_closure_interrupt_preserves_existing_report(
         if html_only:
             assert html_path.read_bytes() == saved[0]
         else:
-            assert html_path.read_text(encoding="utf-8") == "old inert HTML"
+            assert html_path.read_bytes() == b"old inert HTML"
         return
     if scenario == "html_healthy":
+        from fxapk.report import html as report_html
+
         refreshed = html_path.read_bytes()
         assert refreshed != saved[0]
+        assert refreshed == report_html.render_to_string(report).replace("\n", os.linesep).encode("utf-8")
+        assert not list(out.glob(".fixture.html.*.tmp"))
         assert b'id="case-closure"' not in saved[0] and b'id="case-closure"' in refreshed
         assert set(result["report_paths"]) == {str(path), str(html_path)}
         assert result["status"] == "complete"
