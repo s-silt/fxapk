@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -131,10 +132,15 @@ def _fixture_pid_state_before_cleanup(pid: int) -> str:
 def test_descendants_after_root_exit_force_killed(request) -> None:
     """根进程正常退出但孙进程脱管（daemon 化 java 形态）→ 检出、强杀整树、
     forced_tree_kill=True（该次运行不得算完整覆盖）。"""
-    with observe_posix_verification_stage() as observed:
+    details: dict[str, str] = {}
+    with observe_posix_verification_stage(details=details) as observed:
         res = proctree.run_owned([sys.executable, "-c", _SPAWN_SLEEPER], timeout=30.0)
     diagnostic = FirstFailureDiagnostic("ownership_descendants", getattr(request.config, "workerinput", {}).get("workerid", "master"))
-    diagnostic.observe(stage="termination_check", ownership=res.ownership_complete, reasons=res.reason_codes)
+    diagnostic.observe(
+        stage="termination_check", ownership=res.ownership_complete, reasons=res.reason_codes,
+        posix_verification_stage=observed(), posix_probe=details.get("posix_probe"),
+        posix_error=details.get("posix_error"),
+    )
     pid = int(res.stdout.strip().splitlines()[0])
     try:
         with diagnostic:
@@ -397,14 +403,33 @@ def test_spawn_failure_reported_not_raised() -> None:
 
 
 @pytest.mark.parametrize("completed", [False, True])
-@pytest.mark.parametrize("stages, expected_stage", [
-    ((), "unknown"),
-    (("ownership_scan",), "ownership_scan"),
-    (("individual_signal", "ownership_scan"), "individual_signal"),
+@pytest.mark.parametrize("events, expected_stage, expected_pair", [
+    pytest.param((), "unknown", None, id="no-observation"),
+    pytest.param(
+        (("ownership_scan", "environ", "AccessDenied"),
+         ("ownership_scan", "getpgid", "PermissionError")),
+        "ownership_scan", ("environ", "AccessDenied"), id="first-allowed-pair",
+    ),
+    pytest.param(
+        (("individual_signal", "environ", "AccessDenied"),
+         ("ownership_scan", "getpgid", "PermissionError")),
+        "individual_signal", None, id="signal-before-scan",
+    ),
+    pytest.param(
+        (("ownership_scan", "private-probe-424242", "AccessDenied"),
+         ("ownership_scan", "getpgid", "PermissionError")),
+        "ownership_scan", None, id="first-probe-not-allowlisted",
+    ),
+    pytest.param(
+        (("ownership_scan", "environ", "private-error-424242"),
+         ("ownership_scan", "getpgid", "PermissionError")),
+        "ownership_scan", None, id="first-error-not-allowlisted",
+    ),
 ])
 def test_descendant_failure_observation_precedes_fallback(
     monkeypatch, capsys, caplog, request, completed: bool,
-    stages: tuple[str, ...], expected_stage: str,
+    events: tuple[tuple[str, str, str], ...], expected_stage: str,
+    expected_pair: tuple[str, str] | None,
 ) -> None:
     import subprocess  # No process is started by this contract test.
     from types import SimpleNamespace
@@ -418,9 +443,11 @@ def test_descendant_failure_observation_precedes_fallback(
     def unexpected_spawn(*args, **kwargs):
         pytest.fail("the diagnostic contract must not spawn a process")
 
+    reasons = ("descendants_after_root_exit",) if completed else (
+        "descendants_after_root_exit", "tree_state_unverified",
+    )
     result = SimpleNamespace(
-        stdout="424242\n", ownership_complete=True,
-        reason_codes=("descendants_after_root_exit", "tree_state_unverified"),
+        stdout="424242\n", ownership_complete=True, reason_codes=reasons,
         timed_out=False, forced_tree_kill=True, termination_complete=completed,
     )
     logger = proctree.logger
@@ -430,8 +457,8 @@ def test_descendant_failure_observation_precedes_fallback(
         logger.debug(template, "unreviewed-stage-424242")
         logger.debug("POSIX tree verification unavailable: stage=ownership_scan")
         logger.debug("unreviewed event: %s", "individual_signal")
-        for stage in stages:
-            logger.debug(template, stage)
+        for stage, probe, error in events:
+            logger.debug(template, stage, extra={"posix_probe": probe, "posix_error": error})
         return result
 
     monkeypatch.setattr(proctree, "run_owned", run_stub)
@@ -454,6 +481,21 @@ def test_descendant_failure_observation_precedes_fallback(
             assert lines[1] == "fixture-pid-before-cleanup: unreadable"
             assert lines[2] == f"observed-posix-tree-verification-stage: {expected_stage}"
             assert not any("424242" in line for line in lines)
+            observation = json.loads(lines[0].removeprefix("first-failure: "))
+            if expected_pair is None:
+                assert "posix_probe" not in observation and "posix_error" not in observation
+            else:
+                assert (observation.get("posix_probe"), observation.get("posix_error")) == expected_pair
+            assert observation == {
+                "test": "ownership_descendants",
+                "worker": getattr(request.config, "workerinput", {}).get("workerid", "master"),
+                "stage": "termination_check",
+                "ownership": "confirmed",
+                "read_error": "unknown",
+                "reasons": ["descendants_after_root_exit", "tree_state_unverified"],
+                "posix_verification_stage": expected_stage,
+                **({"posix_probe": expected_pair[0], "posix_error": expected_pair[1]} if expected_pair else {}),
+            }
             assert calls == ["observe", "cleanup"]
         assert logger.level == logging.INFO and tuple(logger.filters) == initial_filters
         assert not any(record.name == logger.name and record.levelno == logging.DEBUG
