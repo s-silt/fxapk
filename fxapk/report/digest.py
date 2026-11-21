@@ -14,7 +14,11 @@ from collections import Counter
 from typing import Any
 
 from fxapk.core.coverage import collect_coverage
-from fxapk.core.visibility import java_scan_counts
+from fxapk.core.visibility import (
+    PERSISTED_VISIBILITY_INVALID_NOTE,
+    java_scan_counts,
+    persisted_visibility_containers_valid,
+)
 from fxapk.core.admission import evaluate_usage
 from fxapk.core.evidence_scope import (
     project_serialized_closure,
@@ -564,17 +568,12 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
     """
     if not isinstance(raw, dict):
         return {"available": False, "note": "本报告无可见性求值（旧版本产出）；输入完整性未知"}
+    if not persisted_visibility_containers_valid(raw):
+        return {"available": False, "note": PERSISTED_VISIBILITY_INVALID_NOTE}
     sources = raw.get("sources", {})
     blocked_claims = raw.get("blocked_claims", [])
     notes = raw.get("notes", [])
     next_actions = raw.get("next_actions", [])
-    if (
-        not isinstance(sources, dict)
-        or not isinstance(blocked_claims, list)
-        or not isinstance(notes, list)
-        or not isinstance(next_actions, list)
-    ):
-        return {"available": False, "note": "可见性字段结构异常；输入完整性未知"}
     blocked = [c for c in blocked_claims if isinstance(c, str)]
     raw_claims = raw.get("claims")
     claims: dict = raw_claims if isinstance(raw_claims, dict) else {}
