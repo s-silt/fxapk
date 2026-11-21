@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Mapping
 
@@ -320,8 +320,8 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
     return report
 
 
-def load_report(path: str | Path) -> Report:
-    """Load a UTF-8 report JSON object and reconstruct its typed model."""
+def load_report_payload(path: str | Path) -> dict[str, object]:
+    """Read report JSON without applying the typed model's legacy defaults."""
     payload = load_json_file(
         Path(path),
         limit=REPORT_JSON_MAX_BYTES,
@@ -330,7 +330,28 @@ def load_report(path: str | Path) -> Report:
     )
     if not isinstance(payload, dict):
         raise ValueError("report root must be an object")
-    return report_from_dict(payload)
+    return payload
+
+
+def load_report(path: str | Path) -> Report:
+    """Load a UTF-8 report JSON object and reconstruct its typed model."""
+    return report_from_dict(load_report_payload(path))
+
+
+@dataclass(frozen=True, slots=True)
+class _NullAnalysisHealth:
+    analysis_status: bool
+    completeness: bool
+
+
+def load_report_for_update(path: str | Path) -> tuple[Report, _NullAnalysisHealth]:
+    """Read a report and remember explicit unknowns for an in-place rewrite."""
+    payload = load_report_payload(path)
+    null_health = _NullAnalysisHealth(
+        analysis_status="analysis_status" in payload and payload["analysis_status"] is None,
+        completeness="completeness" in payload and payload["completeness"] is None,
+    )
+    return report_from_dict(payload), null_health
 
 
 def write_report(
@@ -340,12 +361,19 @@ def write_report(
     render_existing_html: bool = True,
     atomic_html_refresh: bool = False,
     on_json_written: Callable[[Path], None] | None = None,
+    preserve_null_health: _NullAnalysisHealth | None = None,
 ) -> list[str]:
     """Atomically replace JSON, acknowledge it, then refresh an existing sibling HTML."""
     ensure_writable_report_version(report.schema_version)
     report.schema_version = REPORT_SCHEMA_VERSION
     canonicalize_report_source_status(report)
     payload = report_json.to_dict(report)
+    if preserve_null_health is not None:
+        # Compatibility defaults in the model are not observed analysis health.
+        if preserve_null_health.analysis_status:
+            payload["analysis_status"] = None
+        if preserve_null_health.completeness:
+            payload["completeness"] = None
     meta = payload.get("meta")
     extensions = meta.pop(_EXTENSIONS_META_KEY, {}) if isinstance(meta, dict) else {}
     if isinstance(extensions, Mapping):
@@ -372,4 +400,4 @@ def write_report(
     return written
 
 
-__all__ = ["load_report", "report_from_dict", "write_report"]
+__all__ = ["load_report", "load_report_for_update", "load_report_payload", "report_from_dict", "write_report"]

@@ -11,8 +11,13 @@ from typing import Callable
 from fxapk.core.atomic import atomic_write_text
 from fxapk.core.evidence_archive import materialize, resolve_reference, split_reference
 from fxapk.core.json_io import REPORT_JSON_MAX_BYTES
-from fxapk.core.models import Report
-from fxapk.core.report_io import load_report
+from fxapk.core.models import (
+    ANALYSIS_STATUS_COMPLETE,
+    ANALYSIS_STATUS_FAILED,
+    ANALYSIS_STATUS_PARTIAL,
+    Report,
+)
+from fxapk.core.report_io import load_report_payload, report_from_dict
 from fxapk.report import html, json as report_json
 
 from . import acquisition, crypto, dex, emulate, filesystem, jni, native, recover, trace
@@ -93,8 +98,23 @@ def projection(value: object) -> dict | None:
             "not_requested": value.get("not_requested", [])}
 
 
-def write_json(path: Path, value: object) -> None:
-    atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2))
+def write_json(path: Path, value: object, *, allow_nan: bool = True) -> None:
+    atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2, allow_nan=allow_nan))
+
+
+def _source_analysis_health(payload: dict[str, object]) -> dict[str, object]:
+    """Retain canonical keys, but not unobserved health or untrusted raw values."""
+    status = payload.get("analysis_status")
+    count = payload.get("completeness")
+    return {
+        "analysis_status": status if isinstance(status, str) and status in (
+            ANALYSIS_STATUS_COMPLETE, ANALYSIS_STATUS_PARTIAL, ANALYSIS_STATUS_FAILED, "unknown",
+        ) else None,
+        # Range-check before Report converts to float, including oversized integers.
+        "completeness": count if isinstance(count, (int, float)) and (
+            not isinstance(count, bool) and 0.0 <= count <= 1.0
+        ) else None,
+    }
 
 
 def run(manifest: Path, output: Path, report_path: Path | None = None,
@@ -126,9 +146,12 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
         if not isinstance(task.get("kind"), str) or len(task["kind"]) > 64:
             raise ValueError("task_kind_invalid")
     report = None
+    source_health = None
     if report_path:
         with materialize(report_path, limit=REPORT_JSON_MAX_BYTES) as local_report:
-            report = load_report(local_report)
+            source_payload = load_report_payload(local_report)
+        source_health = _source_analysis_health(source_payload)
+        report = report_from_dict({**source_payload, **source_health})
     if report is not None and report.meta.get("sample_sha256") != sample:
         raise ValueError("review_report_sample_mismatch")
     if output.exists():
@@ -235,11 +258,15 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
     # Only attach the bounded metadata projection. Full sensitive details remain in local receipts.
     report.meta["offline_evidence_review"] = projection(receipt)
     try:
-        report_json.dump(report, str(output / "report.json"))
+        payload = report_json.to_dict(report)
+        if source_health is not None:
+            # Do not publish the typed reader's compatibility defaults as observations.
+            payload.update(source_health)
+        write_json(output / "report.json", payload, allow_nan=False)
         html.render(report, str(output / "report.html"))
         from fxapk.report.digest import build_digest
 
-        write_json(output / "digest.json", build_digest(report_json.to_dict(report)))
+        write_json(output / "digest.json", build_digest(payload))
         receipt["publication"] = "ok"
     except Exception as error:
         receipt.update(state="failed", publication="failed", reason_code="review_publication_failed")
