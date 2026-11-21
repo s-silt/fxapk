@@ -110,9 +110,9 @@ See `meta.web_capture_visibility` and `meta.web_evidence.handoff` for the full b
 - **The device or app loses connectivity after capture starts.** Check the device's own connection first, then look for proxy startup, ADB forwarding, and proxy restoration in the capture logs. An empty capture does not prove the app made no network connections.
 - **A third-party attribution lookup fails.** That does not mean capture failed. `auto --offline` disables online attribution enrichment, not the app's network traffic on the device. `capture` has no `--offline` option.
 
-**Before capture:** `auto --no-fix` skips diagnostic fixes but can still install and run the app. `capture --mode floor-only` does not set a new proxy, but it may clear a proxy left by a previous fxapk run. Capture only on an authorized test device.
+**Before capture:** `auto --no-fix` skips diagnostic fixes but can still install and run the app. `capture --mode floor-only` does not set a new proxy, but it may clear a device proxy setting that matches the fxapk default, even if it was set manually. Capture only on an authorized test device.
 
-**Exit codes:** `capture` returns 1 for capture errors, 2 for skipped capture, and 3 for degraded capture. Archive errors are reported separately. For `auto --strict-case`, 0, 5, and 6 describe case closure. Report write failures can return 1; manual cancellation returns 130.
+**Exit codes:** `capture` returns 1 for capture errors, 2 for skipped capture, and 3 for degraded capture. Archive errors are reported separately. For `auto --strict-case`, 0, 5, and 6 describe case closure. Report write failures can return 1; when `auto` reports a cancelled state, it returns 130.
 
 **Check capabilities without probing enrichment connectivity:** Use `fxapk selfcheck --offline`. `--no-probe` alone does not suppress enrichment connectivity checks. Offline self-check still checks local tools and device availability.
 
