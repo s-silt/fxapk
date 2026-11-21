@@ -104,6 +104,18 @@ See `meta.web_capture_visibility` and `meta.web_evidence.handoff` for the full b
 
 ## Capture and probe records
 
+**If capture reports a network restriction, first check where it appears.**
+
+- **The host denies a connection.** The environment may restrict outbound connections, local loopback, and device access separately. fxapk options cannot change those permissions.
+- **The device or app loses connectivity after capture starts.** Check the device's own connection first, then look for proxy startup, ADB forwarding, and proxy restoration in the capture logs. An empty capture does not prove the app made no network connections.
+- **A third-party attribution lookup fails.** That does not mean capture failed. `auto --offline` disables online attribution enrichment, not the app's network traffic on the device. `capture` has no `--offline` option.
+
+**Before capture:** `auto --no-fix` skips diagnostic fixes but can still install and run the app. `capture --mode floor-only` does not set a new proxy, but it may clear a device proxy setting that matches the fxapk default, even if it was set manually. Capture only on an authorized test device.
+
+**Exit codes:** `capture` returns 1 for capture errors, 2 for skipped capture, and 3 for degraded capture. Archive errors are reported separately. For `auto --strict-case`, 0, 5, and 6 describe case closure. Report write failures can return 1; when `auto` reports a cancelled state, it returns 130.
+
+**Check capabilities without probing enrichment connectivity:** Use `fxapk selfcheck --offline`. `--no-probe` alone does not suppress enrichment connectivity checks. Offline self-check still checks local tools and device availability.
+
 - `recover-runtime` observes only the running process selected in the explicit plan. `proc_mem` reads selected pages without JNI observation; `frida` observes DEX/JNI. Limits are 32 page-aligned ranges, 32 MiB total and 8 MiB per range, with process-start identity checks. Original DEX bytes feed `analyze --offline --extra-dex`, method validation and a real JADX subprocess. Reanalysis reads top-level `analysis_status`; later success never erases earlier failure. Requested `unpack` reanalysis failure returns error while retaining DEX files. It does not install/launch apps, deploy Frida, change proxies or modify target methods. See [RECOVERY-PIPELINE.md](RECOVERY-PIPELINE.md).
 - The `no-proxy` observation round does not request TLS-verification changes. Preserve it,
   the original `floor-only` baseline and MITM rounds separately. OkHttp never replays
