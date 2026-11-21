@@ -303,6 +303,20 @@ def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
     return {"state": state, "reason_codes": codes}
 
 
+PERSISTED_VISIBILITY_INVALID_NOTE = "可见性字段结构异常；输入完整性未知"
+
+
+def persisted_visibility_containers_valid(raw: object) -> bool:
+    """Check persisted section containers without inferring visibility or reviewing their contents."""
+    return (
+        isinstance(raw, dict)
+        and isinstance(raw.get("sources", {}), dict)
+        and isinstance(raw.get("blocked_claims", []), list)
+        and isinstance(raw.get("notes", []), list)
+        and isinstance(raw.get("next_actions", []), list)
+    )
+
+
 def java_scan_counts(meta: object) -> dict[str, int] | None:
     """Return observed reads and enumerated files from a valid JADX scan pair."""
     receipt = meta.get("jadx_receipt") if isinstance(meta, Mapping) else None

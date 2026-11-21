@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any
 
 from fxapk.core import infra
 from fxapk.core.coverage import collect_coverage
-from fxapk.core.visibility import java_scan_counts
+from fxapk.core.visibility import (
+    PERSISTED_VISIBILITY_INVALID_NOTE,
+    java_scan_counts,
+    persisted_visibility_containers_valid,
+)
 from fxapk.core.web_observations import GAP_LABELS, digest_web_observations
 from fxapk.core.web_supplement import project_for_digest
 from fxapk.core.leads import _overseas_target_coverage, _project_overseas_profiles
@@ -521,6 +525,8 @@ def _render_template(template: Any, report: Report) -> str:
     dex_query_view = project_dex_query(meta_map)
     dex_query_handoff = project_dex_handoff(meta_map)
     runtime_diagnostics_view = project_runtime_diagnostics(meta_map)
+    raw_visibility = meta_map.get("visibility")
+    visibility_valid = persisted_visibility_containers_valid(raw_visibility)
     return template.render(
         report=report,
         # 没有专属区块的类别（后台入口 / 自建 IM·C2 / 后端凭据 / 四方支付 / 短信转发 …）。
@@ -545,6 +551,10 @@ def _render_template(template: Any, report: Report) -> str:
         endpoint_total=len(report.endpoints),
         enrichment_by_endpoint=enrichment_by_endpoint,
         meta=meta_map,
+        visibility_view=raw_visibility if visibility_valid else None,
+        visibility_warning=(
+            PERSISTED_VISIBILITY_INVALID_NOTE if raw_visibility is not None and not visibility_valid else ""
+        ),
         overseas_targets=overseas_targets,
         # overseas_targets 只是 Shodan/CT 命中画像；分母须另从 endpoint 路由面计算，
         # 否则 ASN-only 候选会在 HTML 里消失，「0 条画像」还会被误读成「0 个候选」。

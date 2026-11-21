@@ -965,11 +965,14 @@
       ★这一段管的是「未发现 ≠ 已穷尽」。此前 visibility 求值与各分析器的覆盖缺口只进
       report.json 与 digest（AI 读的那份），读 HTML 的人看不到「哪些维度没看全」
       「为什么降级」，于是把 count=0 读成"样本确实没有"。 -#}
-  {% set vis = meta.get("visibility") %}
+  {% set vis = visibility_view %}
   {% set cov = coverage_gaps %}
-  {% if vis or cov or java_scan %}
+  {% if vis or visibility_warning or cov or java_scan %}
   <section id="visibility">
     <h2>看到了多少 <span class="muted" style="font-size:13px;font-weight:400">（本次分析的可见范围；「未发现」只在可见范围内成立）</span></h2>
+    {% if visibility_warning %}
+    <p class="muted">{{ visibility_warning }}</p>
+    {% endif %}
     {% if vis and vis.get("blocked_claims") %}
     <h3>不能下的结论</h3>
     <p class="muted">下列断言因输入不完整而<strong>不成立</strong>，报告中如出现类似措辞请以此处为准：</p>

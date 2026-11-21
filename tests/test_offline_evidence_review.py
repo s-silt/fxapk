@@ -271,6 +271,75 @@ def test_cli_offline_revision_preserves_only_observed_analysis_health(
         assert not package_path.exists()
 
 
+@pytest.mark.parametrize(("visibility_fields", "state"), [
+    pytest.param({}, "absent", id="legacy-absent"),
+    pytest.param({"visibility": None}, "absent", id="legacy-null"),
+    pytest.param({"visibility": {
+        "sources": {"resource": {"visibility": "partial", "why": ["synthetic coverage gap"]}},
+        "blocked_claims": ["static_endpoint_exhaustive"],
+    }}, "valid", id="valid"),
+    pytest.param({"visibility": "synthetic-untrusted-visibility"}, "invalid", id="wrong-root"),
+    pytest.param({"visibility": {"sources": [{"visibility": "partial"}]}}, "invalid", id="list-sources"),
+    pytest.param({"visibility": {"sources": []}}, "invalid", id="empty-list-sources"),
+    pytest.param({"visibility": {"blocked_claims": {"synthetic-untrusted-visibility": True}}},
+                 "invalid", id="wrong-blocked-claims"),
+    pytest.param({"visibility": {"notes": "synthetic-untrusted-visibility"}}, "invalid", id="wrong-notes"),
+    pytest.param({"visibility": {"next_actions": None}}, "invalid", id="wrong-next-actions"),
+])
+def test_cli_offline_revision_preserves_coverage_when_visibility_is_invalid(
+    tmp_path: Path, visibility_fields: dict[str, object], state: str,
+) -> None:
+    sample = "a" * 64
+    source = tmp_path / "source.json"
+    scan = {"files_scanned": 1, "files_total": 2}
+    original = json.dumps({
+        "package_name": "com.example.synthetic", "analysis_status": "complete", "completeness": 1,
+        "meta": {
+            "sample_sha256": sample, "jadx_receipt": {"scan": scan}, "card_merchant_read_failed": 1,
+            **visibility_fields,
+        },
+    }).encode()
+    source.write_bytes(original)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schema_version": "fxapk.offline-review.v1", "sample_sha256": sample,
+        "tasks": [{"id": "synthetic-inert", "kind": "fixture_unsupported"}],
+    }), encoding="utf-8")
+    out = tmp_path / "review"
+    cli = CliRunner()
+    source_digest = cli.invoke(app, ["digest", str(source)])
+    assert source_digest.exit_code == 0
+
+    review = cli.invoke(app, ["evidence-review", str(plan), "--report", str(source), "--out", str(out)])
+    assert review.exit_code == 5, review.output
+    assert json.loads(review.stdout)["state"] == "partial"
+    assert source.read_bytes() == original
+    receipt = json.loads((out / "review.json").read_text(encoding="utf-8"))
+    task = json.loads((out / "synthetic-inert.json").read_text(encoding="utf-8"))
+    assert (receipt["state"], receipt["publication"]) == ("partial", "ok")
+    assert (task["state"], task["reason_codes"], task["input_sha256"]) == (
+        "unsupported", ["review_kind_unsupported"], None,
+    )
+    assert not (out / "inputs").exists()
+    published = json.loads((out / "report.json").read_text(encoding="utf-8"))["meta"]
+    assert ("visibility" in published) is ("visibility" in visibility_fields)
+    assert published.get("visibility") == visibility_fields.get("visibility")
+
+    digest = json.loads((out / "digest.json").read_text(encoding="utf-8"))
+    assert digest["visibility"] == json.loads(source_digest.stdout)["visibility"]
+    assert digest["visibility"]["available"] is (state == "valid")
+    assert digest["visibility"]["java_scan"] == scan
+    assert digest["coverage"]["card_merchant_read_failed"] == 1
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert ('可见性字段结构异常；输入完整性未知' in html) is (state == "invalid")
+    assert ("<li>static_endpoint_exhaustive</li>" in html) is (state == "valid")
+    assert ("synthetic coverage gap" in html) is (state == "valid")
+    assert "synthetic-untrusted-visibility" not in html
+    assert 'id="jadx-java-scan"' in html and "1/2" in html
+    assert "card_merchant_read_failed = 1" in html
+
+
 @pytest.mark.parametrize("identifiers", [["manifest"], ["REPORT"], ["A", "a"], ["NUL"]])
 def test_output_identifiers_cannot_clobber_receipts(tmp_path, identifiers):
     plan = tmp_path / "plan.json"
