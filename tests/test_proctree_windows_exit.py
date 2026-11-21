@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import subprocess
 import sys
 import time
+from ctypes.wintypes import DWORD, HANDLE
+from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
 
@@ -20,30 +23,49 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows native 
 def owned_sleeper():
     job = proctree._create_kill_on_close_job()
     assert job is not None
-    tracker = proctree._JobExitTracker(job)
-    executable = getattr(sys, "_base_executable", None) or sys.executable
-    proc = subprocess.Popen(
-        [executable, "-c", "import time; time.sleep(15)"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    tracker = None
+    proc = None
+    assigned = False
     try:
-        assert proctree._assign_pid_to_job(job, proc.pid)
+        tracker = proctree._JobExitTracker(job)
+        # Start only a cmd builtin, not a Python launcher or site startup.
+        # SET /P blocks on the private pipe until the parent closes its end.
+        # A detached console process avoids an extra console host in this Job.
+        executable = Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"
+        proc = subprocess.Popen(
+            [str(executable), "/d", "/q", "/e:on", "/c", "set /p FXAPK_FIXTURE_WAIT="],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.DETACHED_PROCESS,
+        )
+        assigned = proctree._assign_pid_to_job(job, proc.pid)
+        assert assigned
         deadline = time.monotonic() + 2
         while tracker.seen != 1 and not tracker.failed and time.monotonic() < deadline:
             tracker.changed.wait(0.02)
             tracker.changed.clear()
         with diagnose_tracker_assertion(tracker, lambda: proctree._job_process_counts(job)):
             assert tracker.seen == 1 and len(tracker.handles) == 1 and not tracker.failed
+            assert proctree._job_process_counts(job) == (1, 1)
+            get_process_id = ctypes.WinDLL("kernel32", use_last_error=True).GetProcessId
+            get_process_id.argtypes, get_process_id.restype = (HANDLE,), DWORD
+            assert get_process_id(tracker.handles[0]) == proc.pid
+            assert proc.poll() is None
         yield job, tracker, proc
     finally:
-        # This Job was created here and contains only the above process; no numeric-PID kill.
-        proctree._kernel32.TerminateJobObject(job, 1)
-        proc.wait(timeout=5)
         try:
-            tracker.close()
+            # This Job is ours. If assignment failed, EOF still releases cmd.
+            if assigned:
+                proctree._kernel32.TerminateJobObject(job, 1)
+            if proc is not None:
+                assert proc.stdin is not None
+                proc.stdin.close()
+                proc.wait(timeout=5)
         finally:
-            proctree._kernel32.CloseHandle(job)
+            try:
+                if tracker is not None:
+                    tracker.close()
+            finally:
+                proctree._kernel32.CloseHandle(job)
 
 
 @pytest.mark.parametrize("budget", [0.0, 0.03])
