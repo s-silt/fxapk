@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from tests.first_failure_diagnostic import FirstFailureDiagnostic, observe_posix_verification_stage
 
 
 @pytest.fixture
@@ -38,15 +42,61 @@ def test_output_overflow_is_failure_not_truncated_success(runtime, tmp_path):
 
 
 def test_timeout_is_failure_with_process_tree_receipt(runtime, tmp_path):
-    result = runtime.run_bounded(
-        [sys.executable, "-c", "import time;time.sleep(30)"],
-        tmp_path / "run",
-        timeout=0.5,
-        max_stdout=1024,
-    )
-    assert result["ok"] is False
-    assert result["process_tree"]["timed_out"] is True
-    assert result["process_tree"]["termination_complete"] is True
+    details: dict[str, str] = {}
+    with FirstFailureDiagnostic("rea_runtime_timeout", os.environ.get("PYTEST_XDIST_WORKER", "master")) as diagnostic:
+        with observe_posix_verification_stage(details=details) as observed:
+            result = runtime.run_bounded(
+                [sys.executable, "-c", "import time;time.sleep(30)"],
+                tmp_path / "run",
+                timeout=0.5,
+                max_stdout=1024,
+            )
+        tree = result["process_tree"]
+        diagnostic.observe(
+            stage="termination_check",
+            ownership=tree.get("ownership_complete"),
+            reasons=tree.get("reason_codes"),
+            posix_verification_stage=observed(),
+            **details,
+        )
+        assert result["ok"] is False
+        assert tree["timed_out"] is True
+        assert tree["termination_complete"] is True
+
+
+@pytest.mark.parametrize("reason", ["tree_state_unverified", "survivors_after_kill"])
+def test_timeout_failure_emits_allowlisted_diagnostic(reason, tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw1")
+    tree = {
+        "timed_out": True,
+        "ownership_complete": True,
+        "termination_complete": False,
+        "reason_codes": ["timeout", reason, "synthetic-private-marker"],
+        "pids": [1234],
+    }
+    fake = SimpleNamespace(run_bounded=lambda *args, **kwargs: {"ok": False, "process_tree": tree})
+    with pytest.raises(AssertionError):
+        test_timeout_is_failure_with_process_tree_receipt(fake, tmp_path)
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.count("first-failure: ") == 1
+    payload = json.loads(err.removeprefix("first-failure: "))
+    expected = {
+        "test": "rea_runtime_timeout", "worker": "gw1", "stage": "termination_check",
+        "ownership": "confirmed", "read_error": "unknown",
+        "reasons": sorted(["timeout", reason, "unknown"]),
+    }
+    if reason == "tree_state_unverified":
+        expected["posix_verification_stage"] = "unknown"
+    assert payload == expected
+
+
+def test_timeout_success_keeps_diagnostic_quiet(tmp_path, capsys):
+    tree = {"timed_out": True, "ownership_complete": True, "termination_complete": True,
+            "reason_codes": ["timeout"]}
+    fake = SimpleNamespace(run_bounded=lambda *args, **kwargs: {"ok": False, "process_tree": tree})
+    test_timeout_is_failure_with_process_tree_receipt(fake, tmp_path)
+    assert capsys.readouterr() == ("", "")
 
 
 def test_nonzero_exit_cannot_pass(runtime, tmp_path):

@@ -8,11 +8,11 @@ import logging
 import sys
 from threading import get_ident
 
-_TESTS = frozenset({"ownership_access", "recovery_reanalysis", "diagnostic_contract", "ownership_descendants", "recovery_vectors", "recovery_unicorn"})
+_TESTS = frozenset({"ownership_access", "recovery_reanalysis", "diagnostic_contract", "ownership_descendants", "recovery_vectors", "recovery_unicorn", "rea_runtime_timeout"})
 _STAGES = frozenset({"ownership_read", "reanalyze", "cleanup", "termination_check", "validation_result", "positive_result", "negative_result"})
 _REASONS = frozenset({
     "descendants_after_root_exit", "distinct_validation_inputs_required",
-    "tree_state_unverified", "subprocess_timeout", "reanalyzed_extra_dex_not_loaded",
+    "tree_state_unverified", "survivors_after_kill", "timeout", "subprocess_timeout", "reanalyzed_extra_dex_not_loaded",
     "reanalyzed_report_partial", "reanalyzed_report_failed",
     "review_worker_timeout", "review_worker_exit", "review_worker_process_tree_incomplete",
     "review_worker_receipt_missing", "review_worker_receipt_invalid", "review_worker_failed",
