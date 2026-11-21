@@ -11,12 +11,13 @@ from copy import deepcopy
 from dataclasses import replace
 from contextlib import ExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from fxapk.core import infra
 from fxapk.core.coverage import collect_coverage
 from fxapk.core.visibility import (
     PERSISTED_VISIBILITY_INVALID_NOTE,
+    VIS_UNKNOWN,
     java_scan_counts,
     persisted_visibility_containers_valid,
 )
@@ -435,6 +436,61 @@ def finding_evidence_views(findings: list[Finding]) -> list[dict[str, Any]]:
     return views
 
 
+class _VisibilitySourceView(TypedDict):
+    visibility: str
+    why: list[str]
+
+
+class _VisibilityView(TypedDict):
+    sources: dict[str, _VisibilitySourceView]
+    blocked_claims: list[str]
+
+
+def _project_visibility(raw: object) -> tuple[_VisibilityView | None, str]:
+    """Keep independently readable coverage fields without reading new evidence."""
+    if raw is None:
+        return None, ""
+    if not isinstance(raw, dict):
+        return None, PERSISTED_VISIBILITY_INVALID_NOTE
+    if not raw:
+        return None, ""
+
+    malformed = not persisted_visibility_containers_valid(raw)
+    sources: dict[str, _VisibilitySourceView] = {}
+    raw_sources = raw.get("sources")
+    if isinstance(raw_sources, dict):
+        for name, info in raw_sources.items():
+            if not isinstance(name, str):
+                malformed = True
+                continue
+            if isinstance(info, str):  # Legacy scalar representation.
+                sources[name] = {"visibility": info, "why": []}
+                continue
+            if not isinstance(info, dict):
+                malformed = True
+                continue
+            status = info.get("visibility")
+            why = info.get("why")
+            reasons: list[str] = []
+            if isinstance(why, list):
+                reasons = [item for item in why if isinstance(item, str)]
+                malformed = malformed or len(reasons) != len(why)
+            elif why is not None and why is not False and why != "":
+                malformed = True
+            if status is not None and not isinstance(status, str):
+                malformed = True
+            sources[name] = {"visibility": status if isinstance(status, str) else VIS_UNKNOWN, "why": reasons}
+
+    blocked_claims: list[str] = []
+    raw_claims = raw.get("blocked_claims")
+    if isinstance(raw_claims, list):
+        blocked_claims = [claim for claim in raw_claims if isinstance(claim, str)]
+        malformed = malformed or len(blocked_claims) != len(raw_claims)
+
+    view: _VisibilityView = {"sources": sources, "blocked_claims": blocked_claims}
+    return view, PERSISTED_VISIBILITY_INVALID_NOTE if malformed else ""
+
+
 def render_to_string(report: Report) -> str:
     """渲染 Report 为 HTML 字符串。
 
@@ -525,8 +581,7 @@ def _render_template(template: Any, report: Report) -> str:
     dex_query_view = project_dex_query(meta_map)
     dex_query_handoff = project_dex_handoff(meta_map)
     runtime_diagnostics_view = project_runtime_diagnostics(meta_map)
-    raw_visibility = meta_map.get("visibility")
-    visibility_valid = persisted_visibility_containers_valid(raw_visibility)
+    visibility_view, visibility_warning = _project_visibility(meta_map.get("visibility"))
     return template.render(
         report=report,
         # 没有专属区块的类别（后台入口 / 自建 IM·C2 / 后端凭据 / 四方支付 / 短信转发 …）。
@@ -551,10 +606,8 @@ def _render_template(template: Any, report: Report) -> str:
         endpoint_total=len(report.endpoints),
         enrichment_by_endpoint=enrichment_by_endpoint,
         meta=meta_map,
-        visibility_view=raw_visibility if visibility_valid else None,
-        visibility_warning=(
-            PERSISTED_VISIBILITY_INVALID_NOTE if raw_visibility is not None and not visibility_valid else ""
-        ),
+        visibility_view=visibility_view,
+        visibility_warning=visibility_warning,
         overseas_targets=overseas_targets,
         # overseas_targets 只是 Shodan/CT 命中画像；分母须另从 endpoint 路由面计算，
         # 否则 ASN-only 候选会在 HTML 里消失，「0 条画像」还会被误读成「0 个候选」。

@@ -973,21 +973,21 @@
     {% if visibility_warning %}
     <p class="muted">{{ visibility_warning }}</p>
     {% endif %}
-    {% if vis and vis.get("blocked_claims") %}
+    {% if vis and vis.blocked_claims %}
     <h3>不能下的结论</h3>
     <p class="muted">下列断言因输入不完整而<strong>不成立</strong>，报告中如出现类似措辞请以此处为准：</p>
-    <ul class="tight">{% for claim in vis.get("blocked_claims") %}<li>{{ claim }}</li>{% endfor %}</ul>
+    <ul class="tight">{% for claim in vis.blocked_claims %}<li>{{ claim }}</li>{% endfor %}</ul>
     {% endif %}
-    {% if vis and vis.get("sources") %}
+    {% if vis and vis.sources %}
     <h3>各来源可见性</h3>
     <table>
       <thead><tr><th>来源</th><th>可见性</th><th>依据</th></tr></thead>
       <tbody>
-      {% for name, info in vis.get("sources").items() %}
+      {% for name, info in vis.sources.items() %}
         <tr>
           <td>{{ name }}</td>
-          <td>{{ info.get("visibility") if info is mapping else info }}</td>
-          <td class="muted">{% if info is mapping %}{{ (info.get("why") or []) | join("；") }}{% endif %}</td>
+          <td>{{ info.visibility }}</td>
+          <td class="muted">{{ info.why | join("；") }}</td>
         </tr>
       {% endfor %}
       </tbody>
