@@ -17,6 +17,7 @@ from fxapk.core import infra
 from fxapk.core.coverage import collect_coverage
 from fxapk.core.visibility import (
     PERSISTED_VISIBILITY_INVALID_NOTE,
+    VISIBILITY_LEVELS,
     VIS_UNKNOWN,
     java_scan_counts,
     persisted_visibility_containers_valid,
@@ -464,22 +465,24 @@ def _project_visibility(raw: object) -> tuple[_VisibilityView | None, str]:
                 malformed = True
                 continue
             if isinstance(info, str):  # Legacy scalar representation.
-                sources[name] = {"visibility": info, "why": []}
-                continue
-            if not isinstance(info, dict):
+                status, why = info, None
+            elif isinstance(info, dict):
+                status, why = info.get("visibility"), info.get("why")
+            else:
                 malformed = True
                 continue
-            status = info.get("visibility")
-            why = info.get("why")
             reasons: list[str] = []
             if isinstance(why, list):
                 reasons = [item for item in why if isinstance(item, str)]
                 malformed = malformed or len(reasons) != len(why)
             elif why is not None and why is not False and why != "":
                 malformed = True
-            if status is not None and not isinstance(status, str):
-                malformed = True
-            sources[name] = {"visibility": status if isinstance(status, str) else VIS_UNKNOWN, "why": reasons}
+            if isinstance(status, str) and status in VISIBILITY_LEVELS:
+                level = status
+            else:
+                level = VIS_UNKNOWN
+                malformed = malformed or status is not None
+            sources[name] = {"visibility": level, "why": reasons}
 
     blocked_claims: list[str] = []
     raw_claims = raw.get("blocked_claims")

@@ -173,6 +173,50 @@ def test_html_keeps_legacy_scalar_status_and_optional_reasons() -> None:
     assert "<td>stub_only</td>" in out and "<td>partial</td>" in out and "<td>unknown</td>" in out
 
 
+@pytest.mark.parametrize("status", [
+    "complete", "partial", "stub_only", "opaque", "unavailable", "unknown", "timeout", "failed",
+])
+def test_html_preserves_canonical_visibility_levels_in_both_source_shapes(status: str) -> None:
+    report = _report([])
+    report.meta["visibility"] = {
+        "sources": {
+            "legacy": status, "mapped": {"visibility": status, "why": ["synthetic observation"]},
+        },
+        "blocked_claims": ["static_endpoint_exhaustive"],
+    }
+
+    out = report_html.render_to_string(report)
+
+    assert "可见性字段结构异常；输入完整性未知" not in out
+    assert out.count(f"<td>{status}</td>") == 2
+    assert "synthetic observation" in out and "<li>static_endpoint_exhaustive</li>" in out
+
+
+@pytest.mark.parametrize("status", [
+    pytest.param("synthetic-untrusted-visibility-level", id="unrecognized"),
+    pytest.param("Complete", id="wrong-case"),
+    pytest.param("", id="empty"),
+])
+def test_html_replaces_noncanonical_visibility_levels_in_both_source_shapes(status: str) -> None:
+    report = _report([])
+    report.meta["visibility"] = {
+        "sources": {
+            "legacy": status,
+            "mapped": {"visibility": status, "why": ["synthetic observation"]},
+            "java": {"visibility": "partial", "why": ["synthetic independent observation"]},
+        },
+        "blocked_claims": ["static_endpoint_exhaustive"],
+    }
+
+    out = report_html.render_to_string(report)
+
+    assert "可见性字段结构异常；输入完整性未知" in out
+    assert out.count("<td>unknown</td>") == 2
+    assert f"<td>{status}</td>" not in out
+    assert "<td>partial</td>" in out and "synthetic independent observation" in out
+    assert "synthetic observation" in out and "<li>static_endpoint_exhaustive</li>" in out
+
+
 # ---------------------------------------------------------------------------
 # 五层归属链
 # ---------------------------------------------------------------------------
