@@ -402,7 +402,11 @@ def test_spawn_failure_reported_not_raised() -> None:
         assert "spawn_failed" in res.reason_codes
 
 
-@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("completed, gone", [
+    pytest.param(False, True, id="unverified-tree"),
+    pytest.param(True, True, id="verified-tree-sleeper-gone"),
+    pytest.param(True, False, id="verified-tree-sleeper-live"),
+])
 @pytest.mark.parametrize("events, expected_stage, expected_pair", [
     pytest.param((), "unknown", None, id="no-observation"),
     pytest.param(
@@ -427,7 +431,7 @@ def test_spawn_failure_reported_not_raised() -> None:
     ),
 ])
 def test_descendant_failure_observation_precedes_fallback(
-    monkeypatch, capsys, caplog, request, completed: bool,
+    monkeypatch, capsys, caplog, request, completed: bool, gone: bool,
     events: tuple[tuple[str, str, str], ...], expected_stage: str,
     expected_pair: tuple[str, str] | None,
 ) -> None:
@@ -464,15 +468,20 @@ def test_descendant_failure_observation_precedes_fallback(
     monkeypatch.setattr(proctree, "run_owned", run_stub)
     monkeypatch.setattr(subprocess, "Popen", unexpected_spawn)
     monkeypatch.setattr(psutil, "Process", unavailable)
-    monkeypatch.setitem(globals(), "_sleeper_gone", lambda _pid: True)
+
+    def sleeper_gone(_pid: int) -> bool:
+        calls.append("check_sleeper")
+        return gone
+
+    monkeypatch.setitem(globals(), "_sleeper_gone", sleeper_gone)
     monkeypatch.setitem(globals(), "_kill_if_alive", lambda _pid: calls.append("cleanup"))
 
     with caplog.at_level(logging.INFO, logger=logger.name):
         initial_filters = tuple(logger.filters)
-        if completed:
+        if completed and gone:
             test_descendants_after_root_exit_force_killed(request)
             assert capsys.readouterr().err == ""
-            assert calls == ["cleanup"]
+            assert calls == ["check_sleeper", "cleanup"]
         else:
             with pytest.raises(AssertionError):
                 test_descendants_after_root_exit_force_killed(request)
@@ -482,21 +491,20 @@ def test_descendant_failure_observation_precedes_fallback(
             assert lines[2] == f"observed-posix-tree-verification-stage: {expected_stage}"
             assert not any("424242" in line for line in lines)
             observation = json.loads(lines[0].removeprefix("first-failure: "))
-            if expected_pair is None:
-                assert "posix_probe" not in observation and "posix_error" not in observation
-            else:
-                assert (observation.get("posix_probe"), observation.get("posix_error")) == expected_pair
-            assert observation == {
+            expected: dict[str, object] = {
                 "test": "ownership_descendants",
                 "worker": getattr(request.config, "workerinput", {}).get("workerid", "master"),
                 "stage": "termination_check",
                 "ownership": "confirmed",
                 "read_error": "unknown",
-                "reasons": ["descendants_after_root_exit", "tree_state_unverified"],
-                "posix_verification_stage": expected_stage,
-                **({"posix_probe": expected_pair[0], "posix_error": expected_pair[1]} if expected_pair else {}),
+                "reasons": list(reasons),
             }
-            assert calls == ["observe", "cleanup"]
+            if not completed:
+                expected["posix_verification_stage"] = expected_stage
+                if expected_pair:
+                    expected.update(posix_probe=expected_pair[0], posix_error=expected_pair[1])
+            assert observation == expected
+            assert calls == (["check_sleeper"] if completed else []) + ["observe", "cleanup"]
         assert logger.level == logging.INFO and tuple(logger.filters) == initial_filters
         assert not any(record.name == logger.name and record.levelno == logging.DEBUG
                        for record in caplog.records)
