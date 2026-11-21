@@ -1,8 +1,12 @@
 """证据可见性求值：壳桩样本的「未发现」不得被读成「不存在」。零真实数据。"""
 from __future__ import annotations
 
+import pytest
+
 from fxapk.core import visibility as V
+from fxapk.core.models import Report
 from fxapk.report.digest import build_digest
+from fxapk.report.html import render_to_string
 
 
 def _report(**meta) -> dict:
@@ -93,6 +97,55 @@ def test_java_failed_and_receipt_gap_ranks():
     b = V.assess(_report(dex_available=True, jadx_receipt={
         "status": "ok", "complete": False, "reason_codes": ["read_failed"]}))
     assert b["sources"]["java"]["visibility"] == V.VIS_PARTIAL
+
+
+@pytest.mark.parametrize("contradiction", [
+    {"status": "partial"},
+    {"reason_codes": ["scan_limit_hit"]},
+    {"scan": {"scan_limit_hit": True, "files_scanned": 0, "files_total": 0}},
+    {"scan": {"truncated_files": 1, "files_scanned": 3, "files_total": 3}},
+    {"scan": {"files_scanned": 2, "files_total": 3}},
+    {"scan": None},
+    {"scan": {"files_scanned": 3, "files_selected": 2, "files_total": 3}},
+])
+def test_java_complete_flag_cannot_override_explicit_gaps(contradiction: dict) -> None:
+    report = _report(
+        dex_available=True,
+        resource_files_scanned=1,
+        jadx_receipt={**_JADX_OK, **contradiction},
+    )
+    assessment = V.assess(report)
+    assert assessment["sources"]["java"]["visibility"] == V.VIS_PARTIAL
+    assert assessment["sources"]["dex"]["visibility"] == V.VIS_COMPLETE
+    assert "static_endpoint_exhaustive" in assessment["blocked_claims"]
+    assert V.java_coverage_observation(report)["state"] == V.VIS_PARTIAL
+    assert V.assess(report) == assessment
+
+    report["meta"]["visibility"] = assessment
+    digest = build_digest(report)["visibility"]
+    assert digest["sources"]["java"] == V.VIS_PARTIAL
+    assert "static_endpoint_exhaustive" in {item["claim"] for item in digest["blocked_claims"]}
+
+
+def test_java_truncated_full_count_in_html() -> None:
+    report = Report(package_name="com.synthetic.coverage", meta={
+        "jadx_receipt": {
+            **_JADX_OK,
+            "scan": {"truncated_files": 1, "files_scanned": 3, "files_total": 3},
+        },
+    }, leads=[], endpoints=[], findings=[], analyzer_status=[])
+    report.meta["visibility"] = V.assess({"meta": report.meta})
+    html = render_to_string(report)
+    assert "3/3" in html
+    assert "Java 覆盖回执的完整标记与扫描记录冲突" in html
+
+
+def test_java_complete_empty_scan_keeps_complete() -> None:
+    report = _report(jadx_receipt={
+        **_JADX_OK,
+        "scan": {"scan_limit_hit": False, "files_scanned": 0, "files_total": 0},
+    })
+    assert V.java_coverage_observation(report)["state"] == V.VIS_COMPLETE
 
 
 def test_scheduler_receipt_overrides_jadx_selfreport():
