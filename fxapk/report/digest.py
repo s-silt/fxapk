@@ -171,7 +171,11 @@ def _finite_num_or_none(value: object) -> float | None:
     """有限实数 → float；bool / 非数 / NaN / inf → None（codex P1：NaN 不得绕过阈值伪装可靠）。"""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    f = float(value)
+    try:
+        f = float(value)
+    except OverflowError:
+        # Valid JSON integers can exceed the representable float range.
+        return None
     return f if math.isfinite(f) else None
 
 
@@ -198,6 +202,10 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
     """
     warnings: list[str] = []
     status = report.get("analysis_status")
+    if not isinstance(status, str) or status not in (
+        ANALYSIS_STATUS_COMPLETE, ANALYSIS_STATUS_PARTIAL, ANALYSIS_STATUS_FAILED, "unknown"
+    ):
+        status = None
     raw_completeness = report.get("completeness")
     completeness = _finite_num_or_none(raw_completeness)
     if completeness is not None:
@@ -216,9 +224,7 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
     # ★analysis_status 必须被**消费**而不只是透传：报告自称 partial/failed 时，即使
     #   completeness=1.0 且无 critical_failures（如仅 pipeline 阶段崩溃降的档），摘要也不得
     #   自称 reliable——否则"部分完成"在唯一被下游读取的出口上消失。
-    if not isinstance(status, str) or status not in (
-        ANALYSIS_STATUS_COMPLETE, ANALYSIS_STATUS_PARTIAL, ANALYSIS_STATUS_FAILED
-    ):
+    if status in (None, "unknown"):
         warnings.append("分析状态缺失或无法识别：无法确认结论基础完整")
     elif status in (ANALYSIS_STATUS_PARTIAL, ANALYSIS_STATUS_FAILED):
         # 存盘形状：stage_status 由 pipeline 写在 meta 下（pipeline._run_stage →
