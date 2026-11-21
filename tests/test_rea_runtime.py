@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -42,7 +42,9 @@ def test_output_overflow_is_failure_not_truncated_success(runtime, tmp_path):
     assert (tmp_path / "run/stdout.bin").stat().st_size == 1024
 
 
-def test_timeout_is_failure_with_process_tree_receipt(runtime, tmp_path):
+def test_timeout_is_failure_with_process_tree_receipt(
+    runtime: ModuleType | SimpleNamespace, tmp_path: Path,
+) -> None:
     details: dict[str, str] = {}
     with FirstFailureDiagnostic("rea_runtime_timeout", os.environ.get("PYTEST_XDIST_WORKER", "master")) as diagnostic:
         with observe_posix_verification_stage(details=details) as observed:
@@ -74,7 +76,10 @@ def test_timeout_is_failure_with_process_tree_receipt(runtime, tmp_path):
     }),
     (["survivors_after_kill", "process_exit_unverified"], {}),
 ])
-def test_timeout_failure_emits_allowlisted_diagnostic(reasons, details, tmp_path, capsys, monkeypatch):
+def test_timeout_failure_emits_allowlisted_diagnostic(
+    reasons: list[str], details: dict[str, str], tmp_path: Path,
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw1")
     tree = {
         "timed_out": True,
@@ -84,7 +89,7 @@ def test_timeout_failure_emits_allowlisted_diagnostic(reasons, details, tmp_path
         "pids": [1234],
     }
 
-    def run_bounded(*args, **kwargs):
+    def run_bounded(*_args: object, **_kwargs: object) -> dict[str, object]:
         if details.get("posix_verification_stage") == "ownership_scan":
             logging.getLogger("fxapk.core.proctree").debug(
                 "POSIX tree verification unavailable: stage=%s", "ownership_scan",
@@ -106,10 +111,17 @@ def test_timeout_failure_emits_allowlisted_diagnostic(reasons, details, tmp_path
         **details,
     }
 
-def test_timeout_success_keeps_diagnostic_quiet(tmp_path, capsys):
+
+def test_timeout_success_keeps_diagnostic_quiet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
     tree = {"timed_out": True, "ownership_complete": True, "termination_complete": True,
             "reason_codes": ["timeout"]}
-    fake = SimpleNamespace(run_bounded=lambda *args, **kwargs: {"ok": False, "process_tree": tree})
+
+    def run_bounded(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"ok": False, "process_tree": tree}
+
+    fake = SimpleNamespace(run_bounded=run_bounded)
     test_timeout_is_failure_with_process_tree_receipt(fake, tmp_path)
     assert capsys.readouterr() == ("", "")
 
