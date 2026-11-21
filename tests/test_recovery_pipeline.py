@@ -98,6 +98,9 @@ def test_real_unicorn_calls_and_negative_vectors(tmp_path: Path, request: pytest
     ("budget", "validation_result", "ownership_scan", "invalid_label"),
     ("budget", "validation_result", "individual_signal", None),
     ("budget", "validation_result", "unknown", None),
+    ("duplicates", "validation_result", "ownership_scan", "valid"),
+    ("duplicates", "validation_result", "individual_signal", None),
+    ("duplicates", None, None, None),
     ("arithmetic", None, None, None),
     ("budget", None, None, None),
     ("arithmetic", "execute_error", None, None),
@@ -156,7 +159,7 @@ def test_recovery_execution_diagnostic_contract(
 
     def fake_worker(argv: list[str], **_kwargs: object) -> proctree.OwnedRun:
         result_stage = "negative_result" if receipts else "positive_result"
-        if target == "budget":
+        if target in {"budget", "duplicates"}:
             result_stage = "validation_result"
         unavailable = result_stage == failure_stage
         destination = Path(argv[-1])
@@ -164,7 +167,9 @@ def test_recovery_execution_diagnostic_contract(
         if failure_stage == "execute_error":
             logger.debug(template, "ownership_scan")
             raise execute_error
-        if result_stage == "validation_result":
+        if target == "duplicates":
+            payload = {"state": "partial", "reason_codes": ["distinct_validation_inputs_required"]}
+        elif target == "budget":
             payload = {"state": "failed", "reason_codes": ["emulation_budget_exhausted"]}
         elif result_stage == "negative_result":
             payload = {"state": "failed", "reason_codes": ["emulation_output_mismatch"]}
@@ -199,6 +204,8 @@ def test_recovery_execution_diagnostic_contract(
             test_execution_budgets_and_missing_environment_fail_explicitly(
                 "00000014", "emulation_budget_exhausted", tmp_path, request,
             )
+        elif target == "duplicates":
+            test_same_vectors_do_not_count_as_distinct_validation(tmp_path, request)
         else:
             test_real_unicorn_calls_and_negative_vectors(tmp_path, request)
 
@@ -235,7 +242,7 @@ def test_recovery_execution_diagnostic_contract(
         lines = err.splitlines()
         assert len(lines) == 1 and lines[0].startswith("first-failure: ")
         expected = {
-            "test": "recovery_vectors" if target == "budget" else "recovery_unicorn",
+            "test": "recovery_unicorn" if target == "arithmetic" else "recovery_vectors",
             "worker": getattr(request.config, "workerinput", {}).get("workerid", "master"),
             "stage": failure_stage,
             "ownership": "unknown",
@@ -321,12 +328,13 @@ def test_recovered_dex_exact_descriptor_and_missing_body_are_separate():
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")
-def test_same_vectors_do_not_count_as_distinct_validation(tmp_path, request):
+def test_same_vectors_do_not_count_as_distinct_validation(tmp_path: Path, request: pytest.FixtureRequest) -> None:
     pytest.importorskip("unicorn")
-    value = execute(bytes.fromhex("0000018bc0035fd6"), emu_options(vectors=[
-        {"args": [3, 4], "expected_return": 7}, {"args": [3, 4], "expected_return": 7}]), tmp_path)
-    diagnostic = FirstFailureDiagnostic("recovery_vectors", getattr(request.config, "workerinput", {}).get("workerid", "master"))
-    diagnostic.observe(stage="validation_result", reasons=value.get("reason_codes"))
+    value, diagnostic = _observe_recovery_execution(
+        bytes.fromhex("0000018bc0035fd6"),
+        emu_options(vectors=[{"args": [3, 4], "expected_return": 7}, {"args": [3, 4], "expected_return": 7}]),
+        tmp_path, request, test="recovery_vectors", stage="validation_result",
+    )
     with diagnostic:
         assert value["state"] == "partial" and "distinct_validation_inputs_required" in value["reason_codes"]
 

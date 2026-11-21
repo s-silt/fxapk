@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext, suppress
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 from textwrap import dedent
 from types import FrameType, SimpleNamespace
 from typing import Any
+import venv
 
 import pytest
 
@@ -90,14 +92,19 @@ class ReplayFixture:
         self.record.write_text(json.dumps(entry) + "\n", encoding="ascii")
         return self.record.read_bytes()
 
+    def submit_command(self, python: str, source: Path, message: str) -> list[str]:
+        return [
+            python, "-I", str(TOOL), "--state-dir", str(self.ledger), "submit",
+            "--task-id", "toy", "--source", str(source), "--scratch", str(self.scratch),
+            "--base", self.base, "--tree", self.tree, "--patch", str(self.patch),
+            "--patch-sha256", self.manifest["patch_sha256"], "--message", message,
+            "--timeout", str(self.manifest["timeout"]), "--deadline", str(self.manifest["deadline"]),
+        ]
+
     def submit(self, *, message: str | None = None) -> tuple[int, dict[str, Any]]:
         # This source cannot be used to launch any new job; it is irrelevant to replay.
         result = subprocess.run(
-            [sys.executable, "-I", str(TOOL), "--state-dir", str(self.ledger), "submit",
-             "--task-id", "toy", "--source", str(self.source), "--scratch", str(self.scratch),
-             "--base", self.base, "--tree", self.tree, "--patch", str(self.patch),
-             "--patch-sha256", self.manifest["patch_sha256"], "--message", message or self.message,
-             "--timeout", str(self.manifest["timeout"]), "--deadline", str(self.manifest["deadline"])],
+            self.submit_command(sys.executable, self.source, message or self.message),
             env=self.env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
         )
         assert not result.stderr
@@ -380,7 +387,7 @@ def test_cancel_after_worker_handle_acquired(
     if cleanup == "signal_denied":
         assert not wait_calls
     else:
-        assert len(wait_calls) == 1 and 0 < wait_calls[0] <= dispatcher.CLEANUP_LIMIT
+        assert len(wait_calls) == 1 and 0 < wait_calls[0] <= 3.0
     assert worker.running is not cleanup_confirmed
     expected_code, state = (130, "interrupted") if cleanup_confirmed else (1, "failed")
     assert code == expected_code and outcome["state"] == state
@@ -391,6 +398,101 @@ def test_cancel_after_worker_handle_acquired(
     assert "receipt" not in outcome
     assert dispatcher.submit(args, prior_candidate.ledger) == (code, {**outcome, "replayed": True})
     assert len(launches) == 1 and handlers == original
+
+
+def test_submit_cancel_before_worker_popen_returns(prior_candidate: ReplayFixture, tmp_path: Path) -> None:
+    # A private sitecustomize can observe both isolated interpreters without
+    # changing the dispatcher, its copied supervisor, or the worker command.
+    python_env = tmp_path / "python"
+    venv.EnvBuilder(symlinks=True, with_pip=False).create(python_env)
+    site = next((python_env / "lib").glob("python*/site-packages"))
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener, ExitStack() as peers:
+        listener.bind("")  # Linux assigns a unique abstract socket, independent of tmp_path length.
+        listener.listen(2)
+        listener.settimeout(20)
+        (site / "sitecustomize.py").write_text(dedent(f"""\
+            import os
+            import signal
+            import socket
+            import subprocess
+            import sys
+
+            def connect():
+                channel = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+                channel.settimeout(20)
+                channel.connect({listener.getsockname()!r})
+                return channel
+
+            if sys.argv[1:2] == ["--supervise"]:
+                execute_child = subprocess.Popen._execute_child
+
+                def at_spawn(proc, command, *args, **kwargs):
+                    execute_child(proc, command, *args, **kwargs)
+                    if command[3:4] != ["--worker"]:
+                        return
+                    # The real child has exec'd. Popen.__init__ is still on the stack.
+                    with connect() as channel:
+                        previous = signal.set_wakeup_fd(channel.fileno())
+                        try:
+                            channel.sendall(f"supervisor {{proc.pid}}".encode())
+                            assert channel.recv(1) == b"R"
+                        finally:
+                            signal.set_wakeup_fd(previous)
+
+                subprocess.Popen._execute_child = at_spawn
+            elif sys.argv[1:2] == ["--worker"]:
+                def pause_at_first_command(event, args):
+                    if event == "subprocess.Popen":
+                        with connect() as channel:
+                            channel.sendall(f"worker {{os.getpid()}}".encode())
+                            channel.recv(1)  # Stay live until group cleanup or test teardown.
+                        raise SystemExit(1)
+
+                sys.addaudithook(pause_at_first_command)
+        """), encoding="utf-8")
+
+        command = prior_candidate.submit_command(
+            str(python_env / "bin/python"), prior_candidate.repo, prior_candidate.message,
+        )
+        submit = subprocess.Popen(
+            command, env=prior_candidate.env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        worker_handle = None
+        try:
+            connections = {}
+            for _ in range(2):
+                channel = peers.enter_context(listener.accept()[0])
+                channel.settimeout(20)
+                role, pid = channel.recv(64).decode("ascii").split()
+                connections[role] = (channel, int(pid))
+            supervisor, spawned_pid = connections["supervisor"]
+            _, worker_pid = connections["worker"]
+            assert spawned_pid == worker_pid == os.getpgid(worker_pid) == os.getsid(worker_pid)
+            worker_handle = os.pidfd_open(worker_pid)
+            submit.send_signal(signal.SIGINT)
+            # The supervisor's genuine handler received the forwarded SIGINT inside Popen.
+            assert supervisor.recv(1) == bytes([signal.SIGINT])
+            with suppress(BrokenPipeError, ConnectionResetError):
+                supervisor.sendall(b"R")
+            stdout, stderr = submit.communicate(timeout=12)
+            with pytest.raises(ProcessLookupError):
+                os.killpg(worker_pid, 0)
+            assert submit.returncode == 130 and not stderr
+            outcome = json.loads(stdout)
+            assert outcome["state"] == "interrupted" and "receipt" not in outcome
+            assert outcome["failure"] == {"reason": "supervisor_exit_observed", "supervisor_exit": 130}
+            assert json.loads(prior_candidate.record.read_bytes()) == {
+                key: value for key, value in outcome.items() if key != "replayed"
+            }
+        finally:
+            if worker_handle is not None:
+                with suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(worker_handle, signal.SIGKILL)
+                os.close(worker_handle)
+            if submit.poll() is None:
+                submit.kill()
+                submit.wait(timeout=5)
 
 
 def test_dispatcher_rejects_supervisor_that_exits_after_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
