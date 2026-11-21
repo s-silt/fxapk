@@ -6,7 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fxapk import cli
-from fxapk.core import closure
+from fxapk.core import closure, report_io
 from fxapk.core.models import Report
 from fxapk.core.report_delivery import ReportDelivery
 from fxapk.dynamic import auto
@@ -15,10 +15,14 @@ from fxapk.dynamic import auto
 @pytest.mark.parametrize(("scenario", "verdict", "expected_exit"), [
     ("calculate", "partial", 130),
     ("before_write", "partial", 130),
+    ("html_only_stale_json", "partial", 130),
+    ("html_interrupt", "complete", 130),
+    ("html_only_interrupt", "complete", 130),
     ("json_failure", "complete", 1),
     ("json_failure", "partial", 1),
     ("html_failure", "complete", 1),
     ("html_failure", "partial", 1),
+    ("html_healthy", "complete", 0),
     ("delivered", "complete", 0),
     ("delivered", "partial", 5),
 ])
@@ -31,12 +35,32 @@ def test_closure_interrupt_preserves_existing_report(
     saved: list[bytes] = []
     closed: list[bool] = []
     observed: list[auto.RunResult] = []
+    out = tmp_path / "out"
+    path = out / "fixture.json"
+    html_path = path.with_suffix(".html")
+    stale_json = b'{"source":"prior synthetic run"}\n'
+    if scenario == "html_only_stale_json":
+        out.mkdir()
+        path.write_bytes(stale_json)
+    html_only = scenario in ("html_only_interrupt", "html_only_stale_json", "html_healthy")
+    html_interrupt = scenario in ("html_interrupt", "html_only_interrupt")
+    if html_interrupt:
+        from fxapk.report import html as report_html
+
+        render_html = report_html.render
+
+        def interrupt_refresh(*args, **kwargs):
+            if closed:
+                raise KeyboardInterrupt
+            return render_html(*args, **kwargs)
+
+        monkeypatch.setattr(report_html, "render", interrupt_refresh)
 
     def static(*_, out_dir, formats, delivery_sink, **__):
         paths = auto._write_reports(report, out_dir=out_dir, formats=formats, base="fixture",
                                     delivery_sink=delivery_sink)
         saved.append(Path(paths[0]).read_bytes())
-        if scenario == "html_failure":
+        if scenario in ("html_failure", "html_interrupt"):
             Path(paths[0]).with_suffix(".html").write_text("old inert HTML", encoding="utf-8")
         return auto._step(auto._STEP_STATIC, "done", "synthetic"), report, report.package_name, paths, "fixture"
 
@@ -64,8 +88,6 @@ def test_closure_interrupt_preserves_existing_report(
     monkeypatch.setattr(auto, "_ensure_root_frida_server", unexpected)
     monkeypatch.setattr(closure, "close_report", close)
     if scenario in ("calculate", "before_write"):
-        from fxapk.core import report_io
-
         def cancel_write(*_, **__):
             assert scenario == "before_write"
             raise KeyboardInterrupt
@@ -79,10 +101,11 @@ def test_closure_interrupt_preserves_existing_report(
             raise OSError("synthetic HTML write failure before replacement")
 
         monkeypatch.setattr(report_html, "render", reject_html)
-    if scenario == "json_failure":
-        from fxapk.core import report_io
-
-        def reject_json(*_, **__):
+    if scenario in ("json_failure", "html_only_stale_json"):
+        def reject_json(target: Path, _raw: str) -> None:
+            assert closed == [True] and target == path
+            if scenario == "html_only_stale_json":
+                raise KeyboardInterrupt
             raise OSError("synthetic JSON write failure before replacement")
 
         monkeypatch.setattr(report_io, "atomic_write_text", reject_json)
@@ -95,13 +118,43 @@ def test_closure_interrupt_preserves_existing_report(
         return value
 
     monkeypatch.setattr(auto, "run", observe)
-    out = tmp_path / "out"
     invocation = CliRunner().invoke(cli.app, ["auto", str(fixture), "--out", str(out),
-        "--offline", "--no-fix", "--no-repackage", "--fmt", "json", "--strict-case"])
+        "--offline", "--no-fix", "--no-repackage", "--fmt",
+        "html" if html_only else "json", "--strict-case"])
     assert closed == [True]
     assert invocation.exit_code == expected_exit, invocation.output
     [result] = observed
-    path = out / "fixture.json"
+    if scenario == "html_only_stale_json":
+        assert path.read_bytes() == stale_json and html_path.read_bytes() == saved[0]
+        assert result["report_paths"] == [str(html_path)]
+        assert result["report_delivery"] == ReportDelivery(("html",), ("html",), (), ())
+        assert result.get("cancel_reason") == "closure_interrupted"
+        assert result["status"] == "cancelled" and result["closure"]["status"] == "interrupted"
+        assert str(html_path) in invocation.output and str(path) not in invocation.output
+        return
+    if html_interrupt:
+        expected = ("html", "json") if html_only else ("json",)
+        assert result["report_paths"] == ([str(html_path), str(path)] if html_only else [str(path)])
+        assert result["report_delivery"] == ReportDelivery(expected, expected, (), ())
+        assert result["status"] == "cancelled"
+        assert result.get("cancel_reason") == "closure_interrupted"
+        assert result["closure"]["status"] == "interrupted"
+        assert str(path) in invocation.output
+        assert json.loads(path.read_text(encoding="utf-8"))["meta"]["closure"]["status"] == verdict
+        if html_only:
+            assert html_path.read_bytes() == saved[0]
+        else:
+            assert html_path.read_text(encoding="utf-8") == "old inert HTML"
+        return
+    if scenario == "html_healthy":
+        refreshed = html_path.read_bytes()
+        assert refreshed != saved[0]
+        assert b'id="case-closure"' not in saved[0] and b'id="case-closure"' in refreshed
+        assert set(result["report_paths"]) == {str(path), str(html_path)}
+        assert result["status"] == "complete"
+        assert result["report_delivery"] == ReportDelivery(("html", "json"), ("html", "json"), (), ())
+        assert json.loads(path.read_text(encoding="utf-8"))["meta"]["closure"]["status"] == verdict
+        return
     assert result["report_paths"] == [str(path)]
     assert str(path) in invocation.output
     if scenario in ("json_failure", "html_failure"):
@@ -120,7 +173,7 @@ def test_closure_interrupt_preserves_existing_report(
     assert result["report_delivery"] == ReportDelivery(("json",), ("json",), (), ())
     if scenario in ("calculate", "before_write"):
         assert result["status"] == "cancelled"
-        assert result["cancel_reason"] == "closure_interrupted"
+        assert result.get("cancel_reason") == "closure_interrupted"
         assert result["closure"]["status"] == "interrupted"
         assert result["closure"]["gaps"] == ["closure_interrupted"]
         assert "案件闭环：interrupted" in invocation.output

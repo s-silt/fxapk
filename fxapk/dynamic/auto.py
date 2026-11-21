@@ -631,6 +631,7 @@ def run(
                     require_dynamic=has_device,
                     on_progress=on_progress,
                     delivery_sink=delivery_sink,
+                    report_paths=report_paths,
                 )
             except KeyboardInterrupt as exc:
                 raise AutoCancelled("closure_interrupted") from exc
@@ -1519,6 +1520,7 @@ def _run_closure(
     mode: str,
     require_dynamic: bool,
     on_progress: Callable[[str], None] | None,
+    report_paths: list[str],
     delivery_sink: list[object] | None = None,
 ) -> tuple[StepResult, dict[str, object], list[str]]:
     """Run deterministic case gates and persist them without raising to callers."""
@@ -1556,7 +1558,15 @@ def _run_closure(
             paths = report_io.write_report(
                 report, Path(out_dir) / f"{base}.json", on_json_written=acknowledge_json,
             )
-        except AutoCancelled:
+        except (AutoCancelled, KeyboardInterrupt):
+            # Cancellation may follow the atomic JSON replacement. Preserve
+            # only what the writer acknowledged; HTML may still be unchanged.
+            if json_written is not None:
+                _extend_unique(report_paths, [str(json_written)])
+                if delivery_sink is not None:
+                    from fxapk.core.report_delivery import ReportDelivery
+
+                    delivery_sink.append(ReportDelivery(("json",), ("json",), (), ()))
             raise
         except Exception:
             logger.exception("[auto] 案件闭环结果写回失败")
