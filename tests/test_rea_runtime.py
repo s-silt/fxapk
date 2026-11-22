@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
+import os
 import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
+
+from tests.first_failure_diagnostic import FirstFailureDiagnostic, observe_posix_verification_stage
 
 
 @pytest.fixture
@@ -37,16 +42,88 @@ def test_output_overflow_is_failure_not_truncated_success(runtime, tmp_path):
     assert (tmp_path / "run/stdout.bin").stat().st_size == 1024
 
 
-def test_timeout_is_failure_with_process_tree_receipt(runtime, tmp_path):
-    result = runtime.run_bounded(
-        [sys.executable, "-c", "import time;time.sleep(30)"],
-        tmp_path / "run",
-        timeout=0.5,
-        max_stdout=1024,
-    )
-    assert result["ok"] is False
-    assert result["process_tree"]["timed_out"] is True
-    assert result["process_tree"]["termination_complete"] is True
+def test_timeout_is_failure_with_process_tree_receipt(
+    runtime: ModuleType | SimpleNamespace, tmp_path: Path,
+) -> None:
+    details: dict[str, str] = {}
+    with FirstFailureDiagnostic("rea_runtime_timeout", os.environ.get("PYTEST_XDIST_WORKER", "master")) as diagnostic:
+        with observe_posix_verification_stage(details=details) as observed:
+            result = runtime.run_bounded(
+                [sys.executable, "-c", "import time;time.sleep(30)"],
+                tmp_path / "run",
+                timeout=0.5,
+                max_stdout=1024,
+            )
+        tree = result["process_tree"]
+        diagnostic.observe(
+            stage="termination_check",
+            ownership=tree.get("ownership_complete"),
+            reasons=tree.get("reason_codes"),
+            posix_verification_stage=observed(),
+            **details,
+        )
+        assert result["ok"] is False
+        assert tree["timed_out"] is True
+        assert tree["termination_complete"] is True
+
+
+@pytest.mark.parametrize(("reasons", "details"), [
+    (["tree_state_unverified"], {"posix_verification_stage": "unknown"}),
+    (["tree_state_unverified"], {
+        "posix_verification_stage": "ownership_scan",
+        "posix_probe": "getpgid",
+        "posix_error": "PermissionError",
+    }),
+    (["survivors_after_kill", "process_exit_unverified"], {}),
+])
+def test_timeout_failure_emits_allowlisted_diagnostic(
+    reasons: list[str], details: dict[str, str], tmp_path: Path,
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw1")
+    tree = {
+        "timed_out": True,
+        "ownership_complete": True,
+        "termination_complete": False,
+        "reason_codes": ["timeout", *reasons, "synthetic-private-marker"],
+        "pids": [1234],
+    }
+
+    def run_bounded(*_args: object, **_kwargs: object) -> dict[str, object]:
+        if details.get("posix_verification_stage") == "ownership_scan":
+            logging.getLogger("fxapk.core.proctree").debug(
+                "POSIX tree verification unavailable: stage=%s", "ownership_scan",
+                extra={"posix_probe": "getpgid", "posix_error": "PermissionError"},
+            )
+        return {"ok": False, "process_tree": tree}
+
+    fake = SimpleNamespace(run_bounded=run_bounded)
+    with pytest.raises(AssertionError):
+        test_timeout_is_failure_with_process_tree_receipt(fake, tmp_path)
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.count("first-failure: ") == 1
+    payload = json.loads(err.removeprefix("first-failure: "))
+    assert payload == {
+        "test": "rea_runtime_timeout", "worker": "gw1", "stage": "termination_check",
+        "ownership": "confirmed", "read_error": "unknown",
+        "reasons": sorted(["timeout", *reasons, "unknown"]),
+        **details,
+    }
+
+
+def test_timeout_success_keeps_diagnostic_quiet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    tree = {"timed_out": True, "ownership_complete": True, "termination_complete": True,
+            "reason_codes": ["timeout"]}
+
+    def run_bounded(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"ok": False, "process_tree": tree}
+
+    fake = SimpleNamespace(run_bounded=run_bounded)
+    test_timeout_is_failure_with_process_tree_receipt(fake, tmp_path)
+    assert capsys.readouterr() == ("", "")
 
 
 def test_nonzero_exit_cannot_pass(runtime, tmp_path):
