@@ -73,7 +73,7 @@ checksums, and record exact paths and hashes locally. Apktool is an auxiliary
 manual tool; fxapk's current repackager uses ZIP replacement plus SDK signing tools.
 
 Upstream JADX v1.5.7 (published 2026-11-18,
-https://github.com/skylot/jadx/releases/tag/v1.5.7) is a security release
+https://github.com/skylot/jadx/releases) is a security release
 updating bundled Java; separately installed system Java still requires separate
 maintenance. fxapk's recorded baseline remains JADX 1.5.6, and v1.5.7 has not
 been validated for this baseline.
