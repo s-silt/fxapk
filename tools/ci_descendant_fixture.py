@@ -13,7 +13,14 @@ import tempfile
 import stat
 import subprocess
 import sys
+from typing import TYPE_CHECKING, cast
 from xml.etree import ElementTree as ET
+
+if TYPE_CHECKING:
+    from pytest import TestReport
+
+Diagnostic = dict[str, object]
+LineCoverage = dict[str, list[int]]
 
 IMAGE = "docker.io/library/python@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4"  # leak-scan: allow public Docker Official Image pinned to its linux/amd64 manifest.
 LOCK = "tools/ci_descendant_wheels.txt"
@@ -27,9 +34,9 @@ VERSIONS = {
 }
 
 
-def git_tree(root):
+def git_tree(root: str | Path) -> str:
     """Hash raw exported regular blobs by Git mode and bytes, not checkout metadata."""
-    def walk(directory):
+    def walk(directory: str | Path) -> bytes:
         rows = []
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -54,12 +61,12 @@ def git_tree(root):
     return walk(root).hex()
 
 
-def ns(path):
+def ns(path: str) -> str:
     st = os.stat(path)
     return f"{st.st_dev}:{st.st_ino}"
 
 
-def setup_ok(outside_pid, outside_net, uid):
+def setup_ok(outside_pid: str, outside_net: str, uid: str) -> bool:
     if os.getpid() != 1 or os.geteuid() == 0 or str(os.getuid()) != uid or os.getuid() != os.geteuid():
         return False
     current_pid = ns("/proc/self/ns/pid")
@@ -73,7 +80,7 @@ def setup_ok(outside_pid, outside_net, uid):
     )
 
 
-def manifest(path, want):
+def manifest(path: Path, want: str) -> bool:
     data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != want:
         return False
@@ -92,7 +99,7 @@ def manifest(path, want):
     return names == VERSIONS
 
 
-def junit(path):
+def junit(path: Path) -> str:
     try:
         with path.open("rb") as stream:
             raw = stream.read(65_537)
@@ -118,7 +125,7 @@ def junit(path):
         return "invalid"
 
 
-def no_owned_left():
+def no_owned_left() -> bool:
     # Only after PID1 / private proc verification. Never signal the remaining processes.
     while True:
         try:
@@ -131,11 +138,116 @@ def no_owned_left():
         return not any(entry.name.isdecimal() and entry.name != "1" for entry in table)
 
 
-def observer(nonce, outside_pid, outside_net, uid, requirements_sha, head, tree):
-    r = dict(schema="fxapk.container_fixture.v1", nonce=nonce, head=head, tree=tree,
+def safe_diagnostic(value: object) -> Diagnostic | None:
+    """A fixed fixture event, never arbitrary captured pytest text."""
+    if not isinstance(value, dict):
+        return None
+    keys = {"test", "worker", "stage", "ownership", "read_error", "reasons"}
+    if not keys <= value.keys() or (value["test"], value["worker"], value["stage"], value["read_error"]) != (
+        "ownership_descendants", "master", "termination_check", "unknown",
+    ) or value["ownership"] not in ("confirmed", "false", "unknown"):
+        return None
+    reasons = value["reasons"]
+    allowed = {"descendants_after_root_exit", "tree_state_unverified", "survivors_after_kill",
+               "process_exit_unverified", "timeout", "unknown"}
+    if (not isinstance(reasons, list) or not reasons or len(reasons) > 8
+            or any(type(r) is not str or r not in allowed for r in reasons)
+            or reasons != sorted(set(reasons))):
+        return None
+    if "tree_state_unverified" in reasons:
+        keys.add("posix_verification_stage")
+        stage = value.get("posix_verification_stage")
+        if stage not in ("ownership_scan", "individual_signal", "unknown"):
+            return None
+        if stage == "ownership_scan" and ("posix_probe" in value or "posix_error" in value):
+            keys |= {"posix_probe", "posix_error"}
+            if value.get("posix_probe") not in ("status", "getpgid", "uids", "environ") or (
+                value.get("posix_error") not in ("AccessDenied", "PermissionError")
+            ):
+                return None
+    return {k: value[k] for k in keys} if value.keys() == keys else None
+
+
+def captured_diagnostic(stderr: str) -> Diagnostic | None:
+    if len(stderr) > 16_384:
+        return None
+    prefix = "first-failure: "
+    records = [line.removeprefix(prefix) for line in stderr.splitlines() if line.startswith(prefix)]
+    if len(records) != 1 or len(records[0]) > 1024:
+        return None
+    try:
+        return safe_diagnostic(json.loads(records[0], object_pairs_hook=unique))
+    except ValueError:
+        return None
+
+
+class Observe:
+    def __init__(self, node: str) -> None:
+        self.node = node
+        self.phases: list[tuple[str, str]] = []
+        self.diagnostic: Diagnostic | None = None
+        self.unexpected = False
+
+    def pytest_runtest_logreport(self, report: TestReport) -> None:
+        if report.nodeid != self.node:
+            self.unexpected = True
+            return
+        self.phases.append((report.when, "xfail/xpass" if hasattr(report, "wasxfail") else report.outcome))
+        if report.when == "call" and report.failed and not hasattr(report, "wasxfail"):
+            captures = [value for title, value in report.sections if title == "Captured stderr call"]
+            if len(captures) == 1:
+                self.diagnostic = captured_diagnostic(captures[0])
+
+    @property
+    def passed(self) -> bool:
+        return not self.unexpected and self.phases == [
+            ("setup", "passed"), ("call", "passed"), ("teardown", "passed"),
+        ]
+
+
+def run_pytest(node: str, result: Path, temp: Path) -> tuple[int, bool, Diagnostic | None]:
+    import pytest
+
+    watch = Observe(node)
+    root = Path.cwd()
+    code = int(pytest.main([
+        "-q", "-o", "addopts=", "-o", "junit_logging=no", "--capture=fd", "-p", "no:cacheprovider",
+        "--tb=no", f"--rootdir={root}", f"--confcutdir={root}", f"--basetemp={temp}",
+        f"--junitxml={result}", node,
+    ], plugins=[watch]))
+    return code, watch.passed, watch.diagnostic if code == 1 and not watch.unexpected else None
+
+
+def pytest_worker() -> int:
+    # The worker uses only the verified checkout path for project imports.
+    sys.path.insert(0, str(Path.cwd()))
+    code, passed, diagnostic = run_pytest(NODE, Path("/tmp/result.xml"), Path("/tmp/pytest"))
+    with Path("/tmp/pytest-observation.json").open("x", encoding="utf-8") as stream:
+        json.dump({"ordinary_phases": passed, "diagnostic": diagnostic}, stream)
+    return code
+
+
+def read_pytest_observation(path: Path) -> tuple[bool, Diagnostic | None]:
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(2049)
+        if len(raw) > 2048:
+            return False, None
+        result = json.loads(raw, object_pairs_hook=unique)
+        if isinstance(result, dict) and result.keys() == {"ordinary_phases", "diagnostic"}:
+            return result["ordinary_phases"] is True, safe_diagnostic(result["diagnostic"])
+    except (OSError, ValueError):
+        pass
+    return False, None
+
+
+def observer(
+    nonce: str, outside_pid: str, outside_net: str, uid: str, requirements_sha: str, head: str, tree: str,
+) -> int:
+    r: dict[str, object] = dict(schema="fxapk.container_fixture.v1", nonce=nonce, head=head, tree=tree,
              setup=False, source_verified=False, pins_verified=False, dep_wait=None,
              pytest_wait=None, junit="not_run", cleanup_before_exit=None)
-    def emit(status, code):
+    def emit(status: str, code: int) -> int:
         print(json.dumps(dict(r, status=status), sort_keys=True))
         return code
     try:
@@ -152,7 +264,7 @@ def observer(nonce, outside_pid, outside_net, uid, requirements_sha, head, tree)
         env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/tmp", "TMPDIR": "/tmp",
                "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
                "PIP_CONFIG_FILE": "/dev/null", "LC_ALL": "C"}
-        def child(args, limit):
+        def child(args: list[str], limit: int) -> int:
             return subprocess.run([sys.executable, "-B", *args], cwd="/src", env=env, timeout=limit,
                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL, check=False).returncode
@@ -166,17 +278,19 @@ def observer(nonce, outside_pid, outside_net, uid, requirements_sha, head, tree)
         env["PYTHONPATH"] = "/fixture-deps"
         env["COVERAGE_FILE"] = "/tmp/.coverage"
         r["pytest_wait"] = child(
-            ["-m", "coverage", "run", "--source=fxapk", "-m", "pytest", "-q", "-p", "no:cacheprovider",
-             "--tb=no", "--basetemp=/tmp/pytest",
-             "--junitxml=/tmp/result.xml", NODE], 38)
+            ["-m", "coverage", "run", "--source=fxapk", f"/src/{SCRIPT}", "--pytest-worker"], 38)
+        ordinary, diagnostic = read_pytest_observation(Path("/tmp/pytest-observation.json"))
+        r["ordinary_phases"] = ordinary
         r["junit"] = junit(Path("/tmp/result.xml"))
         r["cleanup_before_exit"] = no_owned_left()
         if not r["cleanup_before_exit"]:
             return emit("cleanup_unverified", 3)
-        if (r["pytest_wait"], r["junit"]) == (0, "one_passed"):
+        if ordinary and (r["pytest_wait"], r["junit"]) == (0, "one_passed"):
             r["coverage_lines"] = observed_lines()
             return emit("fixture_passed", 0)
         if (r["pytest_wait"], r["junit"]) == (1, "one_failed"):
+            if diagnostic is not None:
+                r["diagnostic"] = diagnostic
             return emit("fixture_failed", 1)
         return emit("fixture_unverified", 3)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
@@ -186,8 +300,12 @@ def observer(nonce, outside_pid, outside_net, uid, requirements_sha, head, tree)
 class IsolationFailure(RuntimeError):
     """An allowlisted failure without raw device or process data."""
 
+    def __init__(self, reason: str, diagnostic: Diagnostic | None = None) -> None:
+        super().__init__(reason)
+        self.diagnostic = diagnostic
 
-def observed_lines():
+
+def observed_lines() -> LineCoverage:
     from importlib.metadata import version
 
     sys.path.insert(0, "/fixture-deps")
@@ -207,7 +325,7 @@ def observed_lines():
     return report
 
 
-def normalized_lines(repo, raw):
+def normalized_lines(repo: Path, raw: object) -> LineCoverage:
     if type(raw) is not dict or not raw.get("fxapk/core/proctree.py"):
         raise IsolationFailure("coverage_proctree_missing")
     out = {}
@@ -230,7 +348,7 @@ def normalized_lines(repo, raw):
     return out
 
 
-def merge_coverage(repo, raw):
+def merge_coverage(repo: Path, raw: object) -> None:
     from coverage import CoverageData
 
     file = repo / ".coverage"
@@ -244,7 +362,7 @@ def merge_coverage(repo, raw):
     host.write()
 
 
-def unique(pairs):
+def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
     out = {}
     for key, value in pairs:
         if key in out:
@@ -253,7 +371,7 @@ def unique(pairs):
     return out
 
 
-def receipt(raw, nonce, head, tree, attach, wait):
+def receipt(raw: bytes, nonce: str, head: str, tree: str, attach: int, wait: bytes) -> LineCoverage:
     if len(raw) > 512_000:
         raise IsolationFailure("observer_receipt_too_large")
     state = json.loads(raw, object_pairs_hook=unique)
@@ -261,22 +379,30 @@ def receipt(raw, nonce, head, tree, attach, wait):
         "fxapk.container_fixture.v1", nonce, head, tree,
     ):
         raise IsolationFailure("observer_identity_unverified")
+    if (attach, wait) == (1, b"1") and state.get("status") == "fixture_failed" and (
+        state.get("junit") == "one_failed" and type(state.get("pytest_wait")) is int
+        and state["pytest_wait"] == 1
+        and all(state.get(k) is True for k in ("setup", "source_verified", "pins_verified", "cleanup_before_exit"))
+    ):
+        raise IsolationFailure("fixture_failed", safe_diagnostic(state.get("diagnostic")))
     if attach != 0 or wait != b"0":
         status = state.get("status")
-        allowed = ("fixture_failed", "fixture_unverified", "isolation_unverified", "candidate_unverified",
+        allowed = ("fixture_unverified", "isolation_unverified", "candidate_unverified",
                    "prerequisite_missing", "dependency_setup_failed", "cleanup_unverified", "observation_unverified")
         raise IsolationFailure(status if type(status) is str and status in allowed else "container_result_unverified")
-    if (any(state.get(k) is not True for k in ("setup", "source_verified", "pins_verified", "cleanup_before_exit"))
+    if (any(state.get(k) is not True for k in ("setup", "source_verified", "pins_verified", "cleanup_before_exit", "ordinary_phases"))
             or any(type(state.get(k)) is not int or state[k] != 0 for k in ("dep_wait", "pytest_wait"))
             or state.get("junit") != "one_passed" or state.get("status") != "fixture_passed"):
         raise IsolationFailure("observer_nonpass")
-    return state["coverage_lines"]
+    if not isinstance(state.get("coverage_lines"), dict):
+        raise IsolationFailure("coverage_receipt_unverified")
+    return cast(LineCoverage, state["coverage_lines"])
 
 
-def host(expected):
+def host(expected: str) -> int:
     repo = Path.cwd().resolve()
     git = ("git", "--no-replace-objects", "-c", "protocol.allow=never")
-    def read_git(*args):
+    def read_git(*args: str) -> str:
         return subprocess.check_output((*git, *args), text=True, stderr=subprocess.DEVNULL).strip()
 
     head = read_git("rev-parse", "HEAD")
@@ -306,11 +432,11 @@ def host(expected):
                       if k not in {"DOCKER_CONTEXT", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS",
                                    "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"}}
         docker = ("docker", "--config", str(tmp / "docker-config"), "--host", "unix:///var/run/docker.sock")
-        def dock(*args, limit=10):
+        def dock(*args: str, limit: int = 10) -> subprocess.CompletedProcess[bytes]:
             return subprocess.run((*docker, *args), timeout=limit, env=docker_env, check=False,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
-        def prepare(args, limit, reason):
+        def prepare(args: tuple[str, ...], limit: int, reason: str) -> None:
             result = subprocess.run(args, timeout=limit, check=False,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if result.returncode != 0:
@@ -371,13 +497,18 @@ def host(expected):
 
 if __name__ == "__main__":
     try:
+        if sys.argv[1:] == ["--pytest-worker"]:
+            raise SystemExit(pytest_worker())
         if sys.argv[1:2] == ["--inside"] and len(sys.argv) == 9:
             raise SystemExit(observer(*sys.argv[2:]))
         if len(sys.argv) != 2:
             raise IsolationFailure("usage")
         raise SystemExit(host(sys.argv[1]))
     except IsolationFailure as error:
-        print(json.dumps({"status": str(error)}))
+        result: dict[str, object] = {"status": str(error)}
+        if error.diagnostic is not None:
+            result["diagnostic"] = error.diagnostic
+        print(json.dumps(result, sort_keys=True))
         raise SystemExit(3)
     except (KeyError, OSError, ValueError, subprocess.SubprocessError, ImportError):
         print(json.dumps({"status": "isolated_fixture_unverified"}))

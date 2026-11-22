@@ -182,7 +182,6 @@ jobs:
           if [ "$FXAPK_MATRIX_PYTHON" = "3.12" ]; then
             # This test's native process-table checks require a private process namespace.
             # Only exclude it from xdist after the required isolated JUnit and coverage receipt.
-            PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q -p no:cacheprovider tools/tests/test_ci_descendant_fixture.py
             python -IB tools/ci_descendant_fixture.py "$GITHUB_SHA"
             isolated+=(--deselect=tests/test_proctree.py::test_descendants_after_root_exit_force_killed)
           fi
