@@ -236,6 +236,26 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
     return VIS_COMPLETE, why
 
 
+def _java_complete_conflicts(receipt: Mapping[str, object]) -> bool:
+    """Reject explicit contradictions without requiring fields omitted by old receipts."""
+    if receipt.get("status") != "ok" or receipt.get("reason_codes", []) != []:
+        return True
+    if "scan" not in receipt:
+        return False
+    scan = receipt["scan"]
+    if not isinstance(scan, Mapping):
+        return True
+    if scan.get("scan_limit_hit", False) is not False or scan.get("discovery_failed", False) is not False:
+        return True
+    for key in ("read_failed", "truncated_files", "scan_exceptions"):
+        count = scan.get(key, 0)
+        if type(count) is not int or count != 0:
+            return True
+    counts = [scan[key] for key in ("files_scanned", "files_selected", "files_total") if key in scan]
+    # A missing counterpart is not a contradiction; ratios still require both.
+    return any(type(count) is not int or count < 0 or count != counts[0] for count in counts)
+
+
 def _java_visibility(meta: dict) -> tuple[str, list[str]]:
     """java（JADX 反编译）面可见性——**独立于** ``dex`` 通道，绝不反向降级 Androguard 的观察。
 
@@ -268,6 +288,8 @@ def _java_visibility(meta: dict) -> tuple[str, list[str]]:
         if status == "no_apk_path":
             return VIS_UNAVAILABLE, ["无 apk_path，jadx 未执行"]
         if receipt.get("complete") is True:
+            if _java_complete_conflicts(receipt):
+                return VIS_PARTIAL, ["Java 覆盖回执的完整标记与扫描记录冲突，不能判为完整"]
             return VIS_COMPLETE, []
         reasons = receipt.get("reason_codes")
         detail = (
