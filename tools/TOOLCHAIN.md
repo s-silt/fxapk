@@ -63,6 +63,10 @@ Frida 和 mitmproxy 控制台脚本优先从当前解释器的 scripts 目录解
 推荐，也不证明真机兼容或本机实际安装状态。请从各工具官方来源下载，核对官方校验和，
 在本地记录精确路径与哈希。Apktool 是辅助人工工具；fxapk 当前重打包使用 ZIP 替换和 SDK 签名工具。
 
+上游 JADX v1.5.7（发布于 2026-11-18，https://github.com/skylot/jadx/releases/tag/v1.5.7）
+是更新随附 Java 的安全版本；独立安装的系统 Java 仍需单独维护。fxapk 记录的基线仍为
+JADX 1.5.6，v1.5.7 尚未完成基线验证。
+
 设备端 frida-server 应与主机 Frida 版本匹配，并在获授权的测试设备上确认 root、枚举、
 native attach 和 Java bridge。安装工具不应顺带升级另一台设备或替换其系统 tcpdump；
 主机版本检查不等于动态稳定性测试。

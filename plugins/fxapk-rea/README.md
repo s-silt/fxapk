@@ -10,9 +10,9 @@
 
 正式附件安装：先从所选 GitHub Release 下载核心与 REA wheel，按该发行的
 `SHA256SUMS.txt` 校验，在独立 Python 虚拟环境安装核心，再执行
-`python -m pip install ./fxapk_rea-0.1.2-py3-none-any.whl`。
+`python -m pip install ./fxapk_rea-0.2.0-py3-none-any.whl`。
 需要 trace 时使用
-`python -m pip install "./fxapk_rea-0.1.2-py3-none-any.whl[trace]"`。
+`python -m pip install "./fxapk_rea-0.2.0-py3-none-any.whl[trace]"`。
 附件不是完整离线依赖包，安装可能下载声明依赖；安装后仍默认关闭。
 插件源码采用 MIT 许可（见 `LICENSE`），第三方工具与依赖遵循各自许可。
 
