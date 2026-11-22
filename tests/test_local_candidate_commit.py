@@ -130,6 +130,25 @@ def test_replay_validates_exact_existing_commit_and_tree(prior_candidate: Replay
     prior_candidate.assert_unchanged(original)
 
 
+def test_replay_refuses_same_task_with_historical_gate_digest(
+    prior_candidate: ReplayFixture,
+) -> None:
+    current = prior_candidate.identity.copy()
+    prior_candidate.manifest["tool_sha256"][GATE.name] = sha256(
+        GATE.read_bytes() + b"\n# synthetic historical gate revision\n",
+    ).hexdigest()
+    prior_candidate.identity["input_sha256"] = sha256(
+        dispatcher.encode(prior_candidate.manifest),
+    ).hexdigest()
+    original = prior_candidate.seed("succeeded")
+
+    status, outcome = prior_candidate.submit()
+
+    assert status == 3
+    assert outcome == {**current, "state": "conflict"}
+    prior_candidate.assert_unchanged(original)
+
+
 @pytest.mark.parametrize("loss", ["missing_repo", "missing_tree", "missing_blob", "missing_subtree", "changed_head"])
 def test_replay_refuses_changed_or_unavailable_objects(prior_candidate: ReplayFixture, loss: str) -> None:
     original = prior_candidate.seed("succeeded")
