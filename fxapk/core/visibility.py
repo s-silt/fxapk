@@ -252,8 +252,7 @@ def _java_complete_conflicts(receipt: Mapping[str, object]) -> bool:
         if type(count) is not int or count != 0:
             return True
     counts = [scan[key] for key in ("files_scanned", "files_selected", "files_total") if key in scan]
-    if ("files_scanned" in scan) != ("files_total" in scan):
-        return True
+    # A missing counterpart is not a contradiction; ratios still require both.
     return any(type(count) is not int or count < 0 or count != counts[0] for count in counts)
 
 

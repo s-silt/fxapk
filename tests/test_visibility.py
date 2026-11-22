@@ -127,6 +127,32 @@ def test_java_complete_flag_cannot_override_explicit_gaps(contradiction: dict) -
     assert "static_endpoint_exhaustive" in {item["claim"] for item in digest["blocked_claims"]}
 
 
+@pytest.mark.parametrize(("scan", "expected"), [
+    pytest.param({"files_scanned": 3}, V.VIS_COMPLETE, id="only-scanned"),
+    pytest.param({"files_total": 3}, V.VIS_COMPLETE, id="only-total"),
+    pytest.param({"files_scanned": 3, "files_selected": 3}, V.VIS_COMPLETE, id="agrees"),
+    pytest.param({"files_total": True}, V.VIS_PARTIAL, id="malformed"),
+    pytest.param({"files_scanned": 3, "files_selected": 2}, V.VIS_PARTIAL, id="contradiction"),
+    pytest.param({"files_total": 3, "truncated_files": 1}, V.VIS_PARTIAL, id="truncated"),
+])
+def test_java_receipt_with_one_of_paired_counts(
+    scan: dict[str, int | bool], expected: str,
+) -> None:
+    report = _report(
+        dex_available=True,
+        resource_files_scanned=1,
+        jadx_receipt={**_JADX_OK, "scan": scan},
+    )
+    assessment = V.assess(report)
+    assert assessment["sources"]["java"]["visibility"] == expected
+    assert V.java_coverage_observation(report)["state"] == expected
+    assert V.java_scan_counts(report["meta"]) is None
+    report["meta"]["visibility"] = assessment
+    digest = build_digest(report)["visibility"]
+    assert digest["sources"]["java"] == expected
+    assert "java_scan" not in digest
+
+
 def test_java_truncated_full_count_in_html() -> None:
     report = Report(package_name="com.synthetic.coverage", meta={
         "jadx_receipt": {
