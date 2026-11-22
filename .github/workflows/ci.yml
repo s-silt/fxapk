@@ -159,12 +159,31 @@ jobs:
           python -m pip install pytest pytest-cov pytest-xdist build "setuptools>=68" wheel
       # 覆盖率门禁只在 Linux 跑（基线 83%，阈值 80 留 3% 余量）。macOS/Windows 覆盖到的行不同
       # （平台分支），共用一个阈值会假红；那两个 job 只验跨平台正确性，不做覆盖率门禁。
+      - name: Verify isolated descendant fixture controls (Linux 3.12)
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          python -c "from coverage import CoverageData"
+          python -m pytest -q -p no:cacheprovider tests/test_ci_descendant_fixture.py \
+            --junitxml="$RUNNER_TEMP/fxapk-isolated-fixture-controls.xml"
+          python - <<'PYTEST_CONTROLS'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "fxapk-isolated-fixture-controls.xml").getroot()
+          cases = list(root.iter("testcase"))
+          assert len(cases) == 20 and len({case.get("name") for case in cases}) == 20 and all(
+              case.get("classname") == "tests.test_ci_descendant_fixture" and len(case) == 0 for case in cases
+          ), "isolated fixture control missing, duplicate, skipped or failed"
+          PYTEST_CONTROLS
       - name: Run tests + coverage gate (Linux)
         if: runner.os == 'Linux'
         # FXAPK_REQUIRE_BUILD_TOOLCHAIN=1：产物级版本测试在矩阵关缺构建链时必须 fail
         # 而非 skip——否则上面的安装行被改掉后守门测试会静默消失、CI 照绿。
         env:
           FXAPK_REQUIRE_BUILD_TOOLCHAIN: "1"
+          FXAPK_MATRIX_PYTHON: ${{ matrix.python-version }}
         run: |
           python -m pytest -q -n 0 tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
             --cov=fxapk --cov-report= --cov-fail-under=0 \
@@ -177,12 +196,23 @@ jobs:
           cases = list(root.iter("testcase"))
           assert len(cases) == 1 and cases[0].get("name") == "test_linux_preexisting_nondumpable_process_does_not_break_owned_run" and len(cases[0]) == 0, "host fixture missing, skipped or failed"
           PYTEST_XML
+          isolated=()
+          if [ "$FXAPK_MATRIX_PYTHON" = "3.12" ]; then
+            # This test's native process-table checks require a private process namespace.
+            # Only exclude it from xdist after the required isolated JUnit and coverage receipt.
+            python -IB tools/ci_descendant_fixture.py "$GITHUB_SHA"
+            isolated+=(--deselect=tests/test_proctree.py::test_descendants_after_root_exit_force_killed)
+            isolated+=(--ignore=tests/test_ci_descendant_fixture.py)
+          fi
           python -m pytest -q -n auto \
             --deselect=tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
+            "${isolated[@]}" \
             --cov=fxapk --cov-append --cov-report=term-missing:skip-covered --cov-fail-under=80 \
             --junitxml=${{ runner.temp }}/fxapk-tests.xml
       - name: Verify Linux process ownership tests actually ran
         if: runner.os == 'Linux'
+        env:
+          FXAPK_MATRIX_PYTHON: ${{ matrix.python-version }}
         run: |
           python - <<'PY'
           import os
@@ -193,6 +223,11 @@ jobs:
               cases = [case for root in roots for case in root.iter("testcase") if case.get("name") == name]
               assert len(cases) == 1 and len(cases[0]) == 0, f"critical test missing, skipped or failed: {name}"
               print(f"PASSED: {name}")
+          if os.environ["FXAPK_MATRIX_PYTHON"] == "3.12":
+              duplicated = any(case.get("classname") == "tests.test_proctree"
+                               and case.get("name") == "test_descendants_after_root_exit_force_killed"
+                               for root in roots for case in root.iter("testcase"))
+              assert not duplicated, "isolated fixture also appeared in host JUnit"
           PY
       - name: Run tests (macOS / Windows)
         if: runner.os != 'Linux'
