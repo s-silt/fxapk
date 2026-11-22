@@ -356,7 +356,7 @@ def java_scan_counts(meta: object) -> dict[str, int] | None:
     return {"files_scanned": scanned, "files_total": total}
 
 
-_JAVA_SAVED_CONFLICT_NOTE = "Java 覆盖回执的完整标记与扫描记录冲突，不能判为完整"
+_JAVA_SAVED_CONFLICT_NOTE = "Java 可见性快照的完整状态与截断扫描记录冲突，不能判为完整"
 _JAVA_SAVED_CONFLICT_CLAIMS = ("static_endpoint_exhaustive", "no_hardcoded_credential")
 
 
@@ -367,14 +367,21 @@ def project_persisted_visibility(meta: dict[str, Any]) -> object:
         return saved
     sources = saved.get("sources", {})
     java = sources.get("java")
+    if java == VIS_COMPLETE:  # Legacy scalar accepted by HTML's existing display contract.
+        java = {"visibility": VIS_COMPLETE}
     if not isinstance(java, dict) or java.get("visibility") != VIS_COMPLETE:
         return saved
     why = java.get("why", [])
+    if why is None or why is False or why == "":
+        why = []
+    # Preserve mixed legacy reasons so renderers can still flag invalid entries.
     if not isinstance(why, list):
         return saved
 
+    # The current evaluator checks all contradictions in a complete producer claim.
+    # Saved views use only explicit truncation, even if the producer marked itself partial.
     receipt = meta.get("jadx_receipt")
-    if not isinstance(receipt, dict) or receipt.get("status") != "ok" or receipt.get("complete") is not True:
+    if not isinstance(receipt, dict) or receipt.get("status") != "ok" or type(receipt.get("complete")) is not bool:
         return saved
     scan = receipt.get("scan")
     counts = java_scan_counts(meta)
@@ -383,7 +390,12 @@ def project_persisted_visibility(meta: dict[str, Any]) -> object:
     truncated = scan.get("truncated_files")
     if type(truncated) is not int or not 0 < truncated <= counts["files_scanned"]:
         return saved
-    if not _java_complete_conflicts(receipt):
+    if any(type(scan.get(key, False)) is not bool for key in ("scan_limit_hit", "discovery_failed")):
+        return saved
+    if any(type(scan.get(key, 0)) is not int or scan.get(key, 0) < 0 for key in ("read_failed", "scan_exceptions")):
+        return saved
+    selected = scan.get("files_selected", counts["files_total"])
+    if type(selected) is not int or not counts["files_scanned"] <= selected <= counts["files_total"]:
         return saved
 
     raw_claims = saved.get("claims")
