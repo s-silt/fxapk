@@ -21,6 +21,7 @@ from fxapk.core.visibility import (
     VIS_UNKNOWN,
     java_scan_counts,
     persisted_visibility_containers_valid,
+    project_persisted_visibility,
 )
 from fxapk.core.web_observations import GAP_LABELS, digest_web_observations
 from fxapk.core.web_supplement import project_for_digest
@@ -584,7 +585,7 @@ def _render_template(template: Any, report: Report) -> str:
     dex_query_view = project_dex_query(meta_map)
     dex_query_handoff = project_dex_handoff(meta_map)
     runtime_diagnostics_view = project_runtime_diagnostics(meta_map)
-    visibility_view, visibility_warning = _project_visibility(meta_map.get("visibility"))
+    visibility_view, visibility_warning = _project_visibility(project_persisted_visibility(meta_map))
     return template.render(
         report=report,
         # 没有专属区块的类别（后台入口 / 自建 IM·C2 / 后端凭据 / 四方支付 / 短信转发 …）。

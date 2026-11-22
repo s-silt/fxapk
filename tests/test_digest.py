@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fxapk import cli
+from fxapk.analyzers.jadx import _build_jadx_receipt
 from fxapk.core import pipeline
 from fxapk.core.admission import evaluate_usage
 from fxapk.core.models import AnalysisConfig, Endpoint, EnrichmentResult, Evidence
@@ -787,3 +788,45 @@ def test_cli_digest_preserves_other_sections_when_visibility_is_malformed(
     assert "未知" in visibility["note"]
     assert not {"sources", "blocked_claims", "notes", "next_actions"}.intersection(visibility)
     assert "synthetic-shape-marker" not in result.stdout + result.stderr
+
+@pytest.mark.parametrize("saved_java", [
+    "complete",
+    {"visibility": "complete", "why": False},
+    {"visibility": "complete", "why": None},
+    {"visibility": "complete", "why": ""},
+    {"visibility": "complete", "why": ["synthetic legacy reason", 7]},
+    {"visibility": "complete", "why": []},
+])
+def test_cli_digest_downgrades_conflicting_saved_java_without_rewriting_input(
+    tmp_path: Path, saved_java: object,
+) -> None:
+    report_path = tmp_path / "legacy.json"
+    # Real receipt builder, synthetic inputs; the legacy saved view is the test fixture.
+    receipt = _build_jadx_receipt(
+        status="ok", runs=[{"options_digest": "synthetic", "ownership_complete": True,
+                            "termination_complete": True}],
+        scan={"files_scanned": 3, "files_total": 3, "files_selected": 3, "truncated_files": 1,
+              "scan_limit_hit": False, "discovery_failed": False, "scan_exceptions": 0, "read_failed": 0},
+        cleanup={"complete": True}, analyzer_error=False,
+    )
+    assert receipt["complete"] is False and receipt["reason_codes"] == ["source_file_truncated"]
+    report_path.write_text(json.dumps({
+        "analysis_status": "complete",
+        "meta": {
+            "visibility": {"sources": {"java": saved_java}, "blocked_claims": []},
+            "jadx_receipt": receipt,
+        },
+    }), encoding="utf-8")
+    original = report_path.read_bytes()
+    first = runner.invoke(cli.app, ["digest", str(report_path)])
+    second = runner.invoke(cli.app, ["digest", str(report_path)])
+    assert first.exit_code == 0, first.stderr
+    assert second.exit_code == 0, second.stderr
+    assert first.stdout == second.stdout
+    assert report_path.read_bytes() == original
+    visibility = json.loads(first.stdout)["visibility"]
+    assert visibility["sources"]["java"] == "partial"
+    assert visibility["java_scan"] == {"files_scanned": 3, "files_total": 3}
+    assert {row["claim"] for row in visibility["blocked_claims"]} == {
+        "static_endpoint_exhaustive", "no_hardcoded_credential",
+    }

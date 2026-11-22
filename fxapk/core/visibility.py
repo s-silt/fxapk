@@ -356,6 +356,91 @@ def java_scan_counts(meta: object) -> dict[str, int] | None:
     return {"files_scanned": scanned, "files_total": total}
 
 
+_JAVA_SAVED_CONFLICT_NOTE = "Java 可见性快照的完整状态与截断扫描记录冲突，不能判为完整"
+_JAVA_SAVED_CONFLICT_CLAIMS = ("static_endpoint_exhaustive", "no_hardcoded_credential")
+
+
+def project_persisted_visibility(meta: dict[str, Any]) -> object:
+    """Downgrade only a saved complete Java view contradicted by a verified scan shape."""
+    saved = meta.get("visibility")
+    if not isinstance(saved, dict) or not persisted_visibility_containers_valid(saved):
+        return saved
+    sources = saved.get("sources", {})
+    java = sources.get("java")
+    if java == VIS_COMPLETE:  # Legacy scalar accepted by HTML's existing display contract.
+        java = {"visibility": VIS_COMPLETE}
+    if not isinstance(java, dict) or java.get("visibility") != VIS_COMPLETE:
+        return saved
+    why = java.get("why", [])
+    if why is None or why is False or why == "":
+        why = []
+    # Preserve mixed legacy reasons so renderers can still flag invalid entries.
+    if not isinstance(why, list):
+        return saved
+
+    # The current evaluator checks all contradictions in a complete producer claim.
+    # Saved views use only explicit truncation, even if the producer marked itself partial.
+    receipt = meta.get("jadx_receipt")
+    if not isinstance(receipt, dict) or receipt.get("status") != "ok" or type(receipt.get("complete")) is not bool:
+        return saved
+    scan = receipt.get("scan")
+    counts = java_scan_counts(meta)
+    if not isinstance(scan, dict) or counts is None:
+        return saved
+    truncated = scan.get("truncated_files")
+    if type(truncated) is not int or not 0 < truncated <= counts["files_scanned"]:
+        return saved
+    if any(type(scan.get(key, False)) is not bool for key in ("scan_limit_hit", "discovery_failed")):
+        return saved
+    if any(type(scan.get(key, 0)) is not int or scan.get(key, 0) < 0 for key in ("read_failed", "scan_exceptions")):
+        return saved
+    selected = scan.get("files_selected", counts["files_total"])
+    if type(selected) is not int or not counts["files_scanned"] <= selected <= counts["files_total"]:
+        return saved
+
+    raw_claims = saved.get("claims")
+    claims = dict(raw_claims) if isinstance(raw_claims, dict) else {}
+    blocked = list(saved.get("blocked_claims", []))
+    for claim in _JAVA_SAVED_CONFLICT_CLAIMS:
+        prior = claims.get(claim)
+        claim_view = dict(prior) if isinstance(prior, dict) else {}
+        missing = claim_view.get("missing_sources")
+        missing_sources = list(missing) if isinstance(missing, list) else []
+        if "java" not in missing_sources:
+            missing_sources.append("java")
+        unknown = claim_view.get("unassessed_sources")
+        if isinstance(unknown, list) and "java" in unknown:
+            claim_view["unassessed_sources"] = [source for source in unknown if source != "java"]
+        claims[claim] = {
+            **claim_view,
+            "label": _CLAIM_LABELS[claim],
+            "eligible": False,
+            "missing_sources": missing_sources,
+        }
+        if claim not in blocked:
+            blocked.append(claim)
+
+    notes = list(saved.get("notes", []))
+    note = f"[java] {_JAVA_SAVED_CONFLICT_NOTE}"
+    if note not in notes:
+        notes.append(note)
+    return {
+        **saved,
+        "sources": {
+            **sources,
+            "java": {
+                **java,
+                "visibility": VIS_PARTIAL,
+                "why": why if _JAVA_SAVED_CONFLICT_NOTE in why else [*why, _JAVA_SAVED_CONFLICT_NOTE],
+            },
+        },
+        "claims": claims,
+        "blocked_claims": blocked,
+        "notes": notes,
+        "degraded": True,
+    }
+
+
 def _native_visibility(meta: dict) -> tuple[str, list[str]]:
     """native 层可见性。
 

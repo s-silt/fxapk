@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
+from fxapk.analyzers import jadx
+from fxapk.analyzers.jadx import _build_jadx_receipt
 from fxapk.core import visibility as V
 from fxapk.core.models import Report
 from fxapk.report.digest import build_digest
@@ -164,6 +168,137 @@ def test_java_truncated_full_count_in_html() -> None:
     html = render_to_string(report)
     assert "3/3" in html
     assert "Java 覆盖回执的完整标记与扫描记录冲突" in html
+
+
+def test_saved_java_conflict_display_keeps_original_report() -> None:
+    from copy import deepcopy
+
+    saved = {
+        "sources": {"java": {"visibility": "complete", "why": []}, "dex": {"visibility": "complete"}},
+        "claims": {
+            "static_endpoint_exhaustive": {"eligible": True, "missing_sources": ["resource"]},
+            "unchanged": {"label": "synthetic unrelated label", "eligible": False},
+        },
+        "blocked_claims": ["unchanged"],
+        "remediation": "synthetic unchanged remediation",
+        "notes": ["synthetic saved explanation"],
+        "next_actions": ["synthetic retained action"],
+        "degraded": False,
+    }
+    meta = {"visibility": saved, "closure": {"status": "partial"}, "jadx_receipt": {
+        **_JADX_OK, "scan": {"files_scanned": 3, "files_total": 3, "truncated_files": 1},
+    }}
+    snapshot = deepcopy(meta)
+    projection = V.project_persisted_visibility(meta)
+    assert isinstance(projection, dict)
+    assert projection["sources"]["java"]["visibility"] == "partial"
+    assert projection["sources"]["dex"] == saved["sources"]["dex"]
+    assert projection["claims"]["unchanged"] == saved["claims"]["unchanged"]
+    assert projection["claims"]["static_endpoint_exhaustive"]["missing_sources"] == ["resource", "java"]
+    assert projection["blocked_claims"] == ["unchanged", "static_endpoint_exhaustive", "no_hardcoded_credential"]
+    assert projection["remediation"] == saved["remediation"]
+    assert projection["next_actions"] == saved["next_actions"]
+
+    digest = build_digest(_report(**meta))["visibility"]
+    r = Report(package_name="com.synthetic.coverage", meta=meta, leads=[], endpoints=[], findings=[], analyzer_status=[])
+    html = render_to_string(r)
+    assert digest["sources"]["java"] == "partial" and digest["sources"]["dex"] == "complete"
+    assert digest["java_scan"] == {"files_scanned": 3, "files_total": 3}
+    assert projection["sources"]["java"]["why"][0] in html
+    assert projection["notes"][-1] in digest["notes"]
+    assert "3/3" in html
+    assert "<li>static_endpoint_exhaustive</li>" in html
+    assert "<li>no_hardcoded_credential</li>" in html
+    assert V.project_persisted_visibility({**meta, "visibility": projection}) is projection
+    assert meta == snapshot
+
+
+@pytest.mark.parametrize("saved_java", [
+    "complete",
+    {"visibility": "complete", "why": False},
+    {"visibility": "complete", "why": None},
+    {"visibility": "complete", "why": ""},
+    {"visibility": "complete", "why": ["synthetic legacy reason", 7]},
+])
+def test_saved_java_legacy_shape_conflicts_with_current_producer_receipt(
+    saved_java: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from copy import deepcopy
+
+    # Run the project scanner on inert Java text, not a saved historical artifact.
+    monkeypatch.setattr(jadx, "_MAX_FILE_BYTES", 32)
+    for name, content in {"A.java": "class A {}", "B.java": "class B {}",
+                          "C.java": "// " + "x" * 64}.items():
+        (tmp_path / name).write_text(content, encoding="utf-8")
+    scan = jadx.JadxAnalyzer()._scan_java(tmp_path).receipt
+    assert (scan["files_scanned"], scan["files_selected"], scan["files_total"], scan["truncated_files"]) == (3, 3, 3, 1)
+    receipt = _build_jadx_receipt(
+        status="ok", runs=[{"options_digest": "synthetic", "ownership_complete": True,
+                            "termination_complete": True}],
+        scan=scan,
+        cleanup={"complete": True}, analyzer_error=False,
+    )
+    assert receipt["complete"] is False and receipt["reason_codes"] == ["source_file_truncated"]
+    meta = {"visibility": {"sources": {"java": saved_java}, "blocked_claims": []},
+            "jadx_receipt": receipt}
+    original = deepcopy(meta)
+    digest = build_digest(_report(**meta))["visibility"]
+    report = Report(package_name="com.synthetic.coverage", meta=meta, leads=[], endpoints=[],
+                    findings=[], analyzer_status=[])
+    html = render_to_string(report)
+    assert digest["sources"]["java"] == "partial"
+    assert digest["java_scan"] == {"files_scanned": 3, "files_total": 3}
+    assert {row["claim"] for row in digest["blocked_claims"]} == {
+        "static_endpoint_exhaustive", "no_hardcoded_credential",
+    }
+    for claim in ("static_endpoint_exhaustive", "no_hardcoded_credential"):
+        assert f"<li>{claim}</li>" in html
+    java_row = html.split("<td>java</td>", 1)[1].split("</tr>", 1)[0]
+    assert "<td>partial</td>" in java_row and "3/3" not in java_row
+    assert "3/3" in html.split('id="jadx-java-scan"', 1)[1].split("</p>", 1)[0]
+    if isinstance(saved_java, dict) and saved_java.get("why") == ["synthetic legacy reason", 7]:
+        why = V.project_persisted_visibility(meta)["sources"]["java"]["why"]
+        assert why[:2] == ["synthetic legacy reason", 7]
+        assert "synthetic legacy reason" in java_row
+    assert "不能判为完整" in html
+    assert meta == original
+
+
+@pytest.mark.parametrize("why", [[], None, False, ""])
+def test_saved_java_compatible_empty_why_keeps_view_when_complete_is_not_boolean(why: object) -> None:
+    saved = {"sources": {"java": {"visibility": "complete", "why": why}}}
+    scan = {"files_scanned": 3, "files_total": 3, "truncated_files": 1}
+    for receipt in (
+        {"status": "ok", "scan": scan},
+        {"status": "ok", "scan": scan, "complete": "true"},
+        {"status": "ok", "scan": scan, "complete": 1},
+    ):
+        assert V.project_persisted_visibility({"visibility": saved, "jadx_receipt": receipt}) is saved
+
+
+@pytest.mark.parametrize("scan", [
+    None, {}, {"truncated_files": 1},
+    {"files_scanned": 0, "files_total": 0, "truncated_files": 0},
+    {"files_scanned": 3, "files_total": 3, "truncated_files": True},
+    {"files_scanned": 3, "files_total": 3, "truncated_files": "1"},
+    {"files_scanned": 4, "files_total": 3, "truncated_files": 1},
+    {"files_scanned": 0, "files_total": 0, "truncated_files": 1},
+    {"files_scanned": 3, "files_total": 3, "truncated_files": 1, "read_failed": False},
+    *[{"files_scanned": 3, "files_total": 3, "truncated_files": 1, key: value}
+      for key, value in (("files_selected", "3"), ("files_selected", 2), ("files_selected", 4),
+                         ("scan_limit_hit", 0), ("discovery_failed", None),
+                         ("scan_exceptions", -1), ("read_failed", -1))],
+])
+def test_saved_java_projection_keeps_view_without_valid_truncation(scan: object) -> None:
+    saved = {"sources": {"java": {"visibility": "complete", "why": []}}}
+    assert V.project_persisted_visibility({"visibility": saved}) is saved
+    assert V.project_persisted_visibility({
+        "visibility": saved, "jadx_receipt": {**_JADX_OK, "status": "skipped", "scan": scan},
+    }) is saved
+    assert V.project_persisted_visibility({
+        "visibility": saved, "jadx_receipt": {**_JADX_OK, "scan": scan},
+    }) is saved
+    assert V.project_persisted_visibility({"jadx_receipt": {**_JADX_OK, "scan": scan}}) is None
 
 
 def test_java_complete_empty_scan_keeps_complete() -> None:
