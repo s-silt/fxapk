@@ -18,6 +18,7 @@ from fxapk.core.visibility import (
     PERSISTED_VISIBILITY_INVALID_NOTE,
     java_scan_counts,
     persisted_visibility_containers_valid,
+    project_persisted_visibility,
 )
 from fxapk.core.admission import evaluate_usage
 from fxapk.core.evidence_scope import (
@@ -726,7 +727,7 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         },
         # ★证据可见性放在 leads **之前**：消费方（尤其是 AI）必须先知道「哪些输入没看见」，
         #   否则会把一份壳桩样本的空线索列表读成「该样本干净」。见 core/visibility.py。
-        "visibility": _compact_visibility(meta.get("visibility")),
+        "visibility": _compact_visibility(project_persisted_visibility(meta)),
         # ★控制链紧接 visibility：先知道哪里没看见，再看「看见的这些是怎么串起来的」。
         #   原先只写 meta、无出口——组成节点各自可见 ≠ 这条关系可见。
         "control_chains": _compact_control_chains(meta.get("control_chains"), redact=redact),

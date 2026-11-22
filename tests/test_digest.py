@@ -787,3 +787,29 @@ def test_cli_digest_preserves_other_sections_when_visibility_is_malformed(
     assert "未知" in visibility["note"]
     assert not {"sources", "blocked_claims", "notes", "next_actions"}.intersection(visibility)
     assert "synthetic-shape-marker" not in result.stdout + result.stderr
+
+def test_cli_digest_downgrades_conflicting_saved_java_without_rewriting_input(tmp_path: Path) -> None:
+    report_path = tmp_path / "legacy.json"
+    report_path.write_text(json.dumps({
+        "analysis_status": "complete",
+        "meta": {
+            "visibility": {"sources": {"java": {"visibility": "complete", "why": []}}, "blocked_claims": []},
+            "jadx_receipt": {
+                "status": "ok", "complete": True, "reason_codes": [],
+                "scan": {"files_scanned": 3, "files_total": 3, "truncated_files": 1},
+            },
+        },
+    }), encoding="utf-8")
+    original = report_path.read_bytes()
+    first = runner.invoke(cli.app, ["digest", str(report_path)])
+    second = runner.invoke(cli.app, ["digest", str(report_path)])
+    assert first.exit_code == 0, first.stderr
+    assert second.exit_code == 0, second.stderr
+    assert first.stdout == second.stdout
+    assert report_path.read_bytes() == original
+    visibility = json.loads(first.stdout)["visibility"]
+    assert visibility["sources"]["java"] == "partial"
+    assert visibility["java_scan"] == {"files_scanned": 3, "files_total": 3}
+    assert {row["claim"] for row in visibility["blocked_claims"]} == {
+        "static_endpoint_exhaustive", "no_hardcoded_credential",
+    }
