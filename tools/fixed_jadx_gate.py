@@ -17,13 +17,15 @@ from tempfile import TemporaryDirectory, gettempdir
 from typing import Any
 from xml.etree import ElementTree
 
-VERSION = "jadx-report-v2"
+VERSION = "jadx-report-v3"
 SCRIPT = "tools/fixed_jadx_gate.py"
 LOCAL_GIT = ("git", "--no-replace-objects", "-c", "protocol.allow=never")
 NODES = tuple(
     f"tests/test_jadx.py::test_jadx_coverage_report_{output}[{mode}]"
     for output in ("json", "html", "digest")
     for mode in ("full", "limited", "empty", "legacy", "at_byte_limit", "over_byte_limit")
+) + (
+    "tests/test_visibility.py::test_java_truncated_full_count_in_html",
 )
 Phases = dict[str, list[tuple[str, str]]]
 
@@ -52,7 +54,10 @@ def audit(report: Path, phases: Phases, pytest_exit: int) -> list[str]:
     except (ElementTree.ParseError, OSError):
         return problems + ["unreadable or malformed JUnit from this invocation"]
 
-    expected = {("tests.test_jadx", node.split("::", 1)[1]): node for node in NODES}
+    expected = {
+        (node.split("::", 1)[0][:-3].replace("/", "."), node.split("::", 1)[1]): node
+        for node in NODES
+    }
     counts: Counter[tuple[str, str]] = Counter()
     for case in xml.iter("testcase"):
         key = case.get("classname", ""), case.get("name", "")
@@ -182,7 +187,10 @@ def from_index(scratch_dir: Path) -> dict[str, Any]:
         snapshot = scratch / "checkout"
         snapshot.mkdir()
         materialize(repo, tree, snapshot)
-        for name in ("fxapk/__init__.py", "tests/__init__.py", "tests/test_jadx.py", SCRIPT):
+        for name in (
+            "fxapk/__init__.py", "tests/__init__.py", "tests/test_jadx.py",
+            "tests/test_visibility.py", SCRIPT,
+        ):
             if not (snapshot / name).is_file():
                 raise GateError("required staged source or test file is missing")
         if (snapshot / SCRIPT).read_bytes() != Path(__file__).read_bytes():
