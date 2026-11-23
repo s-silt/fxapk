@@ -830,3 +830,35 @@ def test_cli_digest_downgrades_conflicting_saved_java_without_rewriting_input(
     assert {row["claim"] for row in visibility["blocked_claims"]} == {
         "static_endpoint_exhaustive", "no_hardcoded_credential",
     }
+
+
+@pytest.mark.parametrize(("stored", "expected", "warn"), [
+    ("stub_only", "stub_only", False),
+    ({"visibility": "stub_only"}, "stub_only", False),
+    ({"visibility": "unknown"}, "unknown", False),
+    ({"visibility": "synthetic-invalid-level"}, "unknown", True),
+    ({"visibility": {"synthetic-invalid-level": "complete"}}, "unknown", True),
+])
+def test_cli_digest_normalizes_saved_source_levels(
+    tmp_path: Path, stored: object, expected: str, warn: bool,
+) -> None:
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "analysis_status": "complete",
+        "meta": {"visibility": {
+            "sources": {"dex": stored, "resource": {"visibility": "partial"}},
+            "blocked_claims": ["static_endpoint_exhaustive"],
+        }},
+    }), encoding="utf-8")
+    original = path.read_bytes()
+
+    result = runner.invoke(cli.app, ["digest", str(path)])
+
+    assert result.exit_code == 0, result.stderr
+    section = json.loads(result.stdout)["visibility"]
+    assert section["available"] is True
+    assert section["sources"] == {"dex": expected, "resource": "partial"}
+    assert [item["claim"] for item in section["blocked_claims"]] == ["static_endpoint_exhaustive"]
+    assert ("note" in section) is warn
+    assert "synthetic-invalid-level" not in result.stdout + result.stderr
+    assert path.read_bytes() == original
