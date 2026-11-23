@@ -163,19 +163,55 @@ def test_static_live_config_is_deferred(tmp_path: Path) -> None:
     assert static_web_arguments(None, {**payload, "mode": "off"})[1] is not None
 
 
-def test_missing_plugin_keeps_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+_MISSING_PLUGIN_WINDOW_SEC = 0.05
+
+
+def _missing_plugin_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, resume_at: float,
+) -> tuple[list[str], dict[str, Any] | None]:
     monkeypatch.setattr(capture_module, "_READY_STARTUP_SEC", 0.03)
+    now = 0.0
+    monkeypatch.setattr(capture_module, "_monotonic", lambda: now)
+    monkeypatch.setattr(capture_module, "_wait", lambda _duration: None)
     _install(monkeypatch, None)
     calls: list[str] = []
     observer = CaptureWindowObserver(_request(tmp_path), publish_dir=str(tmp_path))
+    wait_ready = observer.wait_ready
+
+    def wait_ready_then_resume(deadline: float | None) -> str:
+        nonlocal now
+        # Wait for the real worker to report missing-plugin before simulating a caller resume.
+        if not observer._settled.wait(timeout=5):
+            pytest.fail("missing-plugin worker did not settle")
+        ready = wait_ready(deadline)
+        if ready != "failed":
+            pytest.fail(f"expected a settled observer, got {ready!r}")
+        now = resume_at
+        return ready
+
+    monkeypatch.setattr(observer, "wait_ready", wait_ready_then_resume)
     result = overlap_web_observation(
         interaction=lambda **_kwargs: calls.append("ui"),
-        web_observer=observer, deadline=None, window_seconds=0.05,
+        web_observer=observer, deadline=None, window_seconds=_MISSING_PLUGIN_WINDOW_SEC,
     )
+    return calls, result
+
+
+def test_missing_plugin_keeps_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls, result = _missing_plugin_window(monkeypatch, tmp_path, resume_at=0.049)
     assert calls == ["ui"]
     assert result is not None
     assert result["status"] == "unavailable"
     assert result["reason"] == "plugin_unavailable"
+    assert result["live_cdp"] is False
+
+
+def test_missing_plugin_does_not_run_ui_after_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    calls, result = _missing_plugin_window(monkeypatch, tmp_path, resume_at=_MISSING_PLUGIN_WINDOW_SEC)
+    assert calls == []
+    assert result == {"status": "unavailable", "reason": "plugin_unavailable", "live_cdp": False}
 
 
 def test_timeout_keeps_ui_and_does_not_invent_ready(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
