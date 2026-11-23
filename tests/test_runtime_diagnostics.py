@@ -166,6 +166,78 @@ def test_merge_appends_diagnostics_without_new_endpoints(tmp_path: Path) -> None
     assert rendered["meta"]["runtime_diagnostics"]["items"][0]["event"] == "isolated_process"
 
 
+
+def test_failed_modified_window_is_a_gap_in_report_outputs(tmp_path: Path) -> None:
+    from hashlib import sha256
+
+    from typer.testing import CliRunner
+
+    from fxapk.cli import app
+    from fxapk.report import html, json as report_json
+
+    sample = "ab" * 32
+    closure = {"status": "partial", "gaps": ["synthetic"]}
+    declarations = explain_coverage([
+        _window("isolated_process", "manifest", declared_value=True),
+        _window("app_zygote", "manifest", declared_value=False),
+    ])
+    report = Report(
+        package_name="example.invalid",
+        meta={"sample_sha256": sample, "closure": closure, "runtime_diagnostics": declarations},
+        leads=[], endpoints=[], findings=[], analyzer_status=[],
+    )
+    runtime = tmp_path / "runtime_report.json"
+    payload = {"package_name": "example.invalid", "source": "runtime", "endpoints": []}
+    runtime.write_text(json.dumps(payload), encoding="utf-8")
+    merge.import_runtime_diagnostics_only(report, str(runtime))
+    assert report.meta["runtime_diagnostics"] is declarations
+
+    original = dict(pid=51, start_token="synthetic")
+    observations = [
+        _window("capture_window", "modified-failed", runtime_variant="modified-runtime", status="failed", **original),
+        _window("capture_window", "original-failed", runtime_variant="original-runtime", status="failed", **original),
+        _window("capture_window", "modified-ok", runtime_variant="modified-runtime", status="ok", **original),
+        observation_from_capture(
+            pid=51, uid=None, hook_status="confirmed", retreated=False,
+            runtime_variant="modified-runtime", pass_tag="native-window",
+            apk_sha256=sample, run_id="native-run", start_token="synthetic",
+        ),
+    ]
+    assert observations[-1]["status"] is None
+    raw = json.dumps({**payload, "process_observations": observations}).encode()
+    runtime.write_bytes(raw)
+    merge.import_runtime_diagnostics_only(report, str(runtime))
+
+    output = tmp_path / "report.json"
+    report_json.dump(report, str(output))
+    rendered = html.render_to_string(report)
+    result = CliRunner().invoke(app, ["digest", str(output)])
+    assert result.exit_code == 0, result.stderr
+    diagnostics = json.loads(result.stdout)["runtime_diagnostics"]
+    assert diagnostics["schema"] == "runtime-diagnostics/1"
+    assert diagnostics["frida_detection"] == "not_inferred"
+    assert diagnostics["endpoints_added"] == 0 and diagnostics["closure_evaluated"] is False
+
+    first, second, *windows = diagnostics["items"]
+    assert (first["class"], first["event"], first["declared_value"]) == (
+        "static-potential", "isolated_process", True,
+    )
+    assert (second["class"], second["event"], second["declared_value"]) == (
+        "static-recorded", "app_zygote", False,
+    )
+    expected = [
+        ("coverage-gap", "modified_uncovered", "modified-failed"),
+        ("coverage-gap", "original_uncovered", "original-failed"),
+        ("observed-event", "capture_window", "modified-ok"),
+        ("observed-event", "capture_window", "native-window"),
+    ]
+    assert [(row["class"], row["event"], row["window_id"]) for row in windows] == expected
+    assert all(" · ".join(row) in rendered for row in expected)
+    assert all(row["source_report_sha256"] == sha256(raw).hexdigest() for row in windows)
+    assert runtime.read_bytes() == raw
+    assert report.endpoints == [] and report.findings == [] and report.meta["closure"] == closure
+
+
 def test_static_manifest_emits_only_explicit_attributes() -> None:
     from fxapk.analyzers.runtime_diagnostics import RuntimeDiagnosticsAnalyzer
 

@@ -163,10 +163,11 @@ def _classify(
             kind, label = "coverage-gap", "unclassified"
     elif (
         event == "capture_window"
-        and variant == "original-runtime"
+        and variant in ("original-runtime", "modified-runtime")
         and raw.get("status") == "failed"
     ):
-        kind, label = "coverage-gap", "original_uncovered"
+        kind = "coverage-gap"
+        label = "original_uncovered" if variant == "original-runtime" else "modified_uncovered"
     elif event == "capture_window":
         kind, label = "observed-event", "capture_window"
     else:
