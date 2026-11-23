@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from fxapk.core.models import Report
 from fxapk.core.runtime_diagnostics import (
     explain_coverage,
@@ -236,6 +238,48 @@ def test_failed_modified_window_is_a_gap_in_report_outputs(tmp_path: Path) -> No
     assert all(row["source_report_sha256"] == sha256(raw).hexdigest() for row in windows)
     assert runtime.read_bytes() == raw
     assert report.endpoints == [] and report.findings == [] and report.meta["closure"] == closure
+
+
+
+@pytest.mark.parametrize(("sample", "apk", "event"), [
+    pytest.param("ab" * 32, "ab" * 32, "modified_uncovered", id="matched"),
+    pytest.param("ab" * 32, "AB" * 32, "modified_uncovered", id="normalized-match"),
+    pytest.param("ab" * 32, "cd" * 32, "identity_mismatch", id="different-sample"),
+    pytest.param("ab" * 32, None, "identity_unattributed", id="missing-raw-hash"),
+    pytest.param("ab" * 32, "synthetic-invalid-hash", "identity_unattributed", id="invalid-raw-hash"),
+    pytest.param(None, "ab" * 32, "identity_unattributed", id="missing-report-hash"),
+])
+def test_failed_modified_window_retains_report_identity(
+    tmp_path: Path, sample: str | None, apk: str | None, event: str,
+) -> None:
+    from fxapk.report import html, json as report_json
+
+    row = _window(
+        "capture_window", "one-window", runtime_variant="modified-runtime",
+        status="failed", pid=51, start_token="synthetic",
+    )
+    if apk is None:
+        row.pop("apk_sha256")
+    else:
+        row["apk_sha256"] = apk
+    raw = json.dumps({"package_name": "example.invalid", "source": "runtime", "endpoints": [],
+                      "process_observations": [row]}).encode()
+    runtime = tmp_path / "runtime_report.json"
+    runtime.write_bytes(raw)
+    report = Report(
+        package_name="example.invalid", meta={} if sample is None else {"sample_sha256": sample},
+        leads=[], endpoints=[], findings=[], analyzer_status=[],
+    )
+    merge.import_runtime_diagnostics_only(report, str(runtime))
+
+    [item] = build_digest(report_json.to_dict(report))["runtime_diagnostics"]["items"]
+    assert (item["class"], item["event"]) == ("coverage-gap", event)
+    assert item["source_event"] == ("unknown" if event == "modified_uncovered" else "capture_window")
+    assert f"coverage-gap · {event} · one-window" in html.render_to_string(report)
+    assert runtime.read_bytes() == raw
+    if apk in (None, "synthetic-invalid-hash"):
+        [unbound] = explain_coverage([row])["items"]
+        assert (unbound["event"], unbound["source_event"]) == ("identity_unattributed", "capture_window")
 
 
 def test_static_manifest_emits_only_explicit_attributes() -> None:

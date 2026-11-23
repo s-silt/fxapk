@@ -44,6 +44,7 @@ _ITEM_FIELDS = (
     "device_id",
 )
 _VARIANTS = frozenset({"original-runtime", "modified-runtime"})
+_MODIFIED_UNCOVERED = "modified_uncovered"
 _ISOLATED_UID_MIN = 90000
 _ISOLATED_UID_MAX = 99999
 
@@ -167,12 +168,14 @@ def _classify(
         and raw.get("status") == "failed"
     ):
         kind = "coverage-gap"
-        label = "original_uncovered" if variant == "original-runtime" else "modified_uncovered"
+        label = "original_uncovered" if variant == "original-runtime" else _MODIFIED_UNCOVERED
     elif event == "capture_window":
         kind, label = "observed-event", "capture_window"
     else:
         kind, label = "coverage-gap", "unclassified"
-    if kind == "observed-event" and _text(raw.get("apk_sha256")) == "unknown":
+    if label == _MODIFIED_UNCOVERED and _sha256_text(raw.get("apk_sha256")) is None:
+        source_event, label = "capture_window", "identity_unattributed"
+    elif kind == "observed-event" and _text(raw.get("apk_sha256")) == "unknown":
         source_event = label
         kind, label = "coverage-gap", "identity_unattributed"
     item = {
@@ -214,13 +217,15 @@ def _sha256_text(value: object) -> str | None:
 
 
 def _bind_report_identity(item: dict[str, Any], sample: str | None) -> None:
-    """有样本哈希才给这次覆盖。对不上或主报告没有哈希时，留下事件并取消覆盖资格。"""
-    if item.get("class") != "observed-event":
+    """Require report identity for observed events and failed modified windows."""
+    kind = item.get("class")
+    modified_failure = kind == "coverage-gap" and item.get("event") == _MODIFIED_UNCOVERED
+    if kind != "observed-event" and not modified_failure:
         return
     apk = _sha256_text(item.get("apk_sha256"))
     if sample is not None and apk is not None and apk == sample:
         return
-    item["source_event"] = item.get("event")
+    item["source_event"] = "capture_window" if modified_failure else item.get("event")
     item["class"] = "coverage-gap"
     item["event"] = "identity_mismatch" if sample is not None and apk is not None else "identity_unattributed"
 
