@@ -355,6 +355,48 @@ def test_java_complete_empty_scan_keeps_complete() -> None:
     assert V.java_coverage_observation(report)["state"] == V.VIS_COMPLETE
 
 
+
+@pytest.mark.parametrize(("scan", "ratio"), [
+    pytest.param(None, None, id="unrecorded"),
+    pytest.param({"files_scanned": 0, "files_selected": 0, "files_total": 0}, "0/0", id="empty"),
+    pytest.param({"files_scanned": 1, "files_selected": 1, "files_total": 2,
+                  "scan_limit_hit": True}, "1/2", id="partial"),
+])
+def test_jadx_timeout_words_do_not_infer_reads(
+    scan: dict[str, int] | None, ratio: str | None,
+) -> None:
+    receipt = _build_jadx_receipt(
+        status="timeout", runs=[{"options_digest": "synthetic", "ownership_complete": True,
+                                 "termination_complete": True}],
+        scan=scan, cleanup={"complete": True}, analyzer_error=False,
+    )
+    assert receipt["complete"] is False and "producer_timeout" in receipt["reason_codes"]
+    assert ("scan_missing" in receipt["reason_codes"]) is (scan is None)
+
+    wording = "JADX 反编译超时被终止，Java 面未穷尽；已读取文件数以扫描回执为准"
+    report = _report(dex_available=True, dex_scanned=True, jadx_receipt=receipt)
+    meta = report["meta"]
+    meta["visibility"] = V.assess(report)
+    assert meta["visibility"]["sources"]["java"]["visibility"] == V.VIS_TIMEOUT
+    assert meta["visibility"]["sources"]["java"]["why"] == [wording]
+    digest = build_digest(report)["visibility"]
+    assert digest["sources"]["java"] == V.VIS_TIMEOUT
+    assert digest["sources"]["dex"] == V.VIS_COMPLETE
+    assert f"[java] {wording}" in digest["notes"]
+
+    html = render_to_string(Report(
+        package_name="com.synthetic.coverage", meta=meta,
+        leads=[], endpoints=[], findings=[], analyzer_status=[],
+    ))
+    java_row = html.split("<td>java</td>", 1)[1].split("</tr>", 1)[0]
+    assert "<td>timeout</td>" in java_row and wording in java_row
+    if scan is None:
+        assert "java_scan" not in digest and 'id="jadx-java-scan"' not in html
+    else:
+        assert digest["java_scan"] == {key: scan[key] for key in ("files_scanned", "files_total")}
+        assert ratio is not None and ratio in html.split('id="jadx-java-scan"', 1)[1].split("</p>", 1)[0]
+
+
 def test_scheduler_receipt_overrides_jadx_selfreport():
     """★消费端权威链：调度器执行 receipt（analyzer_receipts.jadx）比 analyzer 自报状态更外层——
     scheduler_error/analyzer_error 定 failed、scheduler_timeout 定 timeout，即使 jadx_receipt
@@ -367,6 +409,7 @@ def test_scheduler_receipt_overrides_jadx_selfreport():
     b = V.assess(_report(**base, analyzer_receipts={
         "jadx": {"lane": "long", "execution": "scheduler_timeout"}}))
     assert b["sources"]["java"]["visibility"] == V.VIS_TIMEOUT
+    assert b["sources"]["java"]["why"] == ["JADX 在调度预算内未完成、被调度器终止（scheduler_timeout）"]
 
     # completed 不覆盖：定档回落 coverage receipt。
     c = V.assess(_report(**base, analyzer_receipts={
@@ -383,6 +426,7 @@ def test_legacy_report_jadx_status_ok_is_unknown_not_complete():
 
     b = V.assess(_report(dex_available=True, jadx_status="timeout"))
     assert b["sources"]["java"]["visibility"] == V.VIS_TIMEOUT
+    assert b["sources"]["java"]["why"] == ["jadx 反编译超时（旧报告口径）——Java 面未穷尽"]
 
 
 def test_internal_error_fallback_keeps_six_source_schema(monkeypatch) -> None:  # noqa: ANN001

@@ -290,7 +290,7 @@ def _java_visibility(meta: dict) -> tuple[str, list[str]]:
     if isinstance(receipt, dict):
         status = str(receipt.get("status") or "")
         if status == "timeout":
-            return VIS_TIMEOUT, ["jadx 反编译超时被终止——已产出的部分源码已扫，Java 面未穷尽"]
+            return VIS_TIMEOUT, ["JADX 反编译超时被终止，Java 面未穷尽；已读取文件数以扫描回执为准"]
         if status == "failed":
             return VIS_FAILED, ["jadx 反编译失败——Java 面本次未有效覆盖"]
         if status == "no_apk_path":
