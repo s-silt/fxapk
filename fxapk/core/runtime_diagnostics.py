@@ -118,6 +118,8 @@ def _classify(
     requested = _flag(raw.get("observer_requested"))
     late_evidence = raw.get("observer_late_evidence") is True
     variant = raw.get("runtime_variant")
+    failed_window = event == "capture_window" and raw.get("status") == "failed"
+    failed_modified = failed_window and variant == "modified-runtime"
     source_event: str | None = None
     if isinstance(pid, int) and isinstance(expected, int) and pid != expected:
         kind, label = "coverage-gap", "pid_mismatch"
@@ -128,11 +130,18 @@ def _classify(
         else:
             kind, label = "observed-event", "uid_isolated"
     elif (
-        (reuse_key := _reuse_key(raw)) is not None
+        not failed_modified  # Reconcile these windows only after report identity binding.
+        and (reuse_key := _reuse_key(raw)) is not None
         and start != "unknown"
         and len(tokens_by_key.get(reuse_key, ())) > 1
     ):
         kind, label = "coverage-gap", "pid_reuse"
+        # Reuse is a generic label. Only a row that would otherwise be an
+        # observed window may later witness reuse for a failed window.
+        if event == "capture_window" and observer is not False and not (
+            failed_window and variant == "original-runtime"
+        ):
+            source_event = "capture_window"
     elif event == "early_exit":
         kind, label = "coverage-gap", "early_exit_unattributed"
     elif event == "process_exit" and logs is False:
@@ -162,11 +171,7 @@ def _classify(
             kind, label = "static-recorded", event
         else:
             kind, label = "coverage-gap", "unclassified"
-    elif (
-        event == "capture_window"
-        and variant in ("original-runtime", "modified-runtime")
-        and raw.get("status") == "failed"
-    ):
+    elif failed_window and variant in ("original-runtime", "modified-runtime"):
         kind = "coverage-gap"
         label = "original_uncovered" if variant == "original-runtime" else _MODIFIED_UNCOVERED
     elif event == "capture_window":
@@ -286,7 +291,7 @@ def merge_process_observations(report: Any, records: object) -> None:
         if isinstance(source_path, str) and source_path:
             item["source_report_path"] = source_path
     items = [*kept, *fresh]
-    _reconcile_pid_reuse(items)
+    _reconcile_pid_reuse(items, sample=sample)
     meta["runtime_diagnostics"] = {
         "schema": SCHEMA,
         "frida_detection": "not_inferred",
@@ -296,9 +301,10 @@ def merge_process_observations(report: Any, records: object) -> None:
     }
 
 
-def _reconcile_pid_reuse(items: list[Any]) -> None:
+def _reconcile_pid_reuse(items: list[Any], *, sample: str | None) -> None:
     """后到的窗口如果证明同一 run 里 PID 换过启动身份，补标已经留下的那条。不改各窗口自己的身份。"""
     groups: dict[tuple[str, str, str, int], set[str]] = {}
+    bound_windows: dict[tuple[str, str, str, int], set[str]] = {}
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -306,6 +312,15 @@ def _reconcile_pid_reuse(items: list[Any]) -> None:
         token = _text(item.get("start_token"))
         if key is not None and token != "unknown":
             groups.setdefault(key, set()).add(token)
+            kind, event = item.get("class"), item.get("event")
+            if (
+                sample is not None and _sha256_text(key[0]) == sample and key[2] != "unknown"
+                and ((kind == "observed-event" and event == "capture_window")
+                     or (kind == "coverage-gap" and event == _MODIFIED_UNCOVERED)
+                     or (kind == "coverage-gap" and event == "pid_reuse"
+                         and item.get("source_event") == "capture_window"))
+            ):
+                bound_windows.setdefault(key, set()).add(token)
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -313,10 +328,18 @@ def _reconcile_pid_reuse(items: list[Any]) -> None:
         token = item.get("start_token")
         if key is None or not isinstance(token, str) or token in ("", "unknown"):
             continue
-        if len(groups.get(key, ())) <= 1:
+        event = item.get("event")
+        if event == _MODIFIED_UNCOVERED and item.get("class") == "coverage-gap":
+            # Unknown devices and already unattributed/mismatched rows cannot establish reuse.
+            tokens = bound_windows.get(key)
+        elif event in ("capture_window", "pid_reuse"):
+            tokens = groups.get(key)
+        else:
             continue
-        if item.get("event") not in ("capture_window", "pid_reuse"):
+        if tokens is None or len(tokens) <= 1:
             continue
+        if event in ("capture_window", _MODIFIED_UNCOVERED):
+            item["source_event"] = "capture_window"
         item["class"] = "coverage-gap"
         item["event"] = "pid_reuse"
 

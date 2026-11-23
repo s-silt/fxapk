@@ -282,6 +282,113 @@ def test_failed_modified_window_retains_report_identity(
         assert (unbound["event"], unbound["source_event"]) == ("identity_unattributed", "capture_window")
 
 
+
+def _window_for_pid_reuse(window: str, token: str, **fields: object) -> dict[str, object]:
+    defaults = {"runtime_variant": "modified-runtime", "status": "failed", "pid": 51,
+                "start_token": token, "run_id": "same-run", "device_id": "synthetic-device"}
+    return _window("capture_window", window, **{**defaults, **fields})
+
+
+def _import_fixture_windows(
+    report: Report, directory: Path, observations: list[dict[str, object]],
+) -> None:
+    runtime = directory / "runtime_report.json"
+    directory.mkdir(parents=True)
+    raw = json.dumps({"package_name": "example.invalid", "source": "runtime", "endpoints": [],
+                      "process_observations": observations}).encode()
+    runtime.write_bytes(raw)
+    merge.import_runtime_diagnostics_only(report, str(runtime))
+    assert runtime.read_bytes() == raw
+
+
+def _reported_window_events(report: Report) -> dict[str, tuple[str, str]]:
+    from fxapk.report import html, json as report_json
+
+    items = build_digest(report_json.to_dict(report))["runtime_diagnostics"]["items"]
+    rendered = html.render_to_string(report)
+    for item in items:
+        assert not item["window_coverage_shared"] and not item["run_coverage_shared"]
+        assert f'{item["class"]} · {item["event"]} · {item["window_id"]}' in rendered
+    return {item["window_id"]: (item["event"], item["source_event"]) for item in items}
+
+
+@pytest.mark.parametrize(("sample", "first", "later", "expected_events"), [
+    pytest.param("ab" * 32, {}, {"status": "ok"}, ["pid_reuse", "pid_reuse"], id="matched"),
+    pytest.param("ab" * 32, {}, {}, ["pid_reuse", "pid_reuse"], id="both-failed"),
+    pytest.param("ab" * 32, {"apk_sha256": "AB" * 32}, {"apk_sha256": "AB" * 32},
+                 ["pid_reuse", "pid_reuse"], id="normalized-sample"),
+    pytest.param("ab" * 32, {}, {"start_token": "before", "status": "ok"},
+                 ["modified_uncovered", "capture_window"], id="same-token"),
+    pytest.param("ab" * 32, {}, {"run_id": "other-run"},
+                 ["modified_uncovered", "modified_uncovered"], id="cross-run"),
+    pytest.param("ab" * 32, {}, {"device_id": "other-device"},
+                 ["modified_uncovered", "modified_uncovered"], id="cross-device"),
+    pytest.param("ab" * 32, {}, {"apk_sha256": "cd" * 32},
+                 ["modified_uncovered", "identity_mismatch"], id="cross-sample"),
+    pytest.param("ab" * 32, {"apk_sha256": "cd" * 32}, {"apk_sha256": "cd" * 32},
+                 ["identity_mismatch", "identity_mismatch"], id="same-wrong-sample"),
+    pytest.param("ab" * 32, {"apk_sha256": "synthetic-invalid"}, {"apk_sha256": "synthetic-invalid"},
+                 ["identity_unattributed", "identity_unattributed"], id="invalid-hashes"),
+    pytest.param("ab" * 32, {"apk_sha256": None}, {"apk_sha256": None},
+                 ["identity_unattributed", "identity_unattributed"], id="no-raw-hash"),
+    pytest.param(None, {}, {}, ["identity_unattributed", "identity_unattributed"], id="no-report-hash"),
+    pytest.param("ab" * 32, {"device_id": None}, {"device_id": None},
+                 ["modified_uncovered", "modified_uncovered"], id="no-device"),
+])
+def test_failed_modified_pid_reuse_is_bound_and_partition_independent(
+    tmp_path: Path, sample: str | None, first: dict[str, object], later: dict[str, object],
+    expected_events: list[str],
+) -> None:
+    a = _window_for_pid_reuse("a", "before", **first)
+    b = _window_for_pid_reuse("b", "after", **later)
+    expected = {
+        window: (event, "capture_window" if event.startswith("identity_") or event == "pid_reuse" else "unknown")
+        for window, event in zip(("a", "b"), expected_events, strict=True)
+    }
+    for mode, partitions in [("joint", [[a, b]]), ("forward", [[a], [b]]), ("reverse", [[b], [a]])]:
+        meta = {} if sample is None else {"sample_sha256": sample}
+        report = Report("example.invalid", meta, [], [], [], [])
+        for index, batch in enumerate(partitions):
+            _import_fixture_windows(report, tmp_path / mode / str(index), batch)
+        assert _reported_window_events(report) == expected, mode
+        assert report.endpoints == [] and "closure" not in report.meta
+
+
+def test_unattributed_failed_window_does_not_supply_later_pid_reuse(tmp_path: Path) -> None:
+    report = Report("example.invalid", {}, [], [], [], [])
+    _import_fixture_windows(report, tmp_path / "unattributed", [_window_for_pid_reuse("a", "before")])
+    report.meta["sample_sha256"] = "ab" * 32
+    _import_fixture_windows(report, tmp_path / "bound", [_window_for_pid_reuse("b", "after")])
+    assert _reported_window_events(report) == {
+        "a": ("identity_unattributed", "capture_window"),
+        "b": ("modified_uncovered", "unknown"),
+    }
+
+
+
+@pytest.mark.parametrize("peer", [
+    pytest.param({"event": "process_exit", "logs": False}, id="not-a-window"),
+    pytest.param({"status": "ok", "observer_attached": False, "observer_requested": True}, id="no-window-observation"),
+    pytest.param({"runtime_variant": "original-runtime"}, id="original-uncovered"),
+])
+def test_other_pid_reuse_rows_do_not_witness_failed_modified_window(
+    tmp_path: Path, peer: dict[str, object],
+) -> None:
+    before = {**_window_for_pid_reuse("a", "before"), **peer}
+    failed = _window_for_pid_reuse("b", "after")
+    for mode, partitions in [
+        ("joint", [[before, failed]]), ("forward", [[before], [failed]]), ("reverse", [[failed], [before]]),
+    ]:
+        report = Report("example.invalid", {"sample_sha256": "ab" * 32}, [], [], [], [])
+        for index, batch in enumerate(partitions):
+            _import_fixture_windows(report, tmp_path / mode / str(index), batch)
+        rows = _reported_window_events(report)
+        # The existing general PID-reuse taxonomy is unchanged; it cannot prove
+        # that the other row was itself a positively observed capture window.
+        assert rows["a"][1] == "unknown", mode
+        assert rows["b"] == ("modified_uncovered", "unknown"), mode
+
+
 def test_static_manifest_emits_only_explicit_attributes() -> None:
     from fxapk.analyzers.runtime_diagnostics import RuntimeDiagnosticsAnalyzer
 
