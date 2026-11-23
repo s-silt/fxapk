@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 import yaml
 
+from tools import verify_fixed_jadx_ci as verifier
 from tools.fixed_jadx_gate import NODES, VERSION
 from tools.verify_fixed_jadx_ci import accepts_receipt
 
@@ -35,6 +36,24 @@ def receipt() -> dict[str, object]:
 def test_exact_receipt(receipt: dict[str, object]) -> None:
     assert len(NODES) == 19
     assert accepts_receipt(receipt, HEAD, TREE)
+
+
+@pytest.mark.parametrize("drift", ["replacement", "reorder"])
+def test_v3_rejects_equal_count_node_drift(
+    receipt: dict[str, object], drift: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if drift == "replacement":
+        changed = (
+            *NODES[:-1], "tests/test_visibility.py::test_java_complete_empty_scan_keeps_complete",
+        )
+    else:
+        changed = (NODES[1], NODES[0], *NODES[2:])
+    assert len(changed) == len(set(changed)) == 19
+    assert changed != NODES
+    # Simulate the producer and verifier seeing the same edited gate constant.
+    monkeypatch.setattr(verifier, "NODES", changed)
+    receipt["cases"] = list(changed)
+    assert not accepts_receipt(receipt, HEAD, TREE)
 
 
 @pytest.mark.parametrize(("field", "value"), [
