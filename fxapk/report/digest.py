@@ -16,7 +16,9 @@ from typing import Any
 from fxapk.core.coverage import collect_coverage
 from fxapk.core.visibility import (
     PERSISTED_VISIBILITY_INVALID_NOTE,
+    VIS_UNKNOWN,
     java_scan_counts,
+    normalize_saved_visibility_level,
     persisted_visibility_containers_valid,
     project_persisted_visibility,
 )
@@ -578,13 +580,22 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
     blocked = [c for c in blocked_claims if isinstance(c, str)]
     raw_claims = raw.get("claims")
     claims: dict = raw_claims if isinstance(raw_claims, dict) else {}
+    levels: dict[str, str] = {}
+    invalid_level = False
+    for name, entry in sources.items():
+        if isinstance(entry, (str, dict)):
+            level, invalid = normalize_saved_visibility_level(
+                entry.get("visibility") if isinstance(entry, dict) else entry,
+            )
+        else:
+            level, invalid = VIS_UNKNOWN, True
+        levels[name] = level
+        invalid_level |= invalid
     return {
         "available": True,
         "degraded": bool(raw.get("degraded")),
-        "sources": {
-            k: (v.get("visibility") if isinstance(v, dict) else None)
-            for k, v in sources.items()
-        },
+        "sources": levels,
+        **({"note": PERSISTED_VISIBILITY_INVALID_NOTE} if invalid_level else {}),
         "remediation": raw.get("remediation"),
         # 无资格下的结论：AI 读到这些名字时，不得把对应的"未发现"当成"不存在"
         "blocked_claims": [

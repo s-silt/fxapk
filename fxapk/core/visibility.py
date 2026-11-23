@@ -53,6 +53,14 @@ VISIBILITY_LEVELS = frozenset({
     VIS_UNAVAILABLE, VIS_UNKNOWN, VIS_TIMEOUT, VIS_FAILED,
 })
 
+
+def normalize_saved_visibility_level(status: object) -> tuple[str, bool]:
+    """Return a known level and whether a supplied value was invalid."""
+    if isinstance(status, str) and status in VISIBILITY_LEVELS:
+        return status, False
+    return VIS_UNKNOWN, status is not None
+
+
 #: 补救状态：脱壳这类动作**做成功**与**结果已成为当前报告的输入**是两回事，必须分开。
 REM_NOT_ATTEMPTED = "not_attempted"
 REM_FAILED = "failed"
