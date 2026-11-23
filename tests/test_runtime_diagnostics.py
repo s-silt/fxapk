@@ -317,6 +317,26 @@ def _reported_window_events(report: Report) -> dict[str, tuple[str, str]]:
     pytest.param("ab" * 32, {}, {}, ["pid_reuse", "pid_reuse"], id="both-failed"),
     pytest.param("ab" * 32, {"apk_sha256": "AB" * 32}, {"apk_sha256": "AB" * 32},
                  ["pid_reuse", "pid_reuse"], id="normalized-sample"),
+    pytest.param("ab" * 32, {}, {"apk_sha256": "AB" * 32},
+                 ["pid_reuse", "pid_reuse"], id="mixed-hash-case"),
+    pytest.param("ab" * 32, {}, {"status": "ok", "apk_sha256": "AB" * 32},
+                 ["pid_reuse", "capture_window"], id="mixed-hash-ordinary-peer"),
+    pytest.param("ab" * 32, {"status": "ok"}, {"status": "ok", "apk_sha256": "AB" * 32},
+                 ["capture_window", "capture_window"], id="legacy-hash-case"),
+    pytest.param("ab" * 32, {}, {"apk_sha256": "AB" * 32, "device_id": "other-device"},
+                 ["modified_uncovered", "modified_uncovered"], id="mixed-hash-other-device"),
+    pytest.param(None, {}, {"apk_sha256": "AB" * 32},
+                 ["identity_unattributed", "identity_unattributed"], id="mixed-hash-unbound"),
+    pytest.param("ab" * 32, {"runtime_variant": "synthetic-unknown"}, {},
+                 ["capture_window_failed", "modified_uncovered"], id="failed-unknown-variant"),
+    pytest.param("ab" * 32, {"runtime_variant": None}, {},
+                 ["capture_window_failed", "modified_uncovered"], id="failed-missing-variant"),
+    pytest.param(None, {"runtime_variant": None}, {},
+                 ["identity_unattributed", "identity_unattributed"], id="failed-unknown-without-binding"),
+    pytest.param("ab" * 32, {"runtime_variant": None, "apk_sha256": "cd" * 32}, {},
+                 ["identity_mismatch", "modified_uncovered"], id="failed-unknown-mismatched"),
+    pytest.param("ab" * 32, {"runtime_variant": None, "status": "ok"}, {},
+                 ["pid_reuse", "pid_reuse"], id="positive-unknown-variant"),
     pytest.param("ab" * 32, {}, {"start_token": "before", "status": "ok"},
                  ["modified_uncovered", "capture_window"], id="same-token"),
     pytest.param("ab" * 32, {}, {"run_id": "other-run"},
@@ -340,6 +360,8 @@ def test_failed_modified_pid_reuse_is_bound_and_partition_independent(
     expected_events: list[str],
 ) -> None:
     a = _window_for_pid_reuse("a", "before", **first)
+    if "runtime_variant" in first and first["runtime_variant"] is None:
+        a.pop("runtime_variant")
     b = _window_for_pid_reuse("b", "after", **later)
     expected = {
         window: (event, "capture_window" if event.startswith("identity_") or event == "pid_reuse" else "unknown")
