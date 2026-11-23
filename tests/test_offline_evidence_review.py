@@ -366,6 +366,75 @@ def test_missing_optional_library_is_visible_and_later_stage_runs(tmp_path, monk
     assert receipt["tasks"][0]["reason_codes"] == ["optional_dependency_unavailable"]
 
 
+
+def test_offline_review_projects_saved_java_file_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fxapk.analyzers import jadx
+
+    java_tree = tmp_path / "synthetic-java"
+    java_tree.mkdir()
+    for name in ("C", "A", "B"):
+        (java_tree / f"{name}.java").write_text(f"class {name} {{}}", encoding="utf-8")
+    monkeypatch.setattr(jadx, "_MAX_JAVA_FILES", 2)
+    scan = jadx.JadxAnalyzer()._scan_java(java_tree).receipt
+    assert (scan["files_scanned"], scan["files_selected"], scan["files_total"]) == (2, 2, 3)
+    assert scan["scan_limit_hit"] is True and scan["truncated_files"] == 0
+    receipt = jadx._build_jadx_receipt(
+        status="ok", runs=[{"options_digest": "synthetic", "ownership_complete": True,
+                            "termination_complete": True}],
+        scan=scan, cleanup={"complete": True}, analyzer_error=False,
+    )
+    assert receipt["complete"] is False and receipt["reason_codes"] == ["scan_limit_hit"]
+
+    sample = "a" * 64
+    saved = {
+        "sources": {"java": {"visibility": "complete", "why": []}, "dex": "stub_only"},
+        "claims": {"static_endpoint_exhaustive": {"eligible": True, "missing_sources": []}},
+        "blocked_claims": ["unrelated_claim"],
+    }
+    source = tmp_path / "source.json"
+    original = json.dumps({
+        "package_name": "com.example.synthetic", "analysis_status": "complete", "completeness": 1.0,
+        "meta": {"sample_sha256": sample, "visibility": saved, "jadx_receipt": receipt},
+    }).encode()
+    source.write_bytes(original)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schema_version": "fxapk.offline-review.v1", "sample_sha256": sample,
+        "tasks": [{"id": "synthetic-inert", "kind": "fixture_unsupported"}],
+    }), encoding="utf-8")
+    out = tmp_path / "review"
+    cli = CliRunner()
+    source_digest = cli.invoke(app, ["digest", str(source)])
+    review = cli.invoke(app, ["evidence-review", str(plan), "--report", str(source), "--out", str(out)])
+    replay = cli.invoke(app, ["digest", str(out / "report.json")])
+    assert (source_digest.exit_code, review.exit_code, replay.exit_code) == (0, 5, 0), review.output
+    assert json.loads(review.stdout)["state"] == "partial"
+    assert json.loads((out / "review.json").read_text(encoding="utf-8"))["publication"] == "ok"
+    assert not (out / "inputs").exists()
+    assert source.read_bytes() == original
+
+    published = json.loads((out / "report.json").read_text(encoding="utf-8"))["meta"]
+    assert published["visibility"] == saved
+    assert published["jadx_receipt"] == receipt
+    digest = json.loads((out / "digest.json").read_text(encoding="utf-8"))["visibility"]
+    assert digest == json.loads(source_digest.stdout)["visibility"] == json.loads(replay.stdout)["visibility"]
+    assert digest["sources"] == {"java": "partial", "dex": "stub_only"}
+    assert digest["java_scan"] == {"files_scanned": 2, "files_total": 3}
+    assert [item["claim"] for item in digest["blocked_claims"]] == [
+        "unrelated_claim", "static_endpoint_exhaustive", "no_hardcoded_credential",
+    ]
+    assert any(note.startswith("[java] ") and "scan_limit_hit" in note for note in digest["notes"])
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    java = html.split("<td>java</td>", 1)[1].split("</tr>", 1)[0]
+    assert "<td>partial</td>" in java and "scan_limit_hit" in java
+    assert "2/3" in html.split('id="jadx-java-scan"', 1)[1].split("</p>", 1)[0]
+    for claim in ("unrelated_claim", "static_endpoint_exhaustive", "no_hardcoded_credential"):
+        assert f"<li>{claim}</li>" in html
+
+
 def test_hash_mismatch_never_retains_unverified_input(tmp_path):
     """★顺序修复回归（sfind-d0e9f024）：sha256 不匹配的输入不得写进 inputs/。"""
     data = encoded([event(1)])

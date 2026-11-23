@@ -365,6 +365,7 @@ def java_scan_counts(meta: object) -> dict[str, int] | None:
 
 
 _JAVA_SAVED_CONFLICT_NOTE = "Java 可见性快照的完整状态与截断扫描记录冲突，不能判为完整"
+_JAVA_SAVED_FILE_LIMIT_NOTE = "Java 可见性快照的完整状态与文件数量上限记录冲突（scan_limit_hit），不能判为完整"
 _JAVA_SAVED_CONFLICT_CLAIMS = ("static_endpoint_exhaustive", "no_hardcoded_credential")
 
 
@@ -387,7 +388,7 @@ def project_persisted_visibility(meta: dict[str, Any]) -> object:
         return saved
 
     # The current evaluator checks all contradictions in a complete producer claim.
-    # Saved views use only explicit truncation, even if the producer marked itself partial.
+    # Saved views use only validated byte truncation or an explicit producer file limit.
     receipt = meta.get("jadx_receipt")
     if not isinstance(receipt, dict) or receipt.get("status") != "ok" or type(receipt.get("complete")) is not bool:
         return saved
@@ -396,7 +397,7 @@ def project_persisted_visibility(meta: dict[str, Any]) -> object:
     if not isinstance(scan, dict) or counts is None:
         return saved
     truncated = scan.get("truncated_files")
-    if type(truncated) is not int or not 0 < truncated <= counts["files_scanned"]:
+    if type(truncated) is not int or not 0 <= truncated <= counts["files_scanned"]:
         return saved
     if any(type(scan.get(key, False)) is not bool for key in ("scan_limit_hit", "discovery_failed")):
         return saved
@@ -405,6 +406,21 @@ def project_persisted_visibility(meta: dict[str, Any]) -> object:
     selected = scan.get("files_selected", counts["files_total"])
     if type(selected) is not int or not counts["files_scanned"] <= selected <= counts["files_total"]:
         return saved
+
+    conflict_note = _JAVA_SAVED_CONFLICT_NOTE
+    if truncated == 0:
+        # A native count-limited scan has a positive selection; a bare mismatch is not proof.
+        if (
+            receipt["complete"] is not False
+            or receipt.get("reason_codes") != ["scan_limit_hit"]
+            or scan.get("scan_limit_hit") is not True
+            or not 0 < counts["files_scanned"] == selected < counts["files_total"]
+            or scan.get("discovery_failed") is not False
+            or scan.get("read_failed") != 0
+            or scan.get("scan_exceptions") != 0
+        ):
+            return saved
+        conflict_note = _JAVA_SAVED_FILE_LIMIT_NOTE
 
     raw_claims = saved.get("claims")
     claims = dict(raw_claims) if isinstance(raw_claims, dict) else {}
@@ -429,7 +445,7 @@ def project_persisted_visibility(meta: dict[str, Any]) -> object:
             blocked.append(claim)
 
     notes = list(saved.get("notes", []))
-    note = f"[java] {_JAVA_SAVED_CONFLICT_NOTE}"
+    note = f"[java] {conflict_note}"
     if note not in notes:
         notes.append(note)
     return {
@@ -439,7 +455,7 @@ def project_persisted_visibility(meta: dict[str, Any]) -> object:
             "java": {
                 **java,
                 "visibility": VIS_PARTIAL,
-                "why": why if _JAVA_SAVED_CONFLICT_NOTE in why else [*why, _JAVA_SAVED_CONFLICT_NOTE],
+                "why": why if conflict_note in why else [*why, conflict_note],
             },
         },
         "claims": claims,
