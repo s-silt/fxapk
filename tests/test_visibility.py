@@ -301,6 +301,52 @@ def test_saved_java_projection_keeps_view_without_valid_truncation(scan: object)
     assert V.project_persisted_visibility({"jadx_receipt": {**_JADX_OK, "scan": scan}}) is None
 
 
+
+@pytest.mark.parametrize(("receipt_fields", "scan_fields"), [
+    ({"complete": True}, {}),
+    ({"complete": 0}, {}),
+    ({"reason_codes": []}, {}),
+    ({"reason_codes": "scan_limit_hit"}, {}),
+    ({"reason_codes": ["scan_limit_hit", {"bad": True}]}, {}),
+    ({"reason_codes": ["scan_limit_hit", "source_file_truncated"]}, {}),
+    ({"reason_codes": ["cleanup_incomplete", "scan_limit_hit"]}, {}),
+    ({"reason_codes": ["read_failed", "scan_limit_hit"]}, {}),
+    ({"reason_codes": ["scan_exception", "scan_limit_hit"]}, {"scan_exceptions": 1}),
+    ({"cleanup": None}, {}),
+    ({"cleanup": {"complete": 0}}, {}),
+    ({"cleanup": {"complete": False}}, {}),
+    ({"reason_codes": ["cleanup_incomplete", "scan_limit_hit"], "cleanup": {}}, {}),
+    ({"reason_codes": ["read_failed", "scan_limit_hit"]}, {"files_scanned": 1, "read_failed": True}),
+    ({}, {"files_scanned": 1, "read_failed": 1}),
+    ({"status": "timeout"}, {}),
+    ({}, {"scan_limit_hit": 1}),
+    ({}, {"scan_limit_hit": False}),
+    ({}, {"files_scanned": True, "files_selected": True}),
+    ({}, {"files_selected": "2"}),
+    ({}, {"files_selected": 3}),
+    ({}, {"files_scanned": 0, "files_selected": 0}),
+    ({}, {"files_total": None}),
+    ({}, {"files_total": 2}),
+    ({}, {"truncated_files": False}),
+    ({}, {"read_failed": 1}),
+    ({}, {"scan_exceptions": 1}),
+    ({}, {"discovery_failed": True}),
+])
+def test_saved_java_file_limit_ignores_unverified_shapes(
+    receipt_fields: dict[str, object], scan_fields: dict[str, object],
+) -> None:
+    saved = {"sources": {"java": {"visibility": "complete", "why": []}}}
+    scan = {
+        "scan_limit_hit": True, "files_scanned": 2, "files_selected": 2, "files_total": 3,
+        "truncated_files": 0, "read_failed": 0, "scan_exceptions": 0, "discovery_failed": False,
+    }
+    receipt = {
+        "status": "ok", "complete": False, "reason_codes": ["scan_limit_hit"],
+        "cleanup": {"complete": True}, **receipt_fields, "scan": {**scan, **scan_fields},
+    }
+    assert V.project_persisted_visibility({"visibility": saved, "jadx_receipt": receipt}) is saved
+
+
 def test_java_complete_empty_scan_keeps_complete() -> None:
     report = _report(jadx_receipt={
         **_JADX_OK,

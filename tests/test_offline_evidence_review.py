@@ -366,6 +366,124 @@ def test_missing_optional_library_is_visible_and_later_stage_runs(tmp_path, monk
     assert receipt["tasks"][0]["reason_codes"] == ["optional_dependency_unavailable"]
 
 
+
+@pytest.mark.parametrize(("read_failures", "cleanup_failed"), [
+    pytest.param((), False, id="limit-only"),
+    pytest.param((), True, id="cleanup-incomplete"),
+    pytest.param(("A.java",), False, id="read-failed"),
+    pytest.param(("A.java",), True, id="read-and-cleanup-failed"),
+    pytest.param(("A.java", "B.java"), False, id="all-selected-reads-failed"),
+])
+def test_offline_review_projects_saved_java_file_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    read_failures: tuple[str, ...], cleanup_failed: bool,
+) -> None:
+    from shutil import rmtree
+
+    from fxapk.analyzers import jadx
+    from tests.conftest import FakeContext
+
+    java_tree = tmp_path / "synthetic-java"
+    java_tree.mkdir()
+    for name in ("C", "A", "B"):
+        (java_tree / f"{name}.java").write_text(f"class {name} {{}}", encoding="utf-8")
+    analyzer = jadx.JadxAnalyzer()
+    original_open = Path.open
+
+    def read_java(path: Path, mode="r", *args, **kwargs):
+        if path.parent == java_tree and path.name in read_failures and mode == "rb":
+            raise PermissionError("synthetic unpublishable I/O diagnostic")
+        return original_open(path, mode, *args, **kwargs)
+
+    def cleanup(path: str) -> None:
+        if cleanup_failed and Path(path) == java_tree:
+            raise PermissionError("synthetic unpublishable I/O diagnostic")
+        rmtree(path)
+
+    run = jadx._JadxRun(
+        "ok", "synthetic", jadx.proctree.OwnedRun(
+            returncode=0, stdout="", stderr="", timed_out=False, ownership_complete=True,
+            termination_complete=True, forced_tree_kill=False, reason_codes=(),
+        ),
+    )
+    with monkeypatch.context() as scope:
+        # Replace only the decompiler process, temporary path and selected filesystem errors.
+        scope.setattr(analyzer, "_run_jadx", lambda *_args, **_kwargs: run)
+        scope.setattr(jadx.tempfile, "mkdtemp", lambda **_kwargs: str(java_tree))
+        scope.setattr(jadx, "_MAX_JAVA_FILES", 2)
+        scope.setattr(jadx, "_CLEANUP_ATTEMPTS", 1)
+        scope.setattr(jadx, "_CLEANUP_BACKOFF", 0)
+        scope.setattr(Path, "open", read_java)
+        scope.setattr(jadx.shutil, "rmtree", cleanup)
+        result = analyzer.analyze(FakeContext(apk_path=str(tmp_path / "unused.apk")))
+    assert java_tree.exists() is cleanup_failed
+    if cleanup_failed:
+        rmtree(java_tree)
+    assert result.error is None
+    receipt = result.meta["jadx_receipt"]
+    assert receipt["status"] == "ok" and receipt["complete"] is False
+    expected_reasons = ["scan_limit_hit"]
+    if read_failures:
+        expected_reasons.append("read_failed")
+    if cleanup_failed:
+        expected_reasons.append("cleanup_incomplete")
+    assert receipt["reason_codes"] == sorted(expected_reasons)
+    assert receipt["cleanup"]["complete"] is (not cleanup_failed)
+    scan = receipt["scan"]
+    scanned = 2 - len(read_failures)
+    assert (scan["files_scanned"], scan["files_selected"], scan["files_total"]) == (scanned, 2, 3)
+    assert scan["read_failed"] == len(read_failures)
+    assert scan["scan_limit_hit"] is True and scan["truncated_files"] == 0
+
+    sample = "a" * 64
+    saved = {
+        "sources": {"java": {"visibility": "complete", "why": []}, "dex": "stub_only"},
+        "claims": {"static_endpoint_exhaustive": {"eligible": True, "missing_sources": []}},
+        "blocked_claims": ["unrelated_claim"],
+    }
+    source = tmp_path / "source.json"
+    original = json.dumps({
+        "package_name": "com.example.synthetic", "analysis_status": "complete", "completeness": 1.0,
+        "meta": {"sample_sha256": sample, "visibility": saved, "jadx_receipt": receipt},
+    }).encode()
+    source.write_bytes(original)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schema_version": "fxapk.offline-review.v1", "sample_sha256": sample,
+        "tasks": [{"id": "synthetic-inert", "kind": "fixture_unsupported"}],
+    }), encoding="utf-8")
+    out = tmp_path / "review"
+    cli = CliRunner()
+    source_digest = cli.invoke(app, ["digest", str(source)])
+    review = cli.invoke(app, ["evidence-review", str(plan), "--report", str(source), "--out", str(out)])
+    replay = cli.invoke(app, ["digest", str(out / "report.json")])
+    assert (source_digest.exit_code, review.exit_code, replay.exit_code) == (0, 5, 0), review.output
+    assert json.loads(review.stdout)["state"] == "partial"
+    assert json.loads((out / "review.json").read_text(encoding="utf-8"))["publication"] == "ok"
+    assert not (out / "inputs").exists()
+    assert source.read_bytes() == original
+
+    published = json.loads((out / "report.json").read_text(encoding="utf-8"))["meta"]
+    assert published["visibility"] == saved
+    assert published["jadx_receipt"] == receipt
+    digest = json.loads((out / "digest.json").read_text(encoding="utf-8"))["visibility"]
+    assert digest == json.loads(source_digest.stdout)["visibility"] == json.loads(replay.stdout)["visibility"]
+    assert digest["sources"] == {"java": "partial", "dex": "stub_only"}
+    assert digest["java_scan"] == {"files_scanned": scanned, "files_total": 3}
+    assert [item["claim"] for item in digest["blocked_claims"]] == [
+        "unrelated_claim", "static_endpoint_exhaustive", "no_hardcoded_credential",
+    ]
+    assert any(note.startswith("[java] ") and "scan_limit_hit" in note for note in digest["notes"])
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    java = html.split("<td>java</td>", 1)[1].split("</tr>", 1)[0]
+    assert "<td>partial</td>" in java and "scan_limit_hit" in java
+    assert f"{scanned}/3" in html.split('id="jadx-java-scan"', 1)[1].split("</p>", 1)[0]
+    assert "synthetic unpublishable I/O diagnostic" not in html + source_digest.stdout + replay.stdout
+    for claim in ("unrelated_claim", "static_endpoint_exhaustive", "no_hardcoded_credential"):
+        assert f"<li>{claim}</li>" in html
+
+
 def test_hash_mismatch_never_retains_unverified_input(tmp_path):
     """★顺序修复回归（sfind-d0e9f024）：sha256 不匹配的输入不得写进 inputs/。"""
     data = encoded([event(1)])
