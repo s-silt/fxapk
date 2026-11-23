@@ -309,6 +309,15 @@ def test_saved_java_projection_keeps_view_without_valid_truncation(scan: object)
     ({"reason_codes": "scan_limit_hit"}, {}),
     ({"reason_codes": ["scan_limit_hit", {"bad": True}]}, {}),
     ({"reason_codes": ["scan_limit_hit", "source_file_truncated"]}, {}),
+    ({"reason_codes": ["cleanup_incomplete", "scan_limit_hit"]}, {}),
+    ({"reason_codes": ["read_failed", "scan_limit_hit"]}, {}),
+    ({"reason_codes": ["scan_exception", "scan_limit_hit"]}, {"scan_exceptions": 1}),
+    ({"cleanup": None}, {}),
+    ({"cleanup": {"complete": 0}}, {}),
+    ({"cleanup": {"complete": False}}, {}),
+    ({"reason_codes": ["cleanup_incomplete", "scan_limit_hit"], "cleanup": {}}, {}),
+    ({"reason_codes": ["read_failed", "scan_limit_hit"]}, {"files_scanned": 1, "read_failed": True}),
+    ({}, {"files_scanned": 1, "read_failed": 1}),
     ({"status": "timeout"}, {}),
     ({}, {"scan_limit_hit": 1}),
     ({}, {"scan_limit_hit": False}),
@@ -333,7 +342,7 @@ def test_saved_java_file_limit_ignores_unverified_shapes(
     }
     receipt = {
         "status": "ok", "complete": False, "reason_codes": ["scan_limit_hit"],
-        **receipt_fields, "scan": {**scan, **scan_fields},
+        "cleanup": {"complete": True}, **receipt_fields, "scan": {**scan, **scan_fields},
     }
     assert V.project_persisted_visibility({"visibility": saved, "jadx_receipt": receipt}) is saved
 

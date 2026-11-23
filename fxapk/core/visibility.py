@@ -409,16 +409,27 @@ def project_persisted_visibility(meta: dict[str, Any]) -> object:
 
     conflict_note = _JAVA_SAVED_CONFLICT_NOTE
     if truncated == 0:
-        # A native count-limited scan has a positive selection; a bare mismatch is not proof.
+        # A native count-limited scan has a positive selection. Each selected file
+        # is read or counted as a read failure; cleanup can fail independently.
+        cleanup = receipt.get("cleanup")
+        read_failed = scan.get("read_failed")
         if (
             receipt["complete"] is not False
-            or receipt.get("reason_codes") != ["scan_limit_hit"]
             or scan.get("scan_limit_hit") is not True
-            or not 0 < counts["files_scanned"] == selected < counts["files_total"]
+            or not 0 < selected < counts["files_total"]
+            or read_failed != selected - counts["files_scanned"]
             or scan.get("discovery_failed") is not False
-            or scan.get("read_failed") != 0
             or scan.get("scan_exceptions") != 0
+            or not isinstance(cleanup, dict)
+            or type(cleanup.get("complete")) is not bool
         ):
+            return saved
+        expected_reasons = ["scan_limit_hit"]
+        if read_failed:
+            expected_reasons.append("read_failed")
+        if cleanup["complete"] is False:
+            expected_reasons.append("cleanup_incomplete")
+        if receipt.get("reason_codes") != sorted(expected_reasons):
             return saved
         conflict_note = _JAVA_SAVED_FILE_LIMIT_NOTE
 
