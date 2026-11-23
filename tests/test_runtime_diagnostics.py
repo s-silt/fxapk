@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from fxapk.core.models import Report
 from fxapk.core.runtime_diagnostics import (
     explain_coverage,
@@ -164,6 +166,249 @@ def test_merge_appends_diagnostics_without_new_endpoints(tmp_path: Path) -> None
     assert "isolated_process" in json.dumps(digest["runtime_diagnostics"])
     rendered = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert rendered["meta"]["runtime_diagnostics"]["items"][0]["event"] == "isolated_process"
+
+
+
+def test_failed_modified_window_is_a_gap_in_report_outputs(tmp_path: Path) -> None:
+    from hashlib import sha256
+
+    from typer.testing import CliRunner
+
+    from fxapk.cli import app
+    from fxapk.report import html, json as report_json
+
+    sample = "ab" * 32
+    closure = {"status": "partial", "gaps": ["synthetic"]}
+    declarations = explain_coverage([
+        _window("isolated_process", "manifest", declared_value=True),
+        _window("app_zygote", "manifest", declared_value=False),
+    ])
+    report = Report(
+        package_name="example.invalid",
+        meta={"sample_sha256": sample, "closure": closure, "runtime_diagnostics": declarations},
+        leads=[], endpoints=[], findings=[], analyzer_status=[],
+    )
+    runtime = tmp_path / "runtime_report.json"
+    payload = {"package_name": "example.invalid", "source": "runtime", "endpoints": []}
+    runtime.write_text(json.dumps(payload), encoding="utf-8")
+    merge.import_runtime_diagnostics_only(report, str(runtime))
+    assert report.meta["runtime_diagnostics"] is declarations
+
+    original = dict(pid=51, start_token="synthetic")
+    observations = [
+        _window("capture_window", "modified-failed", runtime_variant="modified-runtime", status="failed", **original),
+        _window("capture_window", "original-failed", runtime_variant="original-runtime", status="failed", **original),
+        _window("capture_window", "modified-ok", runtime_variant="modified-runtime", status="ok", **original),
+        observation_from_capture(
+            pid=51, uid=None, hook_status="confirmed", retreated=False,
+            runtime_variant="modified-runtime", pass_tag="native-window",
+            apk_sha256=sample, run_id="native-run", start_token="synthetic",
+        ),
+    ]
+    assert observations[-1]["status"] is None
+    raw = json.dumps({**payload, "process_observations": observations}).encode()
+    runtime.write_bytes(raw)
+    merge.import_runtime_diagnostics_only(report, str(runtime))
+
+    output = tmp_path / "report.json"
+    report_json.dump(report, str(output))
+    rendered = html.render_to_string(report)
+    result = CliRunner().invoke(app, ["digest", str(output)])
+    assert result.exit_code == 0, result.stderr
+    diagnostics = json.loads(result.stdout)["runtime_diagnostics"]
+    assert diagnostics["schema"] == "runtime-diagnostics/1"
+    assert diagnostics["frida_detection"] == "not_inferred"
+    assert diagnostics["endpoints_added"] == 0 and diagnostics["closure_evaluated"] is False
+
+    first, second, *windows = diagnostics["items"]
+    assert (first["class"], first["event"], first["declared_value"]) == (
+        "static-potential", "isolated_process", True,
+    )
+    assert (second["class"], second["event"], second["declared_value"]) == (
+        "static-recorded", "app_zygote", False,
+    )
+    expected = [
+        ("coverage-gap", "modified_uncovered", "modified-failed"),
+        ("coverage-gap", "original_uncovered", "original-failed"),
+        ("observed-event", "capture_window", "modified-ok"),
+        ("observed-event", "capture_window", "native-window"),
+    ]
+    assert [(row["class"], row["event"], row["window_id"]) for row in windows] == expected
+    assert all(" · ".join(row) in rendered for row in expected)
+    assert all(row["source_report_sha256"] == sha256(raw).hexdigest() for row in windows)
+    assert runtime.read_bytes() == raw
+    assert report.endpoints == [] and report.findings == [] and report.meta["closure"] == closure
+
+
+
+@pytest.mark.parametrize(("sample", "apk", "event"), [
+    pytest.param("ab" * 32, "ab" * 32, "modified_uncovered", id="matched"),
+    pytest.param("ab" * 32, "AB" * 32, "modified_uncovered", id="normalized-match"),
+    pytest.param("ab" * 32, "cd" * 32, "identity_mismatch", id="different-sample"),
+    pytest.param("ab" * 32, None, "identity_unattributed", id="missing-raw-hash"),
+    pytest.param("ab" * 32, "synthetic-invalid-hash", "identity_unattributed", id="invalid-raw-hash"),
+    pytest.param(None, "ab" * 32, "identity_unattributed", id="missing-report-hash"),
+])
+def test_failed_modified_window_retains_report_identity(
+    tmp_path: Path, sample: str | None, apk: str | None, event: str,
+) -> None:
+    from fxapk.report import html, json as report_json
+
+    row = _window(
+        "capture_window", "one-window", runtime_variant="modified-runtime",
+        status="failed", pid=51, start_token="synthetic",
+    )
+    if apk is None:
+        row.pop("apk_sha256")
+    else:
+        row["apk_sha256"] = apk
+    raw = json.dumps({"package_name": "example.invalid", "source": "runtime", "endpoints": [],
+                      "process_observations": [row]}).encode()
+    runtime = tmp_path / "runtime_report.json"
+    runtime.write_bytes(raw)
+    report = Report(
+        package_name="example.invalid", meta={} if sample is None else {"sample_sha256": sample},
+        leads=[], endpoints=[], findings=[], analyzer_status=[],
+    )
+    merge.import_runtime_diagnostics_only(report, str(runtime))
+
+    [item] = build_digest(report_json.to_dict(report))["runtime_diagnostics"]["items"]
+    assert (item["class"], item["event"]) == ("coverage-gap", event)
+    assert item["source_event"] == ("unknown" if event == "modified_uncovered" else "capture_window")
+    assert f"coverage-gap · {event} · one-window" in html.render_to_string(report)
+    assert runtime.read_bytes() == raw
+    if apk in (None, "synthetic-invalid-hash"):
+        [unbound] = explain_coverage([row])["items"]
+        assert (unbound["event"], unbound["source_event"]) == ("identity_unattributed", "capture_window")
+
+
+
+def _window_for_pid_reuse(window: str, token: str, **fields: object) -> dict[str, object]:
+    defaults = {"runtime_variant": "modified-runtime", "status": "failed", "pid": 51,
+                "start_token": token, "run_id": "same-run", "device_id": "synthetic-device"}
+    return _window("capture_window", window, **{**defaults, **fields})
+
+
+def _import_fixture_windows(
+    report: Report, directory: Path, observations: list[dict[str, object]],
+) -> None:
+    runtime = directory / "runtime_report.json"
+    directory.mkdir(parents=True)
+    raw = json.dumps({"package_name": "example.invalid", "source": "runtime", "endpoints": [],
+                      "process_observations": observations}).encode()
+    runtime.write_bytes(raw)
+    merge.import_runtime_diagnostics_only(report, str(runtime))
+    assert runtime.read_bytes() == raw
+
+
+def _reported_window_events(report: Report) -> dict[str, tuple[str, str]]:
+    from fxapk.report import html, json as report_json
+
+    items = build_digest(report_json.to_dict(report))["runtime_diagnostics"]["items"]
+    rendered = html.render_to_string(report)
+    for item in items:
+        assert not item["window_coverage_shared"] and not item["run_coverage_shared"]
+        assert f'{item["class"]} · {item["event"]} · {item["window_id"]}' in rendered
+    return {item["window_id"]: (item["event"], item["source_event"]) for item in items}
+
+
+@pytest.mark.parametrize(("sample", "first", "later", "expected_events"), [
+    pytest.param("ab" * 32, {}, {"status": "ok"}, ["pid_reuse", "pid_reuse"], id="matched"),
+    pytest.param("ab" * 32, {}, {}, ["pid_reuse", "pid_reuse"], id="both-failed"),
+    pytest.param("ab" * 32, {"apk_sha256": "AB" * 32}, {"apk_sha256": "AB" * 32},
+                 ["pid_reuse", "pid_reuse"], id="normalized-sample"),
+    pytest.param("ab" * 32, {}, {"apk_sha256": "AB" * 32},
+                 ["pid_reuse", "pid_reuse"], id="mixed-hash-case"),
+    pytest.param("ab" * 32, {}, {"status": "ok", "apk_sha256": "AB" * 32},
+                 ["pid_reuse", "capture_window"], id="mixed-hash-ordinary-peer"),
+    pytest.param("ab" * 32, {"status": "ok"}, {"status": "ok", "apk_sha256": "AB" * 32},
+                 ["capture_window", "capture_window"], id="legacy-hash-case"),
+    pytest.param("ab" * 32, {}, {"apk_sha256": "AB" * 32, "device_id": "other-device"},
+                 ["modified_uncovered", "modified_uncovered"], id="mixed-hash-other-device"),
+    pytest.param(None, {}, {"apk_sha256": "AB" * 32},
+                 ["identity_unattributed", "identity_unattributed"], id="mixed-hash-unbound"),
+    pytest.param("ab" * 32, {"runtime_variant": "synthetic-unknown"}, {},
+                 ["capture_window_failed", "modified_uncovered"], id="failed-unknown-variant"),
+    pytest.param("ab" * 32, {"runtime_variant": None}, {},
+                 ["capture_window_failed", "modified_uncovered"], id="failed-missing-variant"),
+    pytest.param(None, {"runtime_variant": None}, {},
+                 ["identity_unattributed", "identity_unattributed"], id="failed-unknown-without-binding"),
+    pytest.param("ab" * 32, {"runtime_variant": None, "apk_sha256": "cd" * 32}, {},
+                 ["identity_mismatch", "modified_uncovered"], id="failed-unknown-mismatched"),
+    pytest.param("ab" * 32, {"runtime_variant": None, "status": "ok"}, {},
+                 ["pid_reuse", "pid_reuse"], id="positive-unknown-variant"),
+    pytest.param("ab" * 32, {}, {"start_token": "before", "status": "ok"},
+                 ["modified_uncovered", "capture_window"], id="same-token"),
+    pytest.param("ab" * 32, {}, {"run_id": "other-run"},
+                 ["modified_uncovered", "modified_uncovered"], id="cross-run"),
+    pytest.param("ab" * 32, {}, {"device_id": "other-device"},
+                 ["modified_uncovered", "modified_uncovered"], id="cross-device"),
+    pytest.param("ab" * 32, {}, {"apk_sha256": "cd" * 32},
+                 ["modified_uncovered", "identity_mismatch"], id="cross-sample"),
+    pytest.param("ab" * 32, {"apk_sha256": "cd" * 32}, {"apk_sha256": "cd" * 32},
+                 ["identity_mismatch", "identity_mismatch"], id="same-wrong-sample"),
+    pytest.param("ab" * 32, {"apk_sha256": "synthetic-invalid"}, {"apk_sha256": "synthetic-invalid"},
+                 ["identity_unattributed", "identity_unattributed"], id="invalid-hashes"),
+    pytest.param("ab" * 32, {"apk_sha256": None}, {"apk_sha256": None},
+                 ["identity_unattributed", "identity_unattributed"], id="no-raw-hash"),
+    pytest.param(None, {}, {}, ["identity_unattributed", "identity_unattributed"], id="no-report-hash"),
+    pytest.param("ab" * 32, {"device_id": None}, {"device_id": None},
+                 ["modified_uncovered", "modified_uncovered"], id="no-device"),
+])
+def test_failed_modified_pid_reuse_is_bound_and_partition_independent(
+    tmp_path: Path, sample: str | None, first: dict[str, object], later: dict[str, object],
+    expected_events: list[str],
+) -> None:
+    a = _window_for_pid_reuse("a", "before", **first)
+    if "runtime_variant" in first and first["runtime_variant"] is None:
+        a.pop("runtime_variant")
+    b = _window_for_pid_reuse("b", "after", **later)
+    expected = {
+        window: (event, "capture_window" if event.startswith("identity_") or event == "pid_reuse" else "unknown")
+        for window, event in zip(("a", "b"), expected_events, strict=True)
+    }
+    for mode, partitions in [("joint", [[a, b]]), ("forward", [[a], [b]]), ("reverse", [[b], [a]])]:
+        meta = {} if sample is None else {"sample_sha256": sample}
+        report = Report("example.invalid", meta, [], [], [], [])
+        for index, batch in enumerate(partitions):
+            _import_fixture_windows(report, tmp_path / mode / str(index), batch)
+        assert _reported_window_events(report) == expected, mode
+        assert report.endpoints == [] and "closure" not in report.meta
+
+
+def test_unattributed_failed_window_does_not_supply_later_pid_reuse(tmp_path: Path) -> None:
+    report = Report("example.invalid", {}, [], [], [], [])
+    _import_fixture_windows(report, tmp_path / "unattributed", [_window_for_pid_reuse("a", "before")])
+    report.meta["sample_sha256"] = "ab" * 32
+    _import_fixture_windows(report, tmp_path / "bound", [_window_for_pid_reuse("b", "after")])
+    assert _reported_window_events(report) == {
+        "a": ("identity_unattributed", "capture_window"),
+        "b": ("modified_uncovered", "unknown"),
+    }
+
+
+
+@pytest.mark.parametrize("peer", [
+    pytest.param({"event": "process_exit", "logs": False}, id="not-a-window"),
+    pytest.param({"status": "ok", "observer_attached": False, "observer_requested": True}, id="no-window-observation"),
+    pytest.param({"runtime_variant": "original-runtime"}, id="original-uncovered"),
+])
+def test_other_pid_reuse_rows_do_not_witness_failed_modified_window(
+    tmp_path: Path, peer: dict[str, object],
+) -> None:
+    before = {**_window_for_pid_reuse("a", "before"), **peer}
+    failed = _window_for_pid_reuse("b", "after")
+    for mode, partitions in [
+        ("joint", [[before, failed]]), ("forward", [[before], [failed]]), ("reverse", [[failed], [before]]),
+    ]:
+        report = Report("example.invalid", {"sample_sha256": "ab" * 32}, [], [], [], [])
+        for index, batch in enumerate(partitions):
+            _import_fixture_windows(report, tmp_path / mode / str(index), batch)
+        rows = _reported_window_events(report)
+        # The existing general PID-reuse taxonomy is unchanged; it cannot prove
+        # that the other row was itself a positively observed capture window.
+        assert rows["a"][1] == "unknown", mode
+        assert rows["b"] == ("modified_uncovered", "unknown"), mode
 
 
 def test_static_manifest_emits_only_explicit_attributes() -> None:
