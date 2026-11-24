@@ -372,9 +372,10 @@ def read_record(path: Path) -> dict[str, Any]:
     state = record.get("state")
     if not isinstance(state, str) or (state != "processing" and state not in EXIT):
         raise Rejected("ledger", "invalid_record")
-    if not isinstance(record.get("work"), str) or (
-        state == "succeeded" and not isinstance(record.get("receipt"), dict)
-    ):
+    work = record.get("work")
+    if not isinstance(work, str) or work in {"", ".", ".."} or "\0" in work or Path(work).name != work:
+        raise Rejected("ledger", "invalid_record")
+    if state == "succeeded" and not isinstance(record.get("receipt"), dict):
         raise Rejected("ledger", "invalid_record")
     return record
 

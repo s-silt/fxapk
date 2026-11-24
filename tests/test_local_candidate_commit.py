@@ -138,6 +138,9 @@ def test_replay_validates_exact_existing_commit_and_tree(prior_candidate: Replay
         ("succeeded", "receipt", []),
         ("succeeded", "work", []),
         ("processing", "work", []),
+        ("processing", "work", ""),
+        ("processing", "work", ".."),
+        ("processing", "work", "nested/directory"),
     ],
 )
 def test_replay_reports_invalid_ledger_record_without_changing_it(
