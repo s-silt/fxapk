@@ -28,6 +28,7 @@ from fxapk.core.models import (
 )
 from fxapk.core.web_observation_plan import (
     CONFIG_SCHEMA,
+    REASONS,
     WebSupplementRequest,
     build_plan,
     clean_coverage,
@@ -66,14 +67,20 @@ META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 SOURCE = "external-web-observation"
 NOTE = "网页观察候选，未经 App 归属与业务判定，不构成案件闭环"
 SUMMARY_EXECUTED = "已自动补采解析{n}候选"
-SUMMARY_SKIPPED = "网页补采已跳过：{reason}"
-SUMMARY_FAILED = "网页补采失败：{reason}"
+SUMMARY_SKIPPED = "网页补采已跳过"
+SUMMARY_FAILED = "网页补采失败"
 SUMMARY_GAP = "仍缺证据"
+_RECEIPT_SCHEMA = "fxapk.web_supplement/1"
 _SHA64 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_PUBLISH_BYTES = 32 * 1024 * 1024
 _DIGEST_STATUS = frozenset({
     "pending", "skipped", "ok", "executed", "failed", "unavailable", "not_applicable", "unknown",
 })
+_SAVED_STATE_LABELS = {
+    "pending": "网页补采待处理",
+    "unavailable": "网页补采不可用",
+    "not_applicable": "网页补采不适用",
+}
 _ROUND_IDS = frozenset({"single", "static", "round-1", "round-2", "round-3", "three_rounds"})
 _PROVIDERS = frozenset({"", "rea", "inspect", "trace", "fxapk-cdp-trace"})
 _DISPLAY_RELATIONS = 64
@@ -94,61 +101,76 @@ def _digest_status(value: object, *, fallback: str) -> str:
     if not isinstance(value, str):
         return fallback if fallback in _DIGEST_STATUS else "unknown"
     if value not in _DIGEST_STATUS:
-        return "skipped"
+        return "unknown"
     return value
 
 
-def _attempt_counts(attempts: object, status: str, latest_status: str) -> tuple[int, int]:
-    """Count stored attempts only. Attempt bodies stay out of the digest."""
+def _attempt_counts(receipt: dict[str, Any], status: str) -> tuple[int, int]:
+    """Count stored rows first; a latest-status label alone does not add an attempt."""
+    attempts = receipt.get("attempts")
     if isinstance(attempts, list):
-        rows = [item for item in attempts if isinstance(item, dict)]
+        rows = [
+            item for item in attempts
+            if isinstance(item, dict)
+            and _digest_status(item.get("status"), fallback="unknown") not in {"pending", "unknown"}
+        ]
         failed = sum(item.get("status") == "failed" for item in rows)
         return len(rows), failed
-    if status in {"pending", "unknown"} and latest_status in {"pending", "unknown"}:
+    if status in {"not_applicable", "pending", "unknown"}:
         return 0, 0
-    return 1, int(latest_status == "failed" or status == "failed")
+    marker = receipt.get("attempt")
+    canonical_attempt = marker if receipt.get("schema_version") == _RECEIPT_SCHEMA and type(marker) is int else None
+    if canonical_attempt == 0 or (status == "unavailable" and canonical_attempt != 1):
+        return 0, 0
+    # The single legacy fallback represents the primary record, not a different latest attempt.
+    return 1, int(status == "failed")
 
 
-def summary_line(status: str, reason: str, candidates: int) -> str:
-    code = fixed_reason(reason)
+def _reason_summary(label: str, reason: str) -> str:
+    suffix = f"：{reason}" if reason else ""
+    return f"{label}{suffix}；{SUMMARY_GAP}"
+
+
+def _terminal_summary(status: str, reason: str, candidates: int) -> str:
     if status in {"ok", "executed"} and candidates > 0:
         return f"{SUMMARY_EXECUTED.format(n=candidates)}；{SUMMARY_GAP}"
     if status in {"ok", "executed"}:
         return f"已自动补采解析0候选；{SUMMARY_GAP}"
-    if status == "failed":
-        return f"{SUMMARY_FAILED.format(reason=code)}；{SUMMARY_GAP}"
-    return f"{SUMMARY_SKIPPED.format(reason=code)}；{SUMMARY_GAP}"
+    return _reason_summary(SUMMARY_FAILED if status == "failed" else SUMMARY_SKIPPED, reason)
+
+
+def summary_line(status: str, reason: str, candidates: int) -> str:
+    return _terminal_summary(status, fixed_reason(reason), candidates)
+
+
+def _saved_reason(status: str, value: object) -> str:
+    return value if status != "unknown" and isinstance(value, str) and value in REASONS else ""
 
 
 def project_for_digest(value: object) -> dict[str, Any]:
     """Whitelist projection. A cached ``complete`` is not relabelled as executed."""
+    unrecorded = "网页补采状态未记录或无法确认；" + SUMMARY_GAP
     base = {
-        "status": "pending",
-        "reason": "no_config",
+        "status": "unknown",
+        "reason": "",
         "provider": "",
         "parse_counts": {"endpoints": 0, "config_leads": 0, "relations": 0, "scripts": 0},
         "round_id": "",
         "raw_sha256": [],
-        "summary_line": summary_line("pending", "no_config", 0),
+        "summary_line": unrecorded,
         "closure_evaluated": False,
         "app_attribution_verified": False,
-        "latest_status": "pending",
-        "latest_reason": "no_config",
+        "latest_status": "unknown",
+        "latest_reason": "",
         "attempt_count": 0,
         "failure_count": 0,
         "relation_omitted": 0,
         "capture_started": False,
     }
     if not isinstance(value, dict):
-        base["reason"] = "config_rejected"
-        base["status"] = "skipped"
-        base["latest_status"] = "skipped"
-        base["latest_reason"] = "config_rejected"
-        base["summary_line"] = summary_line("skipped", "config_rejected", 0)
         return base
     status = _digest_status(value.get("status"), fallback="unknown")
-    reason_raw = value.get("reason")
-    reason = fixed_reason(reason_raw if isinstance(reason_raw, str) else "config_rejected")
+    reason = _saved_reason(status, value.get("reason"))
     raw_counts = value.get("parse_counts")
     counts = raw_counts if isinstance(raw_counts, dict) else {}
     clean_counts = {}
@@ -166,10 +188,15 @@ def project_for_digest(value: object) -> dict[str, Any]:
             if isinstance(item, str) and _SHA64.fullmatch(item) and item not in hashes:
                 hashes.append(item)
     candidates = clean_counts["endpoints"] + clean_counts["config_leads"]
-    latest_status = _digest_status(value.get("latest_status", status), fallback=status)
-    latest_reason_raw = value.get("latest_reason", reason)
-    latest_reason = fixed_reason(latest_reason_raw if isinstance(latest_reason_raw, str) else "config_rejected")
-    attempt_count, failure_count = _attempt_counts(value.get("attempts"), status, latest_status)
+    latest_status = _digest_status(value.get("latest_status", status), fallback="unknown")
+    latest_reason = _saved_reason(latest_status, value.get("latest_reason", reason if latest_status == status else ""))
+    if status in _SAVED_STATE_LABELS:
+        summary = _reason_summary(_SAVED_STATE_LABELS[status], reason)
+    elif status == "unknown":
+        summary = unrecorded
+    else:
+        summary = _terminal_summary(status, reason, candidates)
+    attempt_count, failure_count = _attempt_counts(value, status)
     relation_total = clean_counts["relations"]
     listed = value.get("relations")
     if isinstance(listed, list):
@@ -181,7 +208,7 @@ def project_for_digest(value: object) -> dict[str, Any]:
         "parse_counts": clean_counts,
         "round_id": round_id,
         "raw_sha256": hashes,
-        "summary_line": summary_line(status, reason, candidates),
+        "summary_line": summary,
         "closure_evaluated": False,
         "app_attribution_verified": False,
         "latest_status": latest_status,
@@ -211,7 +238,7 @@ def _record(plan: dict[str, Any], **extra: Any) -> dict[str, Any]:
     status = extra.pop("status", plan.get("status") or "skipped")
     reason = fixed_reason(str(extra.pop("reason", plan.get("reason") or "skipped")))
     record = {
-        "schema_version": "fxapk.web_supplement/1",
+        "schema_version": _RECEIPT_SCHEMA,
         "attempt": 1 if plan.get("execute") else 0,
         "status": status,
         "reason": reason,
