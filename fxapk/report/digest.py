@@ -43,7 +43,11 @@ from fxapk.core.models import (
 )
 from fxapk.core.redact import redact_value, scrub_pii
 from fxapk.core.restore import restore_index, restored_sources_for
-from fxapk.report.diagnostics import compact_capture_safety, compact_request_targets
+from fxapk.report.diagnostics import (
+    closure_status_for_display,
+    compact_capture_safety,
+    compact_request_targets,
+)
 
 # 排序优先级：建议调证 > 待核 > 无需调证；同档高可信在前；C2 在前。
 _ADVICE_RANK = {"建议调证": 0, "待核": 1, "无需调证": 2}
@@ -671,7 +675,7 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
     closure = project_serialized_closure(report)
     closure_targets = closure.get("targets")
     compact_closure = {
-        "status": closure.get("status"),
+        "status": closure_status_for_display(closure.get("status")),
         "target_count": len(closure_targets) if isinstance(closure_targets, list) else 0,
         "gaps": [str(item) for item in closure.get("gaps", [])]
         if isinstance(closure.get("gaps"), list)

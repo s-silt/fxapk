@@ -26,6 +26,7 @@ from fxapk.core.web_observations import GAP_LABELS, digest_web_observations
 from fxapk.core.web_supplement import project_for_digest
 from fxapk.core.leads import _overseas_target_coverage, _project_overseas_profiles
 from fxapk.report import letters
+from fxapk.report.diagnostics import closure_status_for_display
 from fxapk.core.models import (
     Confidence,
     Endpoint,
@@ -575,9 +576,12 @@ def _render_template(template: Any, report: Report) -> str:
     from fxapk.core.runtime_diagnostics import project_runtime_diagnostics
 
     meta_map: dict[str, Any] = dict(report.meta) if isinstance(report.meta, dict) else {}
+    closure_status = None
     if "closure" in meta_map:
         serialized_projection["meta"] = {"closure": meta_map["closure"]}
-        meta_map["closure"] = project_serialized_closure(serialized_projection)
+        closure = project_serialized_closure(serialized_projection)
+        meta_map["closure"] = closure
+        closure_status = closure_status_for_display(closure.get("status"))
     dex_query_view = project_dex_query(meta_map)
     dex_query_handoff = project_dex_handoff(meta_map)
     runtime_diagnostics_view = project_runtime_diagnostics(meta_map)
@@ -606,6 +610,7 @@ def _render_template(template: Any, report: Report) -> str:
         endpoint_total=len(report.endpoints),
         enrichment_by_endpoint=enrichment_by_endpoint,
         meta=meta_map,
+        closure_status=closure_status,
         visibility_view=visibility_view,
         visibility_warning=visibility_warning,
         overseas_targets=overseas_targets,

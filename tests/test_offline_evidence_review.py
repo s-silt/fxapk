@@ -271,6 +271,70 @@ def test_cli_offline_revision_preserves_only_observed_analysis_health(
         assert not package_path.exists()
 
 
+@pytest.mark.parametrize(("closure_meta", "status", "show_section"), [
+    pytest.param({}, None, False, id="absent"),
+    pytest.param({"closure": {}}, None, False, id="empty"),
+    pytest.param({"closure": None}, None, False, id="null-receipt"),
+    pytest.param({"closure": [{}]}, None, False, id="invalid-receipt"),
+    pytest.param({"closure": {"gaps": ["fixture gap"]}}, None, True, id="missing-status"),
+    pytest.param({"closure": {"status": None}}, None, True, id="null-status"),
+    pytest.param({"closure": {"status": False}}, None, True, id="boolean-status"),
+    pytest.param({"closure": {"status": ["failed"]}}, None, True, id="array-status"),
+    pytest.param({"closure": {"status": "unknown"}}, None, True, id="unknown-status"),
+    pytest.param({"closure": {"status": "unavailable"}}, None, True, id="unavailable-status"),
+    pytest.param({"closure": {"status": "FIXTURE_STATUS_FREE_TEXT <b>"}}, None, True, id="free-text-status"),
+    pytest.param({"closure": {"status": "failed"}}, "failed", True, id="observed-failure"),
+    pytest.param({"closure": {"status": "not_run"}}, "not_run", True, id="not-run"),
+    pytest.param({"closure": {"status": "interrupted"}}, "interrupted", True, id="interrupted"),
+    pytest.param({"closure": {"status": "partial"}}, "partial", True, id="partial"),
+    pytest.param({"closure": {"status": "complete", "targets": []}}, "failed", True, id="unsupported-complete"),
+])
+def test_cli_offline_revision_displays_only_known_closure_status(
+    tmp_path: Path, closure_meta: dict[str, object], status: str | None, show_section: bool,
+) -> None:
+    sample = "a" * 64
+    source = tmp_path / "source.json"
+    original = json.dumps({
+        "package_name": "com.example.synthetic",
+        "analysis_status": "complete", "completeness": 1.0,
+        "meta": {"sample_sha256": sample, **closure_meta},
+    }).encode()
+    source.write_bytes(original)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schema_version": "fxapk.offline-review.v1", "sample_sha256": sample,
+        "tasks": [{"id": "synthetic-inert", "kind": "fixture_unsupported"}],
+    }), encoding="utf-8")
+    out = tmp_path / "review"
+    cli = CliRunner()
+    before = cli.invoke(app, ["digest", str(source)])
+    review = cli.invoke(app, ["evidence-review", str(plan), "--report", str(source), "--out", str(out)])
+    after = cli.invoke(app, ["digest", str(out / "report.json")])
+    assert (before.exit_code, review.exit_code, after.exit_code) == (0, 5, 0), review.output
+    assert json.loads(review.stdout)["state"] == "partial"
+    assert json.loads((out / "review.json").read_text(encoding="utf-8"))["publication"] == "ok"
+    assert not (out / "inputs").exists()
+    assert source.read_bytes() == original
+
+    closure = json.loads(before.stdout)["closure"]
+    assert closure == json.loads(after.stdout)["closure"]
+    assert closure == json.loads((out / "digest.json").read_text(encoding="utf-8"))["closure"]
+    assert closure["status"] == status
+    published = json.loads((out / "report.json").read_text(encoding="utf-8"))["meta"]
+    if closure_meta == {"closure": {"status": "complete", "targets": []}}:
+        assert published["closure"]["status"] == "failed" and closure["gaps"]
+    else:
+        assert {key: published[key] for key in ("closure",) if key in published} == closure_meta
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    closure_section = html.partition('<section id="case-closure">')[2].partition("</section>")[0]
+    assert bool(closure_section) is show_section
+    if show_section:
+        assert f'>{status or "未记录或无法确认"}</div>' in closure_section
+    assert ("fixture gap" in closure_section) == ("fixture gap" in closure["gaps"])
+    assert "FIXTURE_STATUS_FREE_TEXT" not in html + before.stdout + after.stdout
+
+
 @pytest.mark.parametrize(("visibility_fields", "state"), [
     pytest.param({}, "absent", id="legacy-absent"),
     pytest.param({"visibility": None}, "absent", id="legacy-null"),
