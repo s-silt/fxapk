@@ -64,11 +64,13 @@ This reference lists public core top-level commands and groups. Use each entry�
 - `compared_report_values`: both reports contain a valid list. An explicit `[]` means the report recorded an empty list, not that the analyzed app lacks those items.
 - `not_compared`: at least one report is missing that field or has an invalid list. Existing scripts can still read the diff lists and counts, but should check the status first. Zero counts here do not mean “no change.” The `old` and `new` states tell you why.
 
-When the reports record different non-empty package names, the command warns on stderr that these are differences between reports, not version changes in the same app. The comparison still runs, and stdout JSON is unchanged.
+For each report, `diff` checks both `package_name` and `meta.package_name`. If one field is missing, the other can supply a valid name for older reports; if both are present, they must both be valid and match exactly. An omitted `meta` makes `meta.package_name` missing. A present `meta` must be a JSON object: `null` or any other non-object value makes the package identity invalid even if the top-level name is valid. An explicit null, blank, placeholder such as `unknown`, or malformed name is invalid, not missing.
+
+The command warns on stderr when two reports have different unambiguous package names, names conflict within either report, or a package record is invalid but at least one valid name is present. Such differences are report content, not version changes in the same app. These warnings do not include the recorded names or change the default stdout JSON.
 
 Use `--report-details` to include the fields below. Without it, the top-level keys stay unchanged.
 
-`manifest_declarations` compares numeric `min_sdk` and `target_sdk` values read from reports with the same package name. Each field is evaluated separately. If either side lacks a reliable number, or its Manifest is untrustworthy (for example, APK validation failed), the field is `not_observed`. Even a recorded number from that side is not compared, and no default is substituted. Matching package names do not prove matching signers.
+`manifest_declarations` compares numeric `min_sdk` and `target_sdk` values read from reports whose unambiguous package names match. Each field is evaluated separately. If either side lacks a reliable number, or its Manifest is untrustworthy (for example, APK validation failed), the field is `not_observed`. Even a recorded number from that side is not compared, and no default is substituted. Matching package names do not prove matching signers.
 
 `analysis_notes` lists failures and skips recorded by each report, without free-form error messages. `not_recorded` means no analyzer status was recorded; `invalid` means the status records are unusable. These notes neither certify list coverage nor change any counts or deltas.
 

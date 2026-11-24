@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal, TypedDict
+from typing import Literal, NamedTuple, TypedDict
 
 from fxapk.core.visibility import manifest_observation_unavailable
 
@@ -88,13 +88,55 @@ def _declared_sdk(report: dict, meta: dict, field: str) -> _Declaration:
     return {"value": value, "reason": ""}
 
 
+# Match the APK parser's dotted segment syntax and length bound; also retain
+# historical single-segment names such as "android". Do not normalize values.
+_SAVED_PACKAGE_ID = re.compile(
+    r"(?:[A-Za-z][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)"
+)
+_PACKAGE_PLACEHOLDERS = frozenset({"unknown", "none", "null", "unavailable", "not_recorded"})
+
+
+class _ReportPackageIdentity(NamedTuple):
+    state: Literal["absent", "invalid", "conflict", "resolved"]
+    name: str | None
+    has_valid_alias: bool
+
+
+def report_package_identity(report: dict) -> _ReportPackageIdentity:
+    """Interpret saved package aliases without treating them as APK authentication."""
+    meta = report.get("meta", {})
+    invalid = not isinstance(meta, dict)
+    names: set[str] = set()
+    for container in (report, meta if isinstance(meta, dict) else {}):
+        name = container.get("package_name", _ABSENT)
+        if name is _ABSENT:
+            continue
+        if (
+            isinstance(name, str) and len(name) <= 255
+            and _SAVED_PACKAGE_ID.fullmatch(name)
+            and name.casefold() not in _PACKAGE_PLACEHOLDERS
+        ):
+            names.add(name)
+        else:
+            invalid = True
+    # Only an omitted alias permits the other alias to establish an identity.
+    if invalid:
+        return _ReportPackageIdentity("invalid", None, bool(names))
+    if len(names) > 1:
+        return _ReportPackageIdentity("conflict", None, True)
+    if names:
+        return _ReportPackageIdentity("resolved", names.pop(), True)
+    return _ReportPackageIdentity("absent", None, False)
+
+
 def _diff_manifest_declarations(old: dict, new: dict) -> dict:
     previous_meta = old.get("meta")
     current_meta = new.get("meta")
     previous_meta = previous_meta if isinstance(previous_meta, dict) else {}
     current_meta = current_meta if isinstance(current_meta, dict) else {}
-    package = previous_meta.get("package_name")
-    if not isinstance(package, str) or not package or package != current_meta.get("package_name"):
+    previous_package = report_package_identity(old).name
+    current_package = report_package_identity(new).name
+    if previous_package is None or previous_package != current_package:
         return {"status": "not_compared", "reason": "package_not_comparable", "fields": {}}
     fields = {}
     for key in ("min_sdk", "target_sdk"):

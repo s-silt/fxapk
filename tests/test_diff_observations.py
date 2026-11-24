@@ -352,18 +352,19 @@ def test_saved_diff_does_not_compare_sdk_from_rejected_apk(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("old_package", "new_package", "warn"),
+    ("old_package", "new_package", "different", "invalid"),
     [
-        ("com.example.old", "com.example.new", True),
-        ("com.example.new", "com.example.old", True),
-        ("com.example.same", "com.example.same", False),
-        (None, "com.example.new", False),
-        ("com.example.old", " ", False),
-        (123, "com.example.new", False),
+        ("com.example.old", "com.example.new", True, False),
+        ("com.example.new", "com.example.old", True, False),
+        ("com.example.same", "com.example.same", False, False),
+        (None, "com.example.new", False, True),
+        ("com.example.old", " ", False, True),
+        (123, "com.example.new", False, True),
+        (None, " ", False, False),
     ],
 )
 def test_cli_identifies_cross_package_reports_without_suppressing_deltas(
-    tmp_path: Path, old_package: str | int | None, new_package: str, warn: bool,
+    tmp_path: Path, old_package: str | int | None, new_package: str, different: bool, invalid: bool,
 ) -> None:
     old_data = {
         "meta": {"package_name": old_package},
@@ -378,9 +379,103 @@ def test_cli_identifies_cross_package_reports_without_suppressing_deltas(
         capture_output=True, text=True, encoding="utf-8", check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert ("不能当作同一应用的版本变化" in result.stderr) is warn
+    assert ("包名不同" in result.stderr) is different
+    assert ("包名记录不可用" in result.stderr) is invalid
+    assert ("不能当作同一应用的版本变化" in result.stderr) is (different or invalid)
     assert "com.example." not in result.stderr
     expected = diff_reports(old_data, new_data)
     expected.pop("manifest_declarations")
     expected.pop("analysis_notes")
     assert json.loads(result.stdout) == expected
+
+
+_PACKAGE_A = "com.example.fixture_a"
+_PACKAGE_B = "com.example.fixture_b"
+_PACKAGE_ALIAS = "com.example.stale"
+_MISSING_PACKAGE = object()
+_UNDERSCORE_A = "com._fixture"
+_UNDERSCORE_B = "_example._fixture"
+_MAX_LENGTH_PACKAGE = "a" + "b" * 252 + ".c"
+
+
+@pytest.mark.parametrize(("old_names", "new_names", "warning", "compared"), [
+    pytest.param((_PACKAGE_A, _PACKAGE_A), (_PACKAGE_A, _PACKAGE_A), None, True, id="same"),
+    pytest.param((_PACKAGE_A, _PACKAGE_A), (_PACKAGE_B, _PACKAGE_B), "different", False, id="different"),
+    pytest.param((_PACKAGE_A, _MISSING_PACKAGE), (_PACKAGE_B, _MISSING_PACKAGE), "different", False,
+                 id="top-only-different"),
+    pytest.param((_PACKAGE_A, _MISSING_PACKAGE), (_PACKAGE_A, _MISSING_PACKAGE), None, True, id="top-only-same"),
+    pytest.param((_MISSING_PACKAGE, _PACKAGE_A), (_MISSING_PACKAGE, _PACKAGE_A), None, True, id="metadata-only"),
+    pytest.param((_PACKAGE_A, _MISSING_PACKAGE), (_MISSING_PACKAGE, _PACKAGE_A), None, True, id="legacy-mixed"),
+    pytest.param((_PACKAGE_A, _PACKAGE_A), (_PACKAGE_B, _PACKAGE_A), "conflict", False, id="conflict"),
+    pytest.param((_PACKAGE_A, _PACKAGE_ALIAS), (_PACKAGE_B, _PACKAGE_ALIAS), "conflict", False, id="both-conflict"),
+    pytest.param((_UNDERSCORE_A, _UNDERSCORE_A), (_UNDERSCORE_A, _UNDERSCORE_A), None, True,
+                 id="underscore-same"),
+    pytest.param((_UNDERSCORE_A, _UNDERSCORE_A), (_UNDERSCORE_B, _UNDERSCORE_B), "different", False,
+                 id="underscore-different"),
+    pytest.param(("android", _MISSING_PACKAGE), (_MISSING_PACKAGE, "android"), None, True,
+                 id="historical-single-segment"),
+    pytest.param((_MISSING_PACKAGE, _MISSING_PACKAGE), (_MISSING_PACKAGE, _MISSING_PACKAGE),
+                 None, False, id="both-absent"),
+    pytest.param((_MISSING_PACKAGE, "unknown"), (None, " "), None, False, id="no-valid-alias"),
+    pytest.param(({}, _PACKAGE_A), (_PACKAGE_A, _PACKAGE_A), "invalid", False, id="malformed-top"),
+    pytest.param((12, _PACKAGE_A), (False, _PACKAGE_B), "invalid", False, id="invalid-distinct-meta"),
+    pytest.param((_PACKAGE_A, None), (_PACKAGE_A, _PACKAGE_A), "invalid", False, id="null-is-not-absent"),
+    pytest.param((_PACKAGE_A, " "), (_PACKAGE_A, " "), "invalid", False, id="blank-is-not-identity"),
+    pytest.param((_PACKAGE_A, "unknown"), (_PACKAGE_A, "unknown"), "invalid", False, id="unknown-is-not-identity"),
+    pytest.param((_PACKAGE_A, "fixture bad identifier"), (_PACKAGE_A, "fixture bad identifier"),
+                 "invalid", False, id="invalid-recorded-identifier"),
+    pytest.param((_PACKAGE_A + "\n", _PACKAGE_A), (_PACKAGE_A, _PACKAGE_A), "invalid", False, id="fullmatch"),
+    pytest.param((_MAX_LENGTH_PACKAGE, _MISSING_PACKAGE), (_MISSING_PACKAGE, _MAX_LENGTH_PACKAGE),
+                 None, True, id="255-chars-allowed"),
+    pytest.param((_MAX_LENGTH_PACKAGE + "d", _MISSING_PACKAGE), (_PACKAGE_A, _PACKAGE_A),
+                 "invalid", False, id="256-chars-invalid"),
+])
+def test_cli_diff_agrees_on_saved_report_package_identity(
+    tmp_path: Path, old_names: tuple[object, object], new_names: tuple[object, object],
+    warning: str | None, compared: bool,
+) -> None:
+    files = (tmp_path / "old.json", tmp_path / "new.json")
+    originals = []
+    for path, names, sdk in zip(files, (old_names, new_names), (32, 34), strict=True):
+        top, meta = names
+        data = _manifest(sdk)
+        if top is not _MISSING_PACKAGE:
+            data["package_name"] = top
+        if meta is _MISSING_PACKAGE:
+            del data["meta"]["package_name"]
+        else:
+            data["meta"]["package_name"] = meta
+        data["endpoints"] = [{"kind": "domain", "value": "fixture.example.invalid"}] if sdk == 32 else []
+        raw = json.dumps(data).encode()
+        path.write_bytes(raw)
+        originals.append(raw)
+
+    def run(*flags: str):
+        result = subprocess.run(
+            [sys.executable, "-B", "-m", "fxapk.cli", "diff", *map(str, files), "--offline", *flags],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert ("包名不同" in result.stderr) is (warning == "different")
+        assert ("包名记录冲突" in result.stderr) is (warning == "conflict")
+        assert ("包名记录不可用" in result.stderr) is (warning == "invalid")
+        assert result.stderr.count("不能当作同一应用的版本变化") == int(warning is not None)
+        assert "com.example." not in result.stderr and "fixture bad identifier" not in result.stderr
+        assert _UNDERSCORE_A not in result.stderr and _UNDERSCORE_B not in result.stderr
+        return json.loads(result.stdout)
+
+    default = run()
+    details = run("--report-details")
+    declarations = details.pop("manifest_declarations")
+    details.pop("analysis_notes")
+    details.pop("coverage_observations")
+    assert details == default
+    assert default["summary"]["endpoints_removed"] == 1
+    if compared:
+        assert declarations["status"] == "compared_report_values"
+        assert declarations["fields"]["target_sdk"] == {
+            "state": "changed", "old": {"value": 32, "reason": ""}, "new": {"value": 34, "reason": ""},
+        }
+    else:
+        assert declarations == {"status": "not_compared", "reason": "package_not_comparable", "fields": {}}
+    assert [path.read_bytes() for path in files] == originals
