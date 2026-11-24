@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import json
+import socket
 import subprocess
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
+
+from fxapk.cli import app
 
 from fxapk.core.web_observation_plan import (
     build_agent_handoff,
     build_plan,
     parse_config,
+    project_plan_for_digest,
     refresh_agent_handoff,
 )
+from fxapk.core.web_supplement import _project_agent_handoff
 from fxapk.core.web_supplement_runtime import SkippingObserver, make_capture_observer
 from fxapk.core.models import AnalysisConfig
 from fxapk.report.digest import build_digest
@@ -282,3 +291,154 @@ def test_digest_keeps_platform_and_rejects_raw_receipt_types() -> None:
     assert handoff["why"] == "unknown"
     assert handoff["why"] not in {"scheduled", "review_candidates"}
     assert handoff["selected_provider"] != "trace"
+
+
+_SAVED_SELECTED_PLAN = {
+    "status": "selected", "reason": "ok", "source": "bundle", "platform": "android", "execute": True,
+}
+_SAVED_PENDING_PLAN = {**_SAVED_SELECTED_PLAN, "status": "pending", "reason": "no_config", "execute": False}
+_PENDING_ACTIONS = ["prepare_web_supplement", "supplement_existing_report"]
+_UNRECOGNIZED_SAVED_REASON = "INERT_FIXTURE_UNKNOWN_CAUSE"
+
+
+@pytest.mark.parametrize(("plan", "supplement", "runtime", "why", "actions"), [
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "failed", "reason": _UNRECOGNIZED_SAVED_REASON},
+                 None, "unknown", ["inspect_diagnostics"], id="unrecognized-reason"),
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "unavailable", "reason": _UNRECOGNIZED_SAVED_REASON},
+                 None, "unknown", ["inspect_diagnostics"], id="unavailable-reason"),
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "failed"}, None,
+                 "unknown", ["inspect_diagnostics"], id="missing-reason"),
+    pytest.param({**_SAVED_SELECTED_PLAN, "status": "pending", "reason": "no_config"},
+                 {"status": "failed", "reason": None}, None, "unknown", ["inspect_diagnostics"], id="stale-pending"),
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "failed", "reason": {"event": _UNRECOGNIZED_SAVED_REASON}},
+                 None, "unknown", ["inspect_diagnostics"], id="malformed-reason"),
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "failed", "reason": "config_rejected"},
+                 None, "inspect_input", ["inspect_diagnostics"], id="explicit-rejection"),
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "failed", "reason": "worker_not_stopped"},
+                 None, "worker_not_stopped", ["stop_worker_process"], id="known-distinct-failure"),
+    pytest.param(_SAVED_SELECTED_PLAN, None, None, "scheduled", ["await_receipt"], id="no-outcome"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": None}, None,
+                 "unknown", ["inspect_diagnostics"], id="explicit-null-status"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": ""}, None,
+                 "unknown", ["inspect_diagnostics"], id="explicit-empty-status"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": "unknown"}, None,
+                 "unknown", ["inspect_diagnostics"], id="explicit-unknown-status"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": "failed", "latest_status": None}, None,
+                 "unknown", ["inspect_diagnostics"], id="explicit-null-latest-status"),
+    pytest.param(_SAVED_PENDING_PLAN, {"reason": "timeout"}, None,
+                 "unknown", ["inspect_diagnostics"], id="orphan-supplement-reason"),
+    pytest.param(_SAVED_PENDING_PLAN, None, [{"reason": "timeout"}],
+                 "unknown", ["inspect_diagnostics"], id="orphan-runtime-reason"),
+    pytest.param(_SAVED_PENDING_PLAN, None, [{"status": None}],
+                 "unknown", ["inspect_diagnostics"], id="explicit-null-runtime-status"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": "bad"}, None,
+                 "unknown", ["inspect_diagnostics"], id="unrecognized-status"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": 0}, None,
+                 "unknown", ["inspect_diagnostics"], id="numeric-status"),
+    pytest.param(_SAVED_PENDING_PLAN, None, None,
+                 "needs_material", _PENDING_ACTIONS, id="pending-no-receipt"),
+    pytest.param(_SAVED_PENDING_PLAN, {}, None,
+                 "needs_material", _PENDING_ACTIONS, id="pending-empty-receipt"),
+    pytest.param(_SAVED_PENDING_PLAN, {"reason": None, "parse_counts": {}}, None,
+                 "needs_material", _PENDING_ACTIONS, id="pending-no-state-fields"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": "pending", "reason": "pending"}, None,
+                 "needs_material", _PENDING_ACTIONS, id="pending-valid-receipt"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": None, "latest_status": "failed",
+                 "latest_reason": "config_rejected"}, None,
+                 "inspect_input", ["inspect_diagnostics"], id="valid-latest-wins"),
+    pytest.param({}, None, None, "unknown", ["inspect_diagnostics"], id="no-planned-state"),
+    pytest.param({**_SAVED_PENDING_PLAN, "status": "unknown"}, None, None,
+                 "unknown", ["inspect_diagnostics"], id="unknown-planned-state"),
+    pytest.param({**_SAVED_SELECTED_PLAN, "status": "skipped", "reason": "mode_off", "execute": False},
+                 {"status": "failed", "reason": _UNRECOGNIZED_SAVED_REASON}, None, "mode_off", [], id="mode-off"),
+    pytest.param({**_SAVED_SELECTED_PLAN, "status": "executed", "reason": "executed"},
+                 {"status": "ok", "reason": "ok"},
+                 [{"status": "failed", "reason": _UNRECOGNIZED_SAVED_REASON}],
+                 "unknown", ["inspect_diagnostics"], id="latest-saved-runtime-after-success"),
+])
+def test_saved_failure_handoff_requires_a_recorded_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plan: dict[str, object],
+    supplement: dict[str, object] | None, runtime: list[dict[str, object]] | None,
+    why: str, actions: list[str],
+) -> None:
+    def _forbid(*args: object, **kwargs: object) -> None:
+        pytest.fail("saved digest must not connect")
+
+    monkeypatch.setattr(socket, "create_connection", _forbid)
+    monkeypatch.setattr(socket, "getaddrinfo", _forbid)
+    meta: dict[str, object] = {"web_observation_plan": plan}
+    if supplement is not None:
+        meta["web_supplement"] = supplement
+    if runtime is not None:
+        meta["web_supplement_runtime"] = runtime
+    source = tmp_path / "source.json"
+    original = json.dumps({
+        "analysis_status": "complete", "completeness": 1.0, "meta": meta,
+    }).encode()
+    source.write_bytes(original)
+
+    result = CliRunner().invoke(app, ["digest", str(source)])
+    assert result.exit_code == 0, result.output
+    assert source.read_bytes() == original
+    projected = json.loads(result.stdout)["web_observation_plan"]
+    handoff = projected["agent_handoff"]
+    assert projected["execute"] is (plan.get("execute") is True)  # Saved plan, not authorization.
+    assert handoff["why"] == why and _codes(handoff) == actions
+    assert handoff["authorization"] is handoff["closure_evaluated"] is False
+    if why == "needs_material":
+        assert all(action["argv"] for action in handoff["next_actions"])
+    else:
+        assert all(not action["argv"] for action in handoff["next_actions"])
+    assert _UNRECOGNIZED_SAVED_REASON not in result.stdout
+    if why == "unknown":
+        assert not handoff["unmet_inputs"]
+        assert "修正输入" not in handoff["next_actions"][0]["instruction"]
+    if runtime is not None and supplement is not None and supplement.get("status") == "ok":
+        assert "compare_latest_failure_with_prior_success" in handoff["evidence_checks"]
+
+
+def test_live_handoff_is_not_changed_by_saved_receipt_policy() -> None:
+    outcome = {"status": "failed", "reason": _UNRECOGNIZED_SAVED_REASON}
+    assert build_agent_handoff(_SAVED_SELECTED_PLAN, outcome)["why"] == "inspect_input"
+    live = build_agent_handoff(_SAVED_PENDING_PLAN, {"status": "pending", "reason": "pending"})
+    assert live["why"] == "needs_material" and _codes(live) == _PENDING_ACTIONS
+
+
+@pytest.mark.parametrize(("plan", "supplement", "runtime", "producer_why", "saved_why"), [
+    pytest.param(_SAVED_PENDING_PLAN, None, None, "needs_material", "needs_material", id="pending-no-receipt"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": "pending", "reason": "pending"}, None,
+                 "needs_material", "needs_material", id="pending-valid"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": None}, None, "needs_material", "unknown", id="pending-null"),
+    pytest.param(_SAVED_PENDING_PLAN, None, [{"reason": "timeout"}],
+                 "inspect_input", "unknown", id="orphan-runtime-reason"),
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "failed", "reason": _UNRECOGNIZED_SAVED_REASON},
+                 None, "inspect_input", "unknown", id="selected-unknown-cause"),
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "failed", "reason": "config_rejected"},
+                 None, "inspect_input", "inspect_input", id="selected-valid-rejection"),
+])
+def test_producer_writeback_does_not_use_saved_display_policy(
+    monkeypatch: pytest.MonkeyPatch, plan: dict[str, object], supplement: dict[str, object] | None,
+    runtime: list[dict[str, object]] | None, producer_why: str, saved_why: str,
+) -> None:
+    def _forbid(*args: object, **kwargs: object) -> None:
+        pytest.fail("handoff projection attempted an external operation")
+
+    monkeypatch.setattr(socket, "socket", _forbid)
+    monkeypatch.setattr(subprocess, "run", _forbid)
+    monkeypatch.setattr(subprocess, "Popen", _forbid)
+    original = deepcopy(plan)
+    stored = {"web_supplement": supplement, "web_supplement_runtime": runtime}
+    original_stored = deepcopy(stored)
+    producer_plan = deepcopy(plan)
+    _project_agent_handoff(producer_plan, stored)
+    handoff = producer_plan.pop("agent_handoff")
+    assert producer_plan == original and stored == original_stored
+    assert handoff["why"] == producer_why
+    assert handoff["authorization"] is handoff["closure_evaluated"] is False
+    saved = project_plan_for_digest(plan, supplement, runtime)["agent_handoff"]
+    assert plan == original and stored == original_stored
+    assert saved["why"] == saved_why
+    if saved_why == "unknown":
+        assert _codes(saved) == ["inspect_diagnostics"]
+        assert saved["next_actions"][0]["argv"] == []
+    assert saved["authorization"] is saved["closure_evaluated"] is False

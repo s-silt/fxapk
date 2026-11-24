@@ -496,6 +496,15 @@ def build_agent_handoff(
     outcome: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compact guidance from whitelisted plan and outcome fields. Never reads instructions."""
+    return _build_agent_handoff(plan, outcome, saved_receipt=False)
+
+
+def _build_agent_handoff(
+    plan: dict[str, Any] | None,
+    outcome: dict[str, Any] | None,
+    *,
+    saved_receipt: bool,
+) -> dict[str, Any]:
     raw = plan if isinstance(plan, dict) else {}
     coverage = clean_coverage(outcome.get("coverage") if isinstance(outcome, dict) else None)
     status_value = raw.get("status")
@@ -558,6 +567,28 @@ def build_agent_handoff(
         relevant = True
         actions = []
         checks.append("respect_mode_off")
+    elif saved_receipt and isinstance(outcome, dict) and (
+        ("status" in outcome and _enum(outcome["status"], _OUTCOME_STATUSES, "unknown") == "unknown")
+        or ("status" not in outcome and outcome.get("reason") not in (None, ""))
+    ):
+        relevant = True
+        actions.append(_action(
+            "inspect_diagnostics",
+            "最近回执没有可确认的状态。只查看已有记录，不要将它当成失败或待执行。",
+        ))
+    elif (
+        saved_receipt and result_outcome["status"] in {"failed", "unavailable"}
+        and isinstance(outcome, dict) and not _enum(outcome.get("reason"), REASONS)
+    ):
+        # Fixed reasons used by live producers are not evidence that an
+        # unrecognized saved reason was a rejection or that its plan is still actionable.
+        relevant = True
+        actions.append(_action(
+            "inspect_diagnostics",
+            "最近结果未成功，原因未记录或无法确认。只查看已有回执和诊断；不要假定输入有误或重跑。",
+        ))
+        if _had_success(safe, result_outcome):
+            checks.append("compare_latest_failure_with_prior_success")
     elif failure and _had_success(safe, result_outcome):
         why = "review_failure"
         relevant = True
@@ -740,7 +771,26 @@ def project_plan_for_digest(
     supplement: object = None,
     runtime: object = None,
 ) -> dict[str, Any]:
-    """Recompute guidance from whitelisted fields and the latest receipt."""
+    """Recompute read-only display guidance from a saved report."""
+    return _project_plan(raw_plan, supplement, runtime, saved_receipt=True)
+
+
+def project_agent_handoff_for_writeback(
+    raw_plan: object,
+    supplement: object,
+    runtime: object,
+) -> dict[str, Any]:
+    """Refresh producer guidance without applying saved-report display fallbacks."""
+    return _project_plan(raw_plan, supplement, runtime, saved_receipt=False)["agent_handoff"]
+
+
+def _project_plan(
+    raw_plan: object,
+    supplement: object,
+    runtime: object,
+    *,
+    saved_receipt: bool,
+) -> dict[str, Any]:
     plan = raw_plan if isinstance(raw_plan, dict) else {}
     raw_status = plan.get("status")
     if isinstance(raw_status, str) and raw_status in PLAN_STATUSES:
@@ -767,19 +817,19 @@ def project_plan_for_digest(
         supplement_status = supplement.get("status")
         if isinstance(supplement_status, str) and supplement_status in SUCCESS_STATUSES:
             prior = supplement_status
-        latest_status = supplement.get("latest_status", supplement_status)
+        status_key = "latest_status" if "latest_status" in supplement else "status"
         latest_reason = supplement.get("latest_reason", supplement.get("reason"))
         latest = {
-            "status": latest_status,
             "reason": latest_reason,
             "provider": supplement.get("provider"),
             "prior_status": prior,
             "coverage": supplement.get("coverage"),
         }
+        if status_key in supplement:
+            latest["status"] = supplement[status_key]
     if isinstance(runtime, list) and runtime and isinstance(runtime[-1], dict):
         last = runtime[-1]
         latest = {
-            "status": last.get("status"),
             "reason": last.get("reason"),
             "provider": last.get("provider"),
             "coverage": last["coverage"] if "coverage" in last else None,
@@ -787,6 +837,8 @@ def project_plan_for_digest(
                 safe_plan["status"] if isinstance(safe_plan["status"], str) and safe_plan["status"] in SUCCESS_STATUSES else ""
             ),
         }
+        if "status" in last:
+            latest["status"] = last["status"]
         if last.get("execution") == "not_executed":
             latest["execution"] = "not_executed"
     projected = {
@@ -796,7 +848,7 @@ def project_plan_for_digest(
         "source": safe_plan["source"],
         "provider": safe_plan["provider"],
         "closure_evaluated": False,
-        "agent_handoff": build_agent_handoff(safe_plan, latest),
+        "agent_handoff": _build_agent_handoff(safe_plan, latest, saved_receipt=saved_receipt),
     }
     if isinstance(latest, dict) and latest.get("execution") == "not_executed":
         projected["execution"] = "not_executed"
