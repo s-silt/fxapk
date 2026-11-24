@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal, TypedDict
+from typing import Literal, NamedTuple, TypedDict
 
 from fxapk.core.visibility import manifest_observation_unavailable
 
@@ -88,32 +88,45 @@ def _declared_sdk(report: dict, meta: dict, field: str) -> _Declaration:
     return {"value": value, "reason": ""}
 
 
-
-# Retain single-segment legacy/system package IDs, but never match placeholders
-# or visually normalized names. This is report comparison, not APK validation.
-_SAVED_PACKAGE_ID = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
+# Match the APK parser's dotted segment syntax and length bound; also retain
+# historical single-segment names such as "android". Do not normalize values.
+_SAVED_PACKAGE_ID = re.compile(
+    r"(?:[A-Za-z][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)"
+)
 _PACKAGE_PLACEHOLDERS = frozenset({"unknown", "none", "null", "unavailable", "not_recorded"})
 
 
-def report_package_identity(report: dict) -> tuple[str | None, bool]:
-    """Return the comparable package and whether two recorded names conflict."""
+class _ReportPackageIdentity(NamedTuple):
+    state: Literal["absent", "invalid", "conflict", "resolved"]
+    name: str | None
+    has_valid_alias: bool
+
+
+def report_package_identity(report: dict) -> _ReportPackageIdentity:
+    """Interpret saved package aliases without treating them as APK authentication."""
     meta = report.get("meta", {})
-    if not isinstance(meta, dict):
-        return None, False
-    names: list[str] = []
-    for container in (report, meta):
+    invalid = not isinstance(meta, dict)
+    names: set[str] = set()
+    for container in (report, meta if isinstance(meta, dict) else {}):
         name = container.get("package_name", _ABSENT)
         if name is _ABSENT:
             continue
-        # Only an omitted alias is compatible with the other alias. A present
-        # null, placeholder or malformed name is not an established identity.
-        if (not isinstance(name, str) or not _SAVED_PACKAGE_ID.fullmatch(name)
-                or name.casefold() in _PACKAGE_PLACEHOLDERS):
-            return None, False
-        names.append(name)
-    if len(names) == 2 and names[0] != names[1]:
-        return None, True
-    return (names[0] if names else None), False
+        if (
+            isinstance(name, str) and len(name) <= 255
+            and _SAVED_PACKAGE_ID.fullmatch(name)
+            and name.casefold() not in _PACKAGE_PLACEHOLDERS
+        ):
+            names.add(name)
+        else:
+            invalid = True
+    # Only an omitted alias permits the other alias to establish an identity.
+    if invalid:
+        return _ReportPackageIdentity("invalid", None, bool(names))
+    if len(names) > 1:
+        return _ReportPackageIdentity("conflict", None, True)
+    if names:
+        return _ReportPackageIdentity("resolved", names.pop(), True)
+    return _ReportPackageIdentity("absent", None, False)
 
 
 def _diff_manifest_declarations(old: dict, new: dict) -> dict:
@@ -121,8 +134,8 @@ def _diff_manifest_declarations(old: dict, new: dict) -> dict:
     current_meta = new.get("meta")
     previous_meta = previous_meta if isinstance(previous_meta, dict) else {}
     current_meta = current_meta if isinstance(current_meta, dict) else {}
-    previous_package, _ = report_package_identity(old)
-    current_package, _ = report_package_identity(new)
+    previous_package = report_package_identity(old).name
+    current_package = report_package_identity(new).name
     if previous_package is None or previous_package != current_package:
         return {"status": "not_compared", "reason": "package_not_comparable", "fields": {}}
     fields = {}

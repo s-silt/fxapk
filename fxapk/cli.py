@@ -745,14 +745,20 @@ def diff(
     old_dict = _report_dict_for(old, online=online)
     new_dict = _report_dict_for(new, online=online)
     output = diff_reports(old_dict, new_dict)
-    old_package, old_conflict = report_package_identity(old_dict)
-    new_package, new_conflict = report_package_identity(new_dict)
-    if old_conflict or new_conflict:
+    old_identity = report_package_identity(old_dict)
+    new_identity = report_package_identity(new_dict)
+    identity_states = (old_identity.state, new_identity.state)
+    if "conflict" in identity_states:
         typer.echo(
             "⚠ 报告的应用包名记录冲突。差异仅代表报告内容，不能当作同一应用的版本变化。",
             err=True,
         )
-    elif old_package is not None and new_package is not None and old_package != new_package:
+    elif "invalid" in identity_states and (old_identity.has_valid_alias or new_identity.has_valid_alias):
+        typer.echo(
+            "⚠ 报告的应用包名记录不可用。差异仅代表报告内容，不能当作同一应用的版本变化。",
+            err=True,
+        )
+    elif old_identity.name is not None and new_identity.name is not None and old_identity.name != new_identity.name:
         typer.echo(
             "⚠ 两份报告记录的应用包名不同。差异仅代表报告内容，不能当作同一应用的版本变化。",
             err=True,
