@@ -363,8 +363,19 @@ def read_record(path: Path) -> dict[str, Any]:
         data = stream.read(65537)
     if len(data) > 65536:
         raise Rejected("ledger", "record_too_large")
-    record = json.loads(data)
+    try:
+        record = json.loads(data)
+    except (ValueError, RecursionError) as error:
+        raise Rejected("ledger", "invalid_record") from error
     if not isinstance(record, dict):
+        raise Rejected("ledger", "invalid_record")
+    state = record.get("state")
+    if not isinstance(state, str) or (state != "processing" and state not in EXIT):
+        raise Rejected("ledger", "invalid_record")
+    work = record.get("work")
+    if not isinstance(work, str) or work in {"", ".", ".."} or "\0" in work or Path(work).name != work:
+        raise Rejected("ledger", "invalid_record")
+    if state == "succeeded" and not isinstance(record.get("receipt"), dict):
         raise Rejected("ledger", "invalid_record")
     return record
 

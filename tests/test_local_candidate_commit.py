@@ -130,6 +130,48 @@ def test_replay_validates_exact_existing_commit_and_tree(prior_candidate: Replay
     prior_candidate.assert_unchanged(original)
 
 
+@pytest.mark.parametrize(
+    "state, field, value",
+    [
+        ("succeeded", "state", []),
+        ("succeeded", "state", "unknown"),
+        ("succeeded", "receipt", []),
+        ("succeeded", "work", []),
+        ("processing", "work", []),
+        ("processing", "work", ""),
+        ("processing", "work", ".."),
+        ("processing", "work", "nested/directory"),
+    ],
+)
+def test_replay_reports_invalid_ledger_record_without_changing_it(
+    prior_candidate: ReplayFixture, state: str, field: str, value: object,
+) -> None:
+    record = json.loads(prior_candidate.seed(state))
+    record[field] = value
+    original = dispatcher.encode(record) + b"\n"
+    prior_candidate.record.write_bytes(original)
+
+    code, outcome = prior_candidate.submit()
+
+    assert code == 2
+    assert outcome == {"accepted": False, "phase": "ledger", "reason": "invalid_record"}
+    prior_candidate.assert_unchanged(original)
+
+
+def test_status_reports_bad_json_without_rewriting_the_record(prior_candidate: ReplayFixture) -> None:
+    original = b'{"state":'
+    prior_candidate.record.write_bytes(original)
+
+    result = subprocess.run(
+        [sys.executable, "-I", str(TOOL), "--state-dir", str(prior_candidate.ledger), "status"],
+        env=prior_candidate.env, stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+    )
+
+    assert result.returncode == 2 and not result.stderr
+    assert json.loads(result.stdout) == {"accepted": False, "phase": "ledger", "reason": "invalid_record"}
+    prior_candidate.assert_unchanged(original)
+
+
 def test_replay_refuses_same_task_with_historical_gate_digest(
     prior_candidate: ReplayFixture,
 ) -> None:
