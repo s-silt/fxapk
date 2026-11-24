@@ -1738,6 +1738,9 @@
     {% endif %}
 
     {#- 富化器状态：让某 provider 的系统性失败（如 WHOIS 全失败）透明可见 -#}
+    {% if meta.get("offline_review_enricher_status_incomplete") is sameas true %}
+    <div class="harden-warn">离线修订未能保留全部富化统计；这里只展示可读取的记录，不能据此判断整轮富化是否完整。</div>
+    {% endif %}
     {% if enricher_status %}
     <h3>富化器状态</h3>
     <table>
