@@ -64,7 +64,7 @@ This reference lists public core top-level commands and groups. Use each entry�
 - `compared_report_values`: both reports contain a valid list. An explicit `[]` means the report recorded an empty list, not that the analyzed app lacks those items.
 - `not_compared`: at least one report is missing that field or has an invalid list. Existing scripts can still read the diff lists and counts, but should check the status first. Zero counts here do not mean “no change.” The `old` and `new` states tell you why.
 
-For each report, `diff` checks both `package_name` and `meta.package_name`. If only one is recorded and valid, older reports still work. If both are recorded, both must be valid and match exactly. An explicit null, blank, placeholder such as `unknown`, or malformed name is invalid, not missing.
+For each report, `diff` checks both `package_name` and `meta.package_name`. If one field is missing, the other can supply a valid name for older reports; if both are present, they must both be valid and match exactly. An omitted `meta` makes `meta.package_name` missing. A present `meta` must be a JSON object: `null` or any other non-object value makes the package identity invalid even if the top-level name is valid. An explicit null, blank, placeholder such as `unknown`, or malformed name is invalid, not missing.
 
 The command warns on stderr when two reports have different unambiguous package names, names conflict within either report, or a package record is invalid but at least one valid name is present. Such differences are report content, not version changes in the same app. These warnings do not include the recorded names or change the default stdout JSON.
 
