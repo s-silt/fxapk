@@ -898,7 +898,7 @@
   <section id="case-closure">
     <h2>案件闭环 <span class="muted" style="font-size:13px;font-weight:400">（PCAP-first / 多源富化 / 五层归因）</span></h2>
     <div class="cards">
-      <div class="stat"><div class="k">闭环状态</div><div class="v" style="font-size:20px">{{ closure.get("status") or "failed" }}</div></div>
+      <div class="stat"><div class="k">闭环状态</div><div class="v" style="font-size:20px">{{ closure_status or "未记录或无法确认" }}</div></div>
       <div class="stat"><div class="k">主目标</div><div class="v">{{ (closure.get("targets") or [])|length }}</div></div>
       {% for source_status, count in (closure.get("source_summary") or {}).items() %}
       <div class="stat"><div class="k">来源 {{ source_status }}</div><div class="v">{{ count }}</div></div>

@@ -271,6 +271,99 @@ def test_cli_offline_revision_preserves_only_observed_analysis_health(
         assert not package_path.exists()
 
 
+_CLOSURE_FIXTURE_TARGET = {"kind": "domain", "value": "fixture.example.invalid"}
+
+
+@pytest.mark.parametrize(("closure_meta", "status", "show_section", "projected_status", "admitted_contact"), [
+    pytest.param({}, None, False, None, False, id="absent"),
+    pytest.param({"closure": {}}, None, False, None, False, id="empty"),
+    pytest.param({"closure": None}, None, False, None, False, id="null-receipt"),
+    pytest.param({"closure": [{}]}, None, False, None, False, id="invalid-receipt"),
+    pytest.param({"closure": {"gaps": ["fixture gap"]}}, None, True, None, False, id="missing-status"),
+    pytest.param({"closure": {"status": None}}, None, True, None, False, id="null-status"),
+    pytest.param({"closure": {"status": False}}, None, True, None, False, id="boolean-status"),
+    pytest.param({"closure": {"status": ["failed"]}}, None, True, None, False, id="array-status"),
+    pytest.param({"closure": {"status": "unknown"}}, None, True, None, False, id="unknown-status"),
+    pytest.param({"closure": {"status": "unavailable"}}, None, True, None, False, id="unavailable-status"),
+    pytest.param({"closure": {"status": "FIXTURE_STATUS_FREE_TEXT <b>"}}, None, True, None, False, id="free-text-status"),
+    pytest.param({"closure": {"status": "failed"}}, "failed", True, None, False, id="observed-failure"),
+    pytest.param({"closure": {"status": "not_run"}}, "not_run", True, None, False, id="not-run"),
+    pytest.param({"closure": {"status": "interrupted"}}, "interrupted", True, None, False, id="interrupted"),
+    pytest.param({"closure": {"status": "partial"}}, "partial", True, None, False, id="partial"),
+    pytest.param({"closure": {"status": " failed "}}, "failed", True, None, False, id="padded-failure"),
+    pytest.param({"closure": {"status": "\tpartial\n"}}, "partial", True, None, False, id="padded-partial"),
+    pytest.param({"closure": {"status": " not_run "}}, "not_run", True, None, False, id="padded-not-run"),
+    pytest.param({"closure": {"status": " interrupted "}}, "interrupted", True, None, False, id="padded-interrupted"),
+    pytest.param({"closure": {"status": " unknown "}}, None, True, None, False, id="padded-unknown"),
+    pytest.param({"closure": {"status": " Complete "}}, None, True, None, False, id="padded-case-variant"),
+    pytest.param({"closure": {"status": " \t "}}, None, True, None, False, id="whitespace-only-status"),
+    pytest.param({"closure": {"status": "complete", "targets": []}}, "failed", True, "failed", False, id="unsupported-complete"),
+    pytest.param({"closure": {"status": " complete ", "targets": []}},
+                 "failed", True, "failed", False, id="padded-complete-no-target"),
+    pytest.param({"closure": {"status": " complete ", "targets": [_CLOSURE_FIXTURE_TARGET]}},
+                 "partial", True, "partial", False, id="padded-complete-unattested"),
+    pytest.param({"closure": {"status": " complete ", "targets": [_CLOSURE_FIXTURE_TARGET]}},
+                 "complete", True, "complete", True, id="padded-complete-attested"),
+])
+def test_cli_offline_revision_displays_only_known_closure_status(
+    tmp_path: Path, closure_meta: dict[str, object], status: str | None, show_section: bool,
+    projected_status: str | None, admitted_contact: bool,
+) -> None:
+    sample = "a" * 64
+    source = tmp_path / "source.json"
+    payload: dict[str, object] = {
+        "package_name": "com.example.synthetic",
+        "analysis_status": "complete", "completeness": 1.0,
+        "meta": {"sample_sha256": sample, **closure_meta},
+    }
+    if admitted_contact:
+        payload["endpoints"] = [{**_CLOSURE_FIXTURE_TARGET, "evidences": [{
+            "source": "runtime-pcap", "location": "fixture-memory", "scope": "case_evidence",
+            "provenance": {"member_path": "classes.dex", "member_sha256": sample},
+            "locator": {"byte_offset": 2, "offset_unit": "byte"},
+            "structure_status": "parsed", "reference_status": "referenced", "reachability": "reachable",
+        }]}]
+    original = json.dumps(payload).encode()
+    source.write_bytes(original)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schema_version": "fxapk.offline-review.v1", "sample_sha256": sample,
+        "tasks": [{"id": "synthetic-inert", "kind": "fixture_unsupported"}],
+    }), encoding="utf-8")
+    out = tmp_path / "review"
+    cli = CliRunner()
+    before = cli.invoke(app, ["digest", str(source)])
+    review = cli.invoke(app, ["evidence-review", str(plan), "--report", str(source), "--out", str(out)])
+    after = cli.invoke(app, ["digest", str(out / "report.json")])
+    assert (before.exit_code, review.exit_code, after.exit_code) == (0, 5, 0), review.output
+    assert json.loads(review.stdout)["state"] == "partial"
+    assert json.loads((out / "review.json").read_text(encoding="utf-8"))["publication"] == "ok"
+    assert not (out / "inputs").exists()
+    assert source.read_bytes() == original
+
+    closure = json.loads(before.stdout)["closure"]
+    assert closure == json.loads(after.stdout)["closure"]
+    assert closure == json.loads((out / "digest.json").read_text(encoding="utf-8"))["closure"]
+    assert closure["status"] == status
+    published = json.loads((out / "report.json").read_text(encoding="utf-8"))["meta"]
+    if projected_status is None:
+        assert {key: published[key] for key in ("closure",) if key in published} == closure_meta
+    else:
+        raw_closure = closure_meta["closure"]
+        assert isinstance(raw_closure, dict)
+        assert published["closure"]["status"] == projected_status
+        assert published["closure"]["targets"] == raw_closure["targets"]
+        assert bool(closure["gaps"]) is (projected_status != "complete")
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    closure_section = html.partition('<section id="case-closure">')[2].partition("</section>")[0]
+    assert bool(closure_section) is show_section
+    if show_section:
+        assert f'>{status or "未记录或无法确认"}</div>' in closure_section
+    assert ("fixture gap" in closure_section) == ("fixture gap" in closure["gaps"])
+    assert "FIXTURE_STATUS_FREE_TEXT" not in html + before.stdout + after.stdout
+
+
 @pytest.mark.parametrize(("visibility_fields", "state"), [
     pytest.param({}, "absent", id="legacy-absent"),
     pytest.param({"visibility": None}, "absent", id="legacy-null"),

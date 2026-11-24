@@ -7,6 +7,16 @@ from typing import Any
 from fxapk.core.redact import scrub_pii
 
 
+# The closure evaluator emits complete/partial/failed; auto also records
+# not_run and interrupted. Missing or invalid persisted values are not failures.
+def closure_status_for_display(value: object) -> str | None:
+    """Read the scope-projected status, retaining legacy surrounding whitespace tolerance."""
+    if not isinstance(value, str):
+        return None
+    status = value.strip()
+    return status if status in ("complete", "partial", "failed", "not_run", "interrupted") else None
+
+
 def compact_capture_safety(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 from fxapk.core import infra
 from fxapk.core.admission import evaluate_usage
 from fxapk.core.closure.targets import _runtime_info
@@ -138,11 +140,12 @@ def test_html_lead_uses_admitted_matching_endpoint_contact_evidence() -> None:
     assert report_json.to_dict(typed) == typed_before
 
 
-def test_cached_complete_closure_requires_admitted_contact_per_target() -> None:
+@pytest.mark.parametrize("declared_status", ["complete", " complete "])
+def test_cached_complete_closure_requires_admitted_contact_per_target(declared_status: str) -> None:
     report = {
         "meta": {
             "closure": {
-                "status": "complete",
+                "status": declared_status,
                 "targets": [{"kind": "domain", "value": "api.example.test"}],
             },
         },
@@ -156,14 +159,22 @@ def test_cached_complete_closure_requires_admitted_contact_per_target() -> None:
             ],
         }],
     }
+    def assert_display(status: str) -> None:
+        assert build_digest(report)["closure"]["status"] == status
+        html = report_html.render_to_string(report_from_dict(report))
+        section = html.partition('<section id="case-closure">')[2].partition("</section>")[0]
+        assert f">{status}</div>" in section
+
     before = deepcopy(report)
 
     assert project_serialized_closure(report)["status"] == "partial"
+    assert_display("partial")
     assert report == before
 
     report["endpoints"][0]["evidences"][1] = _ref(source="runtime-pcap", offset=2)
     accepted_before = deepcopy(report)
     assert project_serialized_closure(report)["status"] == "complete"
+    assert_display("complete")
     assert report == accepted_before
 
 
