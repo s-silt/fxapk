@@ -2,6 +2,7 @@
 from collections.abc import Callable
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import TextIO
 
@@ -144,10 +145,16 @@ def test_closure_interrupt_preserves_existing_report(
             replace(temporary, target)
             if target == html_path:
                 if scenario == "html_unverified_replace":
-                    # Another independently created file wins before recheck.
+                    # An independent file with identical bytes and metadata
+                    # still does not prove this writer's replacement.
+                    original_identity = target.stat()
                     other = target.with_suffix(".other")
-                    other.write_bytes(b"unrelated")
+                    shutil.copy2(target, other)
                     replace(other, target)
+                    actual_identity = target.stat()
+                    assert not os.path.samestat(original_identity, actual_identity)
+                    assert actual_identity.st_size == original_identity.st_size
+                    assert actual_identity.st_mtime_ns == original_identity.st_mtime_ns
                 raise KeyboardInterrupt
 
         monkeypatch.setattr(atomic, "_replace_temp", cancel_during_replace)
@@ -208,7 +215,9 @@ def test_closure_interrupt_preserves_existing_report(
             assert html_path.read_bytes() == b"old inert HTML"
         return
     if scenario == "html_unverified_replace":
-        assert html_path.read_bytes() == b"unrelated"
+        from fxapk.report import html as report_html
+
+        assert html_path.read_bytes() == report_html.render_to_string(report).replace("\n", os.linesep).encode("utf-8")
         assert result["status"] == "cancelled"
         assert result["report_paths"] == [str(path)]
         assert result["report_delivery"] == ReportDelivery(("json",), ("json",), (), ())
