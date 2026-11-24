@@ -1549,10 +1549,15 @@ def _run_closure(
             ),
         )
         json_written: Path | None = None
+        html_written: Path | None = None
 
         def acknowledge_json(path: Path) -> None:
             nonlocal json_written
             json_written = path
+
+        def acknowledge_html(path: Path) -> None:
+            nonlocal html_written
+            html_written = path
 
         try:
             paths = report_io.write_report(
@@ -1560,16 +1565,21 @@ def _run_closure(
                 Path(out_dir) / f"{base}.json",
                 atomic_html_refresh=True,
                 on_json_written=acknowledge_json,
+                on_html_written=acknowledge_html,
             )
         except (AutoCancelled, KeyboardInterrupt):
-            # Cancellation may follow the atomic JSON replacement. Preserve
-            # only what the writer acknowledged; HTML may still be unchanged.
-            if json_written is not None:
-                _extend_unique(report_paths, [str(json_written)])
-                if delivery_sink is not None:
-                    from fxapk.core.report_delivery import ReportDelivery
+            # File presence is not evidence of a write by this run.
+            acknowledged = [
+                (fmt, str(path))
+                for fmt, path in (("json", json_written), ("html", html_written))
+                if path is not None
+            ]
+            _extend_unique(report_paths, [path for _, path in acknowledged])
+            if delivery_sink is not None and acknowledged:
+                from fxapk.core.report_delivery import ReportDelivery
 
-                    delivery_sink.append(ReportDelivery(("json",), ("json",), (), ()))
+                written_formats = tuple(fmt for fmt, _ in acknowledged)
+                delivery_sink.append(ReportDelivery(written_formats, written_formats, (), ()))
             raise
         except Exception:
             logger.exception("[auto] 案件闭环结果写回失败")

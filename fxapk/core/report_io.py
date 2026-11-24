@@ -361,6 +361,7 @@ def write_report(
     render_existing_html: bool = True,
     atomic_html_refresh: bool = False,
     on_json_written: Callable[[Path], None] | None = None,
+    on_html_written: Callable[[Path], None] | None = None,
     preserve_null_health: _NullAnalysisHealth | None = None,
 ) -> list[str]:
     """Atomically replace JSON, acknowledge it, then refresh an existing sibling HTML."""
@@ -393,9 +394,13 @@ def write_report(
         if atomic_html_refresh:
             # Keep HTML's existing platform newline convention. Replace only
             # this output entry; do not stream new bytes through an alias.
-            atomic_write_text(html_path, report_html.render_to_string(report), newline=None)
+            atomic_write_text(
+                html_path, report_html.render_to_string(report), newline=None, on_replaced=on_html_written,
+            )
         else:
             report_html.render(report, str(html_path))
+            if on_html_written is not None:
+                on_html_written(html_path)
         written.append(str(html_path))
     return written
 

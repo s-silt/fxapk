@@ -1,6 +1,8 @@
 """Cancellation at the case-closure boundary with synthetic reports and no device."""
+from collections.abc import Callable
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import TextIO
 
@@ -19,6 +21,9 @@ from fxapk.dynamic import auto
     ("before_write", "partial", 130),
     ("html_only_stale_json", "partial", 130),
     ("html_interrupt", "complete", 130),
+    ("html_after_writer", "complete", 130),
+    ("html_after_replace", "complete", 130),
+    ("html_unverified_replace", "complete", 130),
     ("html_only_interrupt", "complete", 130),
     ("json_failure", "complete", 1),
     ("json_failure", "partial", 1),
@@ -84,7 +89,9 @@ def test_closure_interrupt_preserves_existing_report(
         paths = auto._write_reports(report, out_dir=out_dir, formats=formats, base="fixture",
                                     delivery_sink=delivery_sink)
         saved.append(Path(paths[0]).read_bytes())
-        if scenario in ("html_failure", "html_interrupt"):
+        if scenario in (
+            "html_failure", "html_interrupt", "html_after_writer", "html_after_replace", "html_unverified_replace",
+        ):
             Path(paths[0]).with_suffix(".html").write_text("old inert HTML", encoding="utf-8")
         return auto._step(auto._STEP_STATIC, "done", "synthetic"), report, report.package_name, paths, "fixture"
 
@@ -117,6 +124,40 @@ def test_closure_interrupt_preserves_existing_report(
             raise KeyboardInterrupt
 
         monkeypatch.setattr(report_io, "write_report", cancel_write)
+
+    if scenario == "html_after_writer":
+        real_write = report_io.atomic_write_text
+
+        def cancel_after_writer(
+            target: Path, data: str, *, newline: str | None = "",
+            on_replaced: Callable[[Path], None] | None = None,
+        ) -> None:
+            real_write(target, data, newline=newline, on_replaced=on_replaced)
+            if target == html_path:
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(report_io, "atomic_write_text", cancel_after_writer)
+
+    if scenario in ("html_after_replace", "html_unverified_replace"):
+        replace = atomic._replace_temp
+
+        def cancel_during_replace(temporary: Path, target: Path) -> None:
+            replace(temporary, target)
+            if target == html_path:
+                if scenario == "html_unverified_replace":
+                    # An independent file with identical bytes and metadata
+                    # still does not prove this writer's replacement.
+                    original_identity = target.stat()
+                    other = target.with_suffix(".other")
+                    shutil.copy2(target, other)
+                    replace(other, target)
+                    actual_identity = target.stat()
+                    assert not os.path.samestat(original_identity, actual_identity)
+                    assert actual_identity.st_size == original_identity.st_size
+                    assert actual_identity.st_mtime_ns == original_identity.st_mtime_ns
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(atomic, "_replace_temp", cancel_during_replace)
 
     if scenario == "html_failure":
         from fxapk.report import html as report_html
@@ -172,6 +213,27 @@ def test_closure_interrupt_preserves_existing_report(
             assert html_path.read_bytes() == saved[0]
         else:
             assert html_path.read_bytes() == b"old inert HTML"
+        return
+    if scenario == "html_unverified_replace":
+        from fxapk.report import html as report_html
+
+        assert html_path.read_bytes() == report_html.render_to_string(report).replace("\n", os.linesep).encode("utf-8")
+        assert result["status"] == "cancelled"
+        assert result["report_paths"] == [str(path)]
+        assert result["report_delivery"] == ReportDelivery(("json",), ("json",), (), ())
+        assert str(html_path) not in invocation.output
+        return
+    if scenario in ("html_after_writer", "html_after_replace"):
+        from fxapk.report import html as report_html
+
+        assert html_path.read_bytes() == report_html.render_to_string(report).replace("\n", os.linesep).encode("utf-8")
+        assert not list(out.glob(".fixture.html.*.tmp"))
+        assert json.loads(path.read_text(encoding="utf-8"))["meta"]["closure"]["status"] == verdict
+        assert result["status"] == "cancelled" and result["closure"]["status"] == "interrupted"
+        assert result.get("cancel_reason") == "closure_interrupted"
+        assert result["report_paths"] == [str(path), str(html_path)]
+        assert result["report_delivery"] == ReportDelivery(("json", "html"), ("json", "html"), (), ())
+        assert str(path) in invocation.output and str(html_path) in invocation.output
         return
     if scenario == "html_healthy":
         from fxapk.report import html as report_html

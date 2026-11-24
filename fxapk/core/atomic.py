@@ -13,10 +13,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import errno
 import logging
 import os
 from pathlib import Path
+import stat
 import time
 from typing import BinaryIO, TextIO
 from uuid import uuid4
@@ -255,8 +257,35 @@ def _write_bytes_to_stream(stream: BinaryIO, data: bytes) -> None:
     stream.write(data)
 
 
+def _published_temp_identity(
+    temporary: Path, target: Path, expected: os.stat_result | None,
+) -> bool:
+    """Recognize this replacement after an interrupt, not a pre-existing output."""
+    if expected is None or not expected.st_ino:
+        return False
+    try:
+        temporary.lstat()
+    except FileNotFoundError:
+        try:
+            current = target.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISREG(current.st_mode)
+            and os.path.samestat(expected, current)
+            and (expected.st_size, expected.st_mtime_ns) == (current.st_size, current.st_mtime_ns)
+        )
+    except OSError:
+        return False
+    return False
+
+
 def atomic_write_text(
-    path: str | os.PathLike[str], data: str, *, newline: str | None = "",
+    path: str | os.PathLike[str],
+    data: str,
+    *,
+    newline: str | None = "",
+    on_replaced: Callable[[Path], None] | None = None,
 ) -> None:
     """把 ``data`` 原子写入 ``path``（UTF-8）：同目录 tmp → ``os.replace`` 覆盖。
 
@@ -272,6 +301,7 @@ def atomic_write_text(
     Args:
         path: 目标文件路径。缺失的父目录会以受限创建 mode 逐级创建。
         data: 要写入的文本。
+        on_replaced: Optional callback after successful replacement.
 
     Raises:
         OSError: 写临时文件、同步数据或 ``os.replace`` 失败时抛出。
@@ -300,7 +330,19 @@ def atomic_write_text(
             stream.flush()
             os.fsync(stream.fileno())
 
-        _replace_temp(temporary, target)
+        expected = None
+        if on_replaced is not None:
+            try:
+                expected = temporary.lstat()
+            except OSError:
+                expected = None
+        replaced = False
+        try:
+            _replace_temp(temporary, target)
+            replaced = True
+        finally:
+            if on_replaced is not None and (replaced or _published_temp_identity(temporary, target, expected)):
+                on_replaced(target)
         temporary = None
     except BaseException:
         if descriptor is not None:
