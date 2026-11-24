@@ -252,7 +252,10 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
     raw_enricher_status = report.get("enricher_status")
     # A legacy omission is not evidence of malformed statistics. An explicitly
     # invalid value, or a dropped row, must not look like a clean run.
-    dirty = "enricher_status" in report and not isinstance(raw_enricher_status, list)
+    meta_block = report.get("meta")
+    dirty = ("enricher_status" in report and not isinstance(raw_enricher_status, list)) or (
+        isinstance(meta_block, dict) and meta_block.get("offline_review_enricher_status_incomplete") is True
+    )
     attempted = terminal_ok = 0
     for s in _list(raw_enricher_status):
         if not isinstance(s, dict):
@@ -278,7 +281,6 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
         warnings.append(
             f"富化成功终态率 {enrich_rate} 低于 {_ENRICH_WARN}：富化源可能未跑全（限速/密钥/网络），勿据残缺证据下结论"
         )
-    meta_block = report.get("meta")
     if isinstance(meta_block, dict):
         plan = meta_block.get("enrichment_plan")
         execution = meta_block.get("enrichment_execution")

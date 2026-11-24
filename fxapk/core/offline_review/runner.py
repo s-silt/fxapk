@@ -24,7 +24,11 @@ from . import acquisition, crypto, dex, emulate, filesystem, jni, native, recove
 from .common import json_value, read_bytes, result, sha256
 
 META_WRITE_OWNER = "core.offline_review.runner"
-META_WRITE_CATEGORIES = {"offline_evidence_review": "coverage", "sample_sha256": "record"}
+META_WRITE_CATEGORIES = {
+    "offline_evidence_review": "coverage",
+    "offline_review_enricher_status_incomplete": "coverage",
+    "sample_sha256": "record",
+}
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 REVIEWERS = {"native": native.review, "trace": trace.review, "filesystem": filesystem.review,
              "crypto": crypto.review, "dex": dex.review, "jni": jni.review,
@@ -152,8 +156,17 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
             source_payload = load_report_payload(local_report)
         source_health = _source_analysis_health(source_payload)
         report = report_from_dict({**source_payload, **source_health})
-    if report is not None and report.meta.get("sample_sha256") != sample:
-        raise ValueError("review_report_sample_mismatch")
+        if report.meta.get("sample_sha256") != sample:
+            raise ValueError("review_report_sample_mismatch")
+        # The typed reader keeps only object rows. Preserve the lost coverage
+        # from the same snapshot without republishing unreadable raw values.
+        stats = source_payload.get("enricher_status")
+        discarded = "enricher_status" in source_payload and (
+            not isinstance(stats, list) or any(not isinstance(row, dict) for row in stats)
+        )
+        inherited = report.meta.pop("offline_review_enricher_status_incomplete", None) is True
+        if discarded or inherited:
+            report.meta["offline_review_enricher_status_incomplete"] = True
     if output.exists():
         raise ValueError("review_output_exists")
     output.mkdir(parents=True, exist_ok=False)
