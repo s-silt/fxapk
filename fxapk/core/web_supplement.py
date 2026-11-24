@@ -35,7 +35,7 @@ from fxapk.core.web_observation_plan import (
     fixed_reason,
     load_config_path,
     parse_config,
-    project_plan_for_digest,
+    project_agent_handoff_for_writeback,
 )
 
 if TYPE_CHECKING:
@@ -106,9 +106,14 @@ def _digest_status(value: object, *, fallback: str) -> str:
     return value
 
 
-def _canonical_attempt_marker(receipt: dict[str, Any]) -> int | None:
+def _effective_attempt_marker(receipt: dict[str, Any]) -> int | None:
     marker = receipt.get("attempt")
-    return marker if receipt.get("schema_version") == _RECEIPT_SCHEMA and type(marker) is int else None
+    if receipt.get("schema_version") != _RECEIPT_SCHEMA or type(marker) is not int:
+        return None
+    # Canonical runtime receipts can have attempt=0 after capture starts but ends without success.
+    if marker == 0 and _strict_bool(receipt.get("capture_started"), receipt.get("boundary")):
+        return 1
+    return marker
 
 
 def _attempt_counts(receipt: dict[str, Any], status: str) -> tuple[int, int]:
@@ -119,13 +124,13 @@ def _attempt_counts(receipt: dict[str, Any], status: str) -> tuple[int, int]:
             item for item in attempts
             if isinstance(item, dict)
             and _digest_status(item.get("status"), fallback="unknown") not in _NON_ATTEMPT_STATES
-            and _canonical_attempt_marker(item) != 0
+            and _effective_attempt_marker(item) != 0
         ]
         failed = sum(item.get("status") == "failed" for item in rows)
         return len(rows), failed
     if status in _NON_ATTEMPT_STATES:
         return 0, 0
-    canonical_attempt = _canonical_attempt_marker(receipt)
+    canonical_attempt = _effective_attempt_marker(receipt)
     if canonical_attempt == 0 or (status == "unavailable" and canonical_attempt != 1):
         return 0, 0
     # The single legacy fallback represents the primary record, not a different latest attempt.
@@ -933,10 +938,9 @@ def _observed_plugin_status(status: str) -> str:
 
 def _project_agent_handoff(plan: dict[str, Any], meta: dict[str, Any]) -> None:
     """Refresh guidance from the cumulative receipt. Plan execute and history stay put."""
-    projected = project_plan_for_digest(
+    plan["agent_handoff"] = project_agent_handoff_for_writeback(
         plan, meta.get("web_supplement"), meta.get("web_supplement_runtime"),
     )
-    plan["agent_handoff"] = projected["agent_handoff"]
 
 
 def apply_static(state: Any) -> None:

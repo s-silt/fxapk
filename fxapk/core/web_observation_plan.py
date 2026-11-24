@@ -771,7 +771,26 @@ def project_plan_for_digest(
     supplement: object = None,
     runtime: object = None,
 ) -> dict[str, Any]:
-    """Recompute guidance from whitelisted fields and the latest receipt."""
+    """Recompute read-only display guidance from a saved report."""
+    return _project_plan(raw_plan, supplement, runtime, saved_receipt=True)
+
+
+def project_agent_handoff_for_writeback(
+    raw_plan: object,
+    supplement: object,
+    runtime: object,
+) -> dict[str, Any]:
+    """Refresh producer guidance without applying saved-report display fallbacks."""
+    return _project_plan(raw_plan, supplement, runtime, saved_receipt=False)["agent_handoff"]
+
+
+def _project_plan(
+    raw_plan: object,
+    supplement: object,
+    runtime: object,
+    *,
+    saved_receipt: bool,
+) -> dict[str, Any]:
     plan = raw_plan if isinstance(raw_plan, dict) else {}
     raw_status = plan.get("status")
     if isinstance(raw_status, str) and raw_status in PLAN_STATUSES:
@@ -829,7 +848,7 @@ def project_plan_for_digest(
         "source": safe_plan["source"],
         "provider": safe_plan["provider"],
         "closure_evaluated": False,
-        "agent_handoff": _build_agent_handoff(safe_plan, latest, saved_receipt=True),
+        "agent_handoff": _build_agent_handoff(safe_plan, latest, saved_receipt=saved_receipt),
     }
     if isinstance(latest, dict) and latest.get("execution") == "not_executed":
         projected["execution"] = "not_executed"

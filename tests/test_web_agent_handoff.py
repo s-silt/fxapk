@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -16,8 +17,10 @@ from fxapk.core.web_observation_plan import (
     build_agent_handoff,
     build_plan,
     parse_config,
+    project_plan_for_digest,
     refresh_agent_handoff,
 )
+from fxapk.core.web_supplement import _project_agent_handoff
 from fxapk.core.web_supplement_runtime import SkippingObserver, make_capture_observer
 from fxapk.core.models import AnalysisConfig
 from fxapk.report.digest import build_digest
@@ -399,3 +402,43 @@ def test_live_handoff_is_not_changed_by_saved_receipt_policy() -> None:
     assert build_agent_handoff(_SAVED_SELECTED_PLAN, outcome)["why"] == "inspect_input"
     live = build_agent_handoff(_SAVED_PENDING_PLAN, {"status": "pending", "reason": "pending"})
     assert live["why"] == "needs_material" and _codes(live) == _PENDING_ACTIONS
+
+
+@pytest.mark.parametrize(("plan", "supplement", "runtime", "producer_why", "saved_why"), [
+    pytest.param(_SAVED_PENDING_PLAN, None, None, "needs_material", "needs_material", id="pending-no-receipt"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": "pending", "reason": "pending"}, None,
+                 "needs_material", "needs_material", id="pending-valid"),
+    pytest.param(_SAVED_PENDING_PLAN, {"status": None}, None, "needs_material", "unknown", id="pending-null"),
+    pytest.param(_SAVED_PENDING_PLAN, None, [{"reason": "timeout"}],
+                 "inspect_input", "unknown", id="orphan-runtime-reason"),
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "failed", "reason": _UNRECOGNIZED_SAVED_REASON},
+                 None, "inspect_input", "unknown", id="selected-unknown-cause"),
+    pytest.param(_SAVED_SELECTED_PLAN, {"status": "failed", "reason": "config_rejected"},
+                 None, "inspect_input", "inspect_input", id="selected-valid-rejection"),
+])
+def test_producer_writeback_does_not_use_saved_display_policy(
+    monkeypatch: pytest.MonkeyPatch, plan: dict[str, object], supplement: dict[str, object] | None,
+    runtime: list[dict[str, object]] | None, producer_why: str, saved_why: str,
+) -> None:
+    def _forbid(*args: object, **kwargs: object) -> None:
+        pytest.fail("handoff projection attempted an external operation")
+
+    monkeypatch.setattr(socket, "socket", _forbid)
+    monkeypatch.setattr(subprocess, "run", _forbid)
+    monkeypatch.setattr(subprocess, "Popen", _forbid)
+    original = deepcopy(plan)
+    stored = {"web_supplement": supplement, "web_supplement_runtime": runtime}
+    original_stored = deepcopy(stored)
+    producer_plan = deepcopy(plan)
+    _project_agent_handoff(producer_plan, stored)
+    handoff = producer_plan.pop("agent_handoff")
+    assert producer_plan == original and stored == original_stored
+    assert handoff["why"] == producer_why
+    assert handoff["authorization"] is handoff["closure_evaluated"] is False
+    saved = project_plan_for_digest(plan, supplement, runtime)["agent_handoff"]
+    assert plan == original and stored == original_stored
+    assert saved["why"] == saved_why
+    if saved_why == "unknown":
+        assert _codes(saved) == ["inspect_diagnostics"]
+        assert saved["next_actions"][0]["argv"] == []
+    assert saved["authorization"] is saved["closure_evaluated"] is False

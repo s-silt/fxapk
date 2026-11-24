@@ -437,6 +437,25 @@ _WEB_RECEIPT_SCHEMA = "fxapk.web_supplement/1"
         ],
     }}, ("skipped", "", 5, 2), id="listed-attempts-respect-only-the-canonical-integer-zero"),
     pytest.param({"web_supplement": {
+        "status": "failed", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0,
+        "boundary": {"capture_started": True},
+    }}, ("failed", "", 1, 1), id="standalone-canonical-capture-started"),
+    pytest.param({"web_supplement": {
+        "status": "failed", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0,
+        "attempts": [
+            {"status": "failed", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0, "capture_started": 1,
+             "boundary": {"capture_started": "true"}},
+            {"status": "skipped", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0,
+             "boundary": {"capture_started": [True]}},
+            {"status": "failed", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0, "capture_started": False,
+             "boundary": {"capture_started": True, "live_cdp": True}},
+            {"status": "not_applicable", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0, "capture_started": True},
+            {"status": "pending", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0, "capture_started": True},
+            {"status": "unknown", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0, "capture_started": True},
+            {"status": "unavailable", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0, "capture_started": True},
+        ],
+    }}, ("failed", "", 1, 0), id="listed-capture-start-overrides-zero-only-on-known-terminal-strict-evidence"),
+    pytest.param({"web_supplement": {
         "status": "unavailable", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 1, "attempts": [],
     }}, ("unavailable", "", 0, 0), id="explicit-empty-attempts-override-canonical-marker"),
     pytest.param({"web_supplement": {
@@ -521,7 +540,11 @@ def test_cli_saved_web_supplement_distinguishes_unknown_from_recorded_outcomes(
         status, reason, attempts, failures,
     )
     assert (view["latest_status"], view["latest_reason"]) == (latest_status, latest_reason)
-    assert view["capture_started"] is view["app_attribution_verified"] is view["closure_evaluated"] is False
+    assert view["app_attribution_verified"] is view["closure_evaluated"] is False
+    saved_receipt = web_meta.get("web_supplement")
+    assert view["capture_started"] is (
+        isinstance(saved_receipt, dict) and saved_receipt.get("boundary") == {"capture_started": True}
+    )
     assert view["summary_line"] in section and "仍缺证据" in view["summary_line"]
     assert f'<div class="k">最近状态</div><div>{latest_status}</div>' in section
     assert f'<div class="k">最近原因</div><div class="mono">{latest_reason}</div>' in section
@@ -541,6 +564,9 @@ def test_cli_saved_web_supplement_distinguishes_unknown_from_recorded_outcomes(
     pytest.param(("no_config",), (0, 0), id="no-config"),
     pytest.param(("mode_off",), (0, 0), id="mode-off"),
     pytest.param(("duplicate_raw",), (1, 0), id="attempted-duplicate"),
+    pytest.param(("runtime-started-failure",), (1, 1), id="runtime-started-failure"),
+    pytest.param(("runtime-started-duplicate",), (1, 0), id="runtime-started-duplicate"),
+    pytest.param(("runtime-preflight-failure",), (0, 0), id="runtime-preflight-failure"),
     pytest.param(("no_config", "mode_off", "duplicate_raw", "plugin_unavailable", "parse_failed"), (3, 1),
                  id="mixed-canonical-attempt-receipts"),
 ])
@@ -549,7 +575,7 @@ def test_cli_saved_web_supplement_counts_produced_attempts(
 ) -> None:
     from fxapk.core.web_observation_plan import WebSupplementRequest, build_plan
     from fxapk.core.web_supplement import _record
-    from fxapk.core.web_supplement_preservation import commit_supplement
+    from fxapk.core.web_supplement_preservation import commit_supplement, publish_runtime_projection
 
     no_config = build_plan(None, platform="android", meta={})
     mode_off = build_plan(WebSupplementRequest(mode="off"), platform="android", meta={})
@@ -563,9 +589,26 @@ def test_cli_saved_web_supplement_counts_produced_attempts(
         "plugin_unavailable": (selected, "unavailable", 1),
         "parse_failed": (selected, "failed", 1),
     }
+    runtime = {
+        "runtime-started-failure": ("failed", "timeout", True),
+        "runtime-started-duplicate": ("skipped", "duplicate_raw", True),
+        "runtime-preflight-failure": ("failed", "cdp_setup_failed", False),
+    }
     sample = "a" * 64
     meta: dict[str, object] = {"sample_sha256": sample}
     for reason in receipts:
+        if reason in runtime:
+            status, code, started = runtime[reason]
+            publish_runtime_projection(meta, [{"status": status, "reason": code, "capture_started": started}],
+                                       round_id="single")
+            saved = meta["web_supplement"]
+            assert isinstance(saved, dict)
+            attempt = saved["attempts"][-1]
+            assert (attempt["schema_version"], attempt["status"], attempt["reason"], attempt["attempt"]) == (
+                _WEB_RECEIPT_SCHEMA, status, code, 0,
+            )
+            assert attempt["boundary"]["capture_started"] is started
+            continue
         plan, status, attempted = rows[reason]
         state = _record(plan) if reason in {"no_config", "mode_off"} else _record(plan, status=status, reason=reason)
         assert (state["schema_version"], state["status"], state["reason"], state["attempt"]) == (
@@ -591,6 +634,7 @@ def test_cli_saved_web_supplement_counts_produced_attempts(
     view = json.loads(before.stdout)["web_supplement"]
     assert view == json.loads((out / "digest.json").read_text(encoding="utf-8"))["web_supplement"]
     assert (view["attempt_count"], view["failure_count"]) == counts
+    assert view["capture_started"] is any(runtime[reason][2] for reason in receipts if reason in runtime)
     html = (out / "report.html").read_text(encoding="utf-8")
     section = html.partition('<section id="web-supplement">')[2].partition("</section>")[0]
     assert f'<div class="k">尝试 / 失败</div><div class="mono">{counts[0]} / {counts[1]}</div>' in section
