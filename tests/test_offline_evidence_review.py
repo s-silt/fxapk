@@ -424,6 +424,19 @@ _WEB_RECEIPT_SCHEMA = "fxapk.web_supplement/1"
         "attempts": [{"status": "unavailable"}, {"status": "failed"}, {"status": "pending"}],
     }}, ("not_applicable", "", 2, 1), id="explicit-unavailable-and-failed-attempts"),
     pytest.param({"web_supplement": {
+        "status": "skipped",
+        "attempts": [
+            {"status": "not_applicable", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 1},
+            {"status": "skipped", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0},
+            {"status": "failed", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0},
+            {"status": "unavailable", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 1},
+            {"status": "failed", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": False},
+            {"status": "skipped", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 0.0},
+            {"status": "failed", "schema_version": "fixture.unsupported", "attempt": 0},
+            {"status": "skipped"},
+        ],
+    }}, ("skipped", "", 5, 2), id="listed-attempts-respect-only-the-canonical-integer-zero"),
+    pytest.param({"web_supplement": {
         "status": "unavailable", "schema_version": _WEB_RECEIPT_SCHEMA, "attempt": 1, "attempts": [],
     }}, ("unavailable", "", 0, 0), id="explicit-empty-attempts-override-canonical-marker"),
     pytest.param({"web_supplement": {
@@ -522,6 +535,67 @@ def test_cli_saved_web_supplement_distinguishes_unknown_from_recorded_outcomes(
     if status in labels:
         suffix = f"：{reason}" if reason else ""
         assert view["summary_line"] == f"{labels[status]}{suffix}；仍缺证据"
+
+
+@pytest.mark.parametrize(("receipts", "counts"), [
+    pytest.param(("no_config",), (0, 0), id="no-config"),
+    pytest.param(("mode_off",), (0, 0), id="mode-off"),
+    pytest.param(("duplicate_raw",), (1, 0), id="attempted-duplicate"),
+    pytest.param(("no_config", "mode_off", "duplicate_raw", "plugin_unavailable", "parse_failed"), (3, 1),
+                 id="mixed-canonical-attempt-receipts"),
+])
+def test_cli_saved_web_supplement_counts_produced_attempts(
+    tmp_path: Path, receipts: tuple[str, ...], counts: tuple[int, int],
+) -> None:
+    from fxapk.core.web_observation_plan import WebSupplementRequest, build_plan
+    from fxapk.core.web_supplement import _record
+    from fxapk.core.web_supplement_preservation import commit_supplement
+
+    no_config = build_plan(None, platform="android", meta={})
+    mode_off = build_plan(WebSupplementRequest(mode="off"), platform="android", meta={})
+    selected = build_plan(
+        WebSupplementRequest(mode="auto", source="bundle", path="synthetic"), platform="android", meta={},
+    )
+    rows = {
+        "no_config": (no_config, "not_applicable", 0),
+        "mode_off": (mode_off, "skipped", 0),
+        "duplicate_raw": (selected, "skipped", 1),
+        "plugin_unavailable": (selected, "unavailable", 1),
+        "parse_failed": (selected, "failed", 1),
+    }
+    sample = "a" * 64
+    meta: dict[str, object] = {"sample_sha256": sample}
+    for reason in receipts:
+        plan, status, attempted = rows[reason]
+        state = _record(plan) if reason in {"no_config", "mode_off"} else _record(plan, status=status, reason=reason)
+        assert (state["schema_version"], state["status"], state["reason"], state["attempt"]) == (
+            _WEB_RECEIPT_SCHEMA, status, reason, attempted,
+        )
+        commit_supplement(meta, state)
+
+    source = tmp_path / "source.json"
+    original = json.dumps({
+        "package_name": "com.example.synthetic", "analysis_status": "complete", "completeness": 1.0, "meta": meta,
+    }).encode()
+    source.write_bytes(original)
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps({
+        "schema_version": "fxapk.offline-review.v1", "sample_sha256": sample,
+        "tasks": [{"id": "synthetic-inert", "kind": "fixture_unsupported"}],
+    }), encoding="utf-8")
+    out = tmp_path / "review"
+    cli = CliRunner()
+    before = cli.invoke(app, ["digest", str(source)])
+    review = cli.invoke(app, ["evidence-review", str(plan_file), "--report", str(source), "--out", str(out)])
+    assert (before.exit_code, review.exit_code) == (0, 5), review.output
+    view = json.loads(before.stdout)["web_supplement"]
+    assert view == json.loads((out / "digest.json").read_text(encoding="utf-8"))["web_supplement"]
+    assert (view["attempt_count"], view["failure_count"]) == counts
+    html = (out / "report.html").read_text(encoding="utf-8")
+    section = html.partition('<section id="web-supplement">')[2].partition("</section>")[0]
+    assert f'<div class="k">尝试 / 失败</div><div class="mono">{counts[0]} / {counts[1]}</div>' in section
+    assert json.loads((out / "report.json").read_text(encoding="utf-8"))["meta"]["web_supplement"] == meta["web_supplement"]
+    assert source.read_bytes() == original
 
 
 @pytest.mark.parametrize(("visibility_fields", "state"), [

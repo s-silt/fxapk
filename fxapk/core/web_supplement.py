@@ -76,6 +76,7 @@ _MAX_PUBLISH_BYTES = 32 * 1024 * 1024
 _DIGEST_STATUS = frozenset({
     "pending", "skipped", "ok", "executed", "failed", "unavailable", "not_applicable", "unknown",
 })
+_NON_ATTEMPT_STATES = frozenset({"not_applicable", "pending", "unknown"})
 _SAVED_STATE_LABELS = {
     "pending": "网页补采待处理",
     "unavailable": "网页补采不可用",
@@ -105,21 +106,26 @@ def _digest_status(value: object, *, fallback: str) -> str:
     return value
 
 
+def _canonical_attempt_marker(receipt: dict[str, Any]) -> int | None:
+    marker = receipt.get("attempt")
+    return marker if receipt.get("schema_version") == _RECEIPT_SCHEMA and type(marker) is int else None
+
+
 def _attempt_counts(receipt: dict[str, Any], status: str) -> tuple[int, int]:
-    """Count stored rows first; a latest-status label alone does not add an attempt."""
+    """Count stored attempts, not non-execution receipts or a latest-status label."""
     attempts = receipt.get("attempts")
     if isinstance(attempts, list):
         rows = [
             item for item in attempts
             if isinstance(item, dict)
-            and _digest_status(item.get("status"), fallback="unknown") not in {"pending", "unknown"}
+            and _digest_status(item.get("status"), fallback="unknown") not in _NON_ATTEMPT_STATES
+            and _canonical_attempt_marker(item) != 0
         ]
         failed = sum(item.get("status") == "failed" for item in rows)
         return len(rows), failed
-    if status in {"not_applicable", "pending", "unknown"}:
+    if status in _NON_ATTEMPT_STATES:
         return 0, 0
-    marker = receipt.get("attempt")
-    canonical_attempt = marker if receipt.get("schema_version") == _RECEIPT_SCHEMA and type(marker) is int else None
+    canonical_attempt = _canonical_attempt_marker(receipt)
     if canonical_attempt == 0 or (status == "unavailable" and canonical_attempt != 1):
         return 0, 0
     # The single legacy fallback represents the primary record, not a different latest attempt.
