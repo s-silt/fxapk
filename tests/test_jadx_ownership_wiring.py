@@ -296,4 +296,94 @@ def test_digest_comparison_unattributed_and_strict_gate(tmp_path: Path) -> None:
     d3 = build_digest(
         {"meta": {**base_meta, "jadx_ownership_summary": forged_bool}, "leads": []}
     )
-    assert d3["jadx_index"]["comparison"]["matches"] == 0
+    assert d3["jadx_index"]["comparison"]["matches"] is None
+    assert d3["jadx_index"]["comparison"]["total_regions"] is None
+
+
+_BUCKETS = ("matches", "modified", "absent", "unattributed")
+_COUNTS = dict(zip(_BUCKETS, (2, 1, 0, 3), strict=True))
+_MISSING = object()
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    pytest.param(None, 0, id="real-zeros"),
+    pytest.param(None, None, id="nonzero"),
+    pytest.param("unattributed", _MISSING, id="legacy-missing-bucket"),
+    pytest.param("unattributed", None, id="explicit-null"),
+    pytest.param("matches", True, id="bool"),
+    pytest.param("matches", -1, id="negative"),
+    pytest.param("matches", "2", id="numeric-string"),
+    pytest.param("modified", 1.0, id="float"),
+    pytest.param("all", _MISSING, id="all-missing"),
+])
+def test_saved_comparison_does_not_substitute_zero_for_unknown_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str | None, value: object,
+) -> None:
+    import socket
+
+    from typer.testing import CliRunner
+
+    from fxapk.cli import app
+
+    def forbid(*args: object, **kwargs: object) -> None:
+        pytest.fail("saved-report comparison attempted a network connection")
+
+    monkeypatch.setattr(socket, "create_connection", forbid)
+    monkeypatch.setattr(socket, "getaddrinfo", forbid)
+
+    counts: dict[str, object] = dict(_COUNTS)
+    expected: dict[str, int | None] = dict(_COUNTS)
+    total: int | None = 6
+    if field is None and value == 0:
+        counts = dict.fromkeys(_BUCKETS, 0)
+        expected = dict.fromkeys(_BUCKETS, 0)
+        total = 0
+    elif field == "all":
+        counts = {}
+        expected = dict.fromkeys(_BUCKETS)
+        total = None
+    elif field is not None:
+        if value is _MISSING:
+            counts.pop(field)
+        else:
+            counts[field] = value
+        expected[field] = None
+        total = None
+
+    sample = "a" * 64
+    summary = {"status": "compared", "authenticity_asserted": False, "total_regions": 999, **counts}
+    source = tmp_path / "source.json"
+    original = json.dumps({
+        "package_name": "com.example.synthetic", "analysis_status": "complete", "completeness": 1.0,
+        "meta": {
+            "sample_sha256": sample, "jadx_index_status": "built", "jadx_index_key": "b" * 64,
+            "jadx_ownership_summary": summary,
+        },
+    }).encode()
+    source.write_bytes(original)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schema_version": "fxapk.offline-review.v1", "sample_sha256": sample,
+        "tasks": [{"id": "synthetic-inert", "kind": "fixture_unsupported"}],
+    }), encoding="utf-8")
+    out = tmp_path / "review"
+    cli = CliRunner()
+    direct = cli.invoke(app, ["digest", str(source)])
+    review = cli.invoke(app, ["evidence-review", str(plan), "--report", str(source), "--out", str(out)])
+    replay = cli.invoke(app, ["digest", str(out / "report.json")])
+    assert (direct.exit_code, review.exit_code, replay.exit_code) == (0, 5, 0), review.output
+    assert source.read_bytes() == original
+    receipt = json.loads((out / "review.json").read_text(encoding="utf-8"))
+    assert receipt["publication"] == "ok" and receipt["tasks"][0]["state"] == "unsupported"
+    assert not (out / "inputs").exists()
+    written = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert written["meta"]["jadx_ownership_summary"] == summary
+
+    index = json.loads(direct.stdout)["jadx_index"]
+    assert index == json.loads(replay.stdout)["jadx_index"]
+    assert index == json.loads((out / "digest.json").read_text(encoding="utf-8"))["jadx_index"]
+    result = index["comparison"]
+    assert {key: result[key] for key in _BUCKETS} == expected
+    assert result["total_regions"] == total
+    assert set(result) == set(_BUCKETS) | {"total_regions", "authenticity_asserted", "caveat"}
+    assert result["authenticity_asserted"] is False and "不构成鉴真结论" in result["caveat"]
