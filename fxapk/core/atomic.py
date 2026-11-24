@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import errno
 import logging
 import os
@@ -256,7 +257,11 @@ def _write_bytes_to_stream(stream: BinaryIO, data: bytes) -> None:
 
 
 def atomic_write_text(
-    path: str | os.PathLike[str], data: str, *, newline: str | None = "",
+    path: str | os.PathLike[str],
+    data: str,
+    *,
+    newline: str | None = "",
+    on_replaced: Callable[[Path], None] | None = None,
 ) -> None:
     """把 ``data`` 原子写入 ``path``（UTF-8）：同目录 tmp → ``os.replace`` 覆盖。
 
@@ -272,6 +277,7 @@ def atomic_write_text(
     Args:
         path: 目标文件路径。缺失的父目录会以受限创建 mode 逐级创建。
         data: 要写入的文本。
+        on_replaced: Optional callback after successful replacement.
 
     Raises:
         OSError: 写临时文件、同步数据或 ``os.replace`` 失败时抛出。
@@ -323,6 +329,9 @@ def atomic_write_text(
                     exc_info=True,
                 )
         raise
+
+    if on_replaced is not None:
+        on_replaced(target)
 
 
 def atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
