@@ -271,34 +271,59 @@ def test_cli_offline_revision_preserves_only_observed_analysis_health(
         assert not package_path.exists()
 
 
-@pytest.mark.parametrize(("closure_meta", "status", "show_section"), [
-    pytest.param({}, None, False, id="absent"),
-    pytest.param({"closure": {}}, None, False, id="empty"),
-    pytest.param({"closure": None}, None, False, id="null-receipt"),
-    pytest.param({"closure": [{}]}, None, False, id="invalid-receipt"),
-    pytest.param({"closure": {"gaps": ["fixture gap"]}}, None, True, id="missing-status"),
-    pytest.param({"closure": {"status": None}}, None, True, id="null-status"),
-    pytest.param({"closure": {"status": False}}, None, True, id="boolean-status"),
-    pytest.param({"closure": {"status": ["failed"]}}, None, True, id="array-status"),
-    pytest.param({"closure": {"status": "unknown"}}, None, True, id="unknown-status"),
-    pytest.param({"closure": {"status": "unavailable"}}, None, True, id="unavailable-status"),
-    pytest.param({"closure": {"status": "FIXTURE_STATUS_FREE_TEXT <b>"}}, None, True, id="free-text-status"),
-    pytest.param({"closure": {"status": "failed"}}, "failed", True, id="observed-failure"),
-    pytest.param({"closure": {"status": "not_run"}}, "not_run", True, id="not-run"),
-    pytest.param({"closure": {"status": "interrupted"}}, "interrupted", True, id="interrupted"),
-    pytest.param({"closure": {"status": "partial"}}, "partial", True, id="partial"),
-    pytest.param({"closure": {"status": "complete", "targets": []}}, "failed", True, id="unsupported-complete"),
+_CLOSURE_FIXTURE_TARGET = {"kind": "domain", "value": "fixture.example.invalid"}
+
+
+@pytest.mark.parametrize(("closure_meta", "status", "show_section", "projected_status", "admitted_contact"), [
+    pytest.param({}, None, False, None, False, id="absent"),
+    pytest.param({"closure": {}}, None, False, None, False, id="empty"),
+    pytest.param({"closure": None}, None, False, None, False, id="null-receipt"),
+    pytest.param({"closure": [{}]}, None, False, None, False, id="invalid-receipt"),
+    pytest.param({"closure": {"gaps": ["fixture gap"]}}, None, True, None, False, id="missing-status"),
+    pytest.param({"closure": {"status": None}}, None, True, None, False, id="null-status"),
+    pytest.param({"closure": {"status": False}}, None, True, None, False, id="boolean-status"),
+    pytest.param({"closure": {"status": ["failed"]}}, None, True, None, False, id="array-status"),
+    pytest.param({"closure": {"status": "unknown"}}, None, True, None, False, id="unknown-status"),
+    pytest.param({"closure": {"status": "unavailable"}}, None, True, None, False, id="unavailable-status"),
+    pytest.param({"closure": {"status": "FIXTURE_STATUS_FREE_TEXT <b>"}}, None, True, None, False, id="free-text-status"),
+    pytest.param({"closure": {"status": "failed"}}, "failed", True, None, False, id="observed-failure"),
+    pytest.param({"closure": {"status": "not_run"}}, "not_run", True, None, False, id="not-run"),
+    pytest.param({"closure": {"status": "interrupted"}}, "interrupted", True, None, False, id="interrupted"),
+    pytest.param({"closure": {"status": "partial"}}, "partial", True, None, False, id="partial"),
+    pytest.param({"closure": {"status": " failed "}}, "failed", True, None, False, id="padded-failure"),
+    pytest.param({"closure": {"status": "\tpartial\n"}}, "partial", True, None, False, id="padded-partial"),
+    pytest.param({"closure": {"status": " not_run "}}, "not_run", True, None, False, id="padded-not-run"),
+    pytest.param({"closure": {"status": " interrupted "}}, "interrupted", True, None, False, id="padded-interrupted"),
+    pytest.param({"closure": {"status": " unknown "}}, None, True, None, False, id="padded-unknown"),
+    pytest.param({"closure": {"status": " Complete "}}, None, True, None, False, id="padded-case-variant"),
+    pytest.param({"closure": {"status": " \t "}}, None, True, None, False, id="whitespace-only-status"),
+    pytest.param({"closure": {"status": "complete", "targets": []}}, "failed", True, "failed", False, id="unsupported-complete"),
+    pytest.param({"closure": {"status": " complete ", "targets": []}},
+                 "failed", True, "failed", False, id="padded-complete-no-target"),
+    pytest.param({"closure": {"status": " complete ", "targets": [_CLOSURE_FIXTURE_TARGET]}},
+                 "partial", True, "partial", False, id="padded-complete-unattested"),
+    pytest.param({"closure": {"status": " complete ", "targets": [_CLOSURE_FIXTURE_TARGET]}},
+                 "complete", True, "complete", True, id="padded-complete-attested"),
 ])
 def test_cli_offline_revision_displays_only_known_closure_status(
     tmp_path: Path, closure_meta: dict[str, object], status: str | None, show_section: bool,
+    projected_status: str | None, admitted_contact: bool,
 ) -> None:
     sample = "a" * 64
     source = tmp_path / "source.json"
-    original = json.dumps({
+    payload: dict[str, object] = {
         "package_name": "com.example.synthetic",
         "analysis_status": "complete", "completeness": 1.0,
         "meta": {"sample_sha256": sample, **closure_meta},
-    }).encode()
+    }
+    if admitted_contact:
+        payload["endpoints"] = [{**_CLOSURE_FIXTURE_TARGET, "evidences": [{
+            "source": "runtime-pcap", "location": "fixture-memory", "scope": "case_evidence",
+            "provenance": {"member_path": "classes.dex", "member_sha256": sample},
+            "locator": {"byte_offset": 2, "offset_unit": "byte"},
+            "structure_status": "parsed", "reference_status": "referenced", "reachability": "reachable",
+        }]}]
+    original = json.dumps(payload).encode()
     source.write_bytes(original)
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({
@@ -321,10 +346,14 @@ def test_cli_offline_revision_displays_only_known_closure_status(
     assert closure == json.loads((out / "digest.json").read_text(encoding="utf-8"))["closure"]
     assert closure["status"] == status
     published = json.loads((out / "report.json").read_text(encoding="utf-8"))["meta"]
-    if closure_meta == {"closure": {"status": "complete", "targets": []}}:
-        assert published["closure"]["status"] == "failed" and closure["gaps"]
-    else:
+    if projected_status is None:
         assert {key: published[key] for key in ("closure",) if key in published} == closure_meta
+    else:
+        raw_closure = closure_meta["closure"]
+        assert isinstance(raw_closure, dict)
+        assert published["closure"]["status"] == projected_status
+        assert published["closure"]["targets"] == raw_closure["targets"]
+        assert bool(closure["gaps"]) is (projected_status != "complete")
 
     html = (out / "report.html").read_text(encoding="utf-8")
     closure_section = html.partition('<section id="case-closure">')[2].partition("</section>")[0]
