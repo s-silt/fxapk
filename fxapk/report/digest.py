@@ -841,27 +841,15 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         # 枚举值，带"非鉴真"caveat——INHERITED_OFFICIAL 绝不能被排版成鉴真结论。
         raw_summary = meta.get("jadx_ownership_summary")
         if isinstance(raw_summary, dict) and raw_summary.get("status") == "compared":
-
-            def _nonnegative_int(value: object) -> int:
-                # bool 是 int 的子类，但摘要计数不接受布尔值。
-                if isinstance(value, bool):
-                    return 0
-                if isinstance(value, int) and value >= 0:
-                    return value
-                return 0
-
-            matches = _nonnegative_int(raw_summary.get("matches"))
-            modified = _nonnegative_int(raw_summary.get("modified"))
-            absent = _nonnegative_int(raw_summary.get("absent"))
-            unattributed = _nonnegative_int(raw_summary.get("unattributed"))
+            comparison_counts: dict[str, int | None] = {}
+            for bucket in ("matches", "modified", "absent", "unattributed"):
+                value = raw_summary.get(bucket)
+                comparison_counts[bucket] = value if type(value) is int and value >= 0 else None
+            known_counts = [count for count in comparison_counts.values() if count is not None]
+            # 缺失/无效不等于观察到 0。只有四桶都已记录时才复算总数，不信任上游总数。
             jadx_index["comparison"] = {
-                "matches": matches,
-                "modified": modified,
-                "absent": absent,
-                # partial baseline 时 region 全落 unattributed——不透出它，三桶全 0
-                # 会被读成"没有 region"。total 从校验后的四桶复算，不信任上游。
-                "unattributed": unattributed,
-                "total_regions": matches + modified + absent + unattributed,
+                **comparison_counts,
+                "total_regions": sum(known_counts) if len(known_counts) == len(comparison_counts) else None,
                 "authenticity_asserted": raw_summary.get("authenticity_asserted") is True,
                 "caveat": (
                     "此处仅表示 JADX 结构匹配/差异，不是来源真实性或官方身份鉴真；"

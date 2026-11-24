@@ -161,6 +161,8 @@ Hunter 默认在搜索前读取账户免费余额并在本机账本（`~/.fxapk/
 
 HTML 报告的「看到了多少」和 `digest` 的 `visibility.java_scan` 会显示 JADX 已读取和已枚举的 Java 文件数。例如 2/3 只描述本次枚举出的 Java 文件，不是整个 APK 的覆盖率。即使显示 N/N，单个 Java 文件的内容也可能因字节上限而截断。结合 Java 可见性状态和缺口说明阅读；旧报告没有可靠计数时不显示比例。
 
+在 `digest.jadx_index.comparison` 中，缺失或无效的分项计数为 `null`（不是零）；仅当四项都有已记录的非负整数时才计算 `total_regions`。
+
 多索引查询默认读 cache 根的 `fxapk-jadx-index-map.json`（或 `--index-map`）。旧 1.6 索引只为建库时选定值保存 postings，`coverage=complete` 不保证新值已覆盖，查询另报 `query_coverage`。启用 `--jadx-cache-root` 的新分析会在 `query-sources` 保存有界 Java 快照供后续新值查询。快照与 `--out` 回执含受控材料，不公开提交。`callpath` 的 `name_unique` 只是简单名唯一，不证明方法绑定。`jadx compare` 的相似性不代表同一运营者。
 
 ## 语料库
