@@ -175,3 +175,26 @@ def test_visibility_reason_counts_distinct_failed_paths_not_ledger_rows() -> Non
     assert native_state == resource_state == VIS_PARTIAL
     assert native_why == ["2 个 native 文件读取失败（.so 内容未进入本次分析）"]
     assert resource_why == ["2 个资源文件读取失败，内容未进入本次分析"]
+
+
+def test_merge_keeps_one_gap_and_only_allowlisted_worker_diagnostics() -> None:
+    gap = {"path": "res/a.json", "source": "probe", "reason": "parser_worker_failed"}
+    reports = [
+        {**gap, "diagnostic": "worker_nonzero_exit"},
+        {**gap, "diagnostic": "worker_tree_unverified"},
+        {**gap, "diagnostic": "untrusted worker message"},
+        {**gap, "path": "res/b.json", "diagnostic": ["not a valid type"]},
+        {**gap, "path": "res/c.json", "reason": "parser_timeout", "diagnostic": "worker_nonzero_exit"},
+    ]
+    forward: dict = {}
+    reverse: dict = {}
+    for row in reports:
+        pipeline._merge_file_read_gaps(forward, [row])
+    for row in reversed(reports):
+        pipeline._merge_file_read_gaps(reverse, [row])
+    assert forward == reverse
+    assert forward["file_read_visibility"] == [
+        {**gap, "diagnostic": "multiple_worker_failures"},
+        {**gap, "path": "res/b.json"},
+        {**gap, "path": "res/c.json", "reason": "parser_timeout"},
+    ]

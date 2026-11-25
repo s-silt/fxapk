@@ -324,32 +324,24 @@ def _init_pipeline_state(ctx: "AnalysisContext", config: AnalysisConfig) -> _Pip
 def _merge_file_read_gaps(meta: dict, raw_gaps: object) -> None:
     if not isinstance(raw_gaps, list):
         return
-    from fxapk.core.file_read import FILE_READ_FAILURE_REASONS
+    from fxapk.core.file_read import merge_worker_diagnostics, normalize_gap
 
-    merged = {
-        (item["path"], item["source"], item["reason"])
-        for item in meta.get("file_read_visibility", [])
-        if isinstance(item, dict)
-        and isinstance(item.get("path"), str)
-        and isinstance(item.get("source"), str)
-        and isinstance(item.get("reason"), str)
-        and item["reason"] in FILE_READ_FAILURE_REASONS
-    } if isinstance(meta.get("file_read_visibility"), list) else set()
-    for item in raw_gaps:
-        if not isinstance(item, dict):
-            continue
-        path, source, reason = item.get("path"), item.get("source"), item.get("reason")
-        if (
-            isinstance(path, str)
-            and isinstance(source, str)
-            and isinstance(reason, str)
-            and reason in FILE_READ_FAILURE_REASONS
-        ):
-            merged.add((path, source, reason))
+    previous = meta.get("file_read_visibility")
+    merged: dict[tuple[str, str, str], str | None] = {}
+    for raw in (previous if isinstance(previous, list) else [], raw_gaps):
+        for value in raw:
+            item = normalize_gap(value)
+            if item is None:
+                continue
+            key = (item["path"], item["source"], item["reason"])
+            merged[key] = merge_worker_diagnostics(merged.get(key), item.get("diagnostic"))
     if merged:
         meta["file_read_visibility"] = [
-            {"path": path, "source": source, "reason": reason}
-            for path, source, reason in sorted(merged)
+            {
+                "path": path, "source": source, "reason": reason,
+                **({"diagnostic": detail} if detail is not None else {}),
+            }
+            for (path, source, reason), detail in sorted(merged.items())
         ]
 
 

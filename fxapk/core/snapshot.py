@@ -213,7 +213,7 @@ class SnapshotContext:
             from fxapk.core.parser_worker import run_parser_read
 
             try:
-                data, reason = run_parser_read(
+                data, reason, diagnostic = run_parser_read(
                     apk_path=self.apk_path,
                     expected_sha256=self.sample_sha256,
                     file_path=path,
@@ -222,10 +222,10 @@ class SnapshotContext:
                 )
             except Exception:  # noqa: BLE001 — isolated read failures become explicit ledger gaps
                 logger.exception("snapshot isolated read worker failed: %s", path)
-                data, reason = None, "parser_worker_failed"
+                data, reason, diagnostic = None, "parser_worker_failed", None
             if data is None:
                 self.file_read_ledger.record_failure(
-                    path, reason or "unavailable_context"
+                    path, reason or "unavailable_context", diagnostic=diagnostic
                 )
             return data
         # zip 炸弹前置拦截（与串行 ApkContext.read_file 同口径）：声明解压后大小超上限即跳过、不解压。
