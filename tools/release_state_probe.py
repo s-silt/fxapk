@@ -6,17 +6,18 @@ not establish that a draft is absent. This tool neither calls the network nor
 reads credentials.
 
 Capture fields: http_status, body, repository_id, observed_at (UTC or with
-offset), release_request, tag_repository_id, peeled_tag_commit, and
-download_observation. Set release_request to {"operation": "release_by_tag",
-"tag": "<requested tag>"} from the actual GET /repos/{owner}/{repo}/releases/tags/{tag}
-request, including on HTTP errors; do not infer it from the response body.
-A missing or mismatched request does not establish a result for the target tag.
-The latter binds repository_id, release_id and asset_ids (name to REST ID).
-These records must come from the same trusted capture, not from generated
-assertions. The 24-hour freshness limit applies to every HTTP response,
-including 404 and query failures. For a capture attributed to the requested
-repository and tag with a valid timestamp, the receipt preserves the HTTP status for
-diagnosis even when freshness prevents a present-day conclusion.
+offset), release_request, tag_observation, and download_observation.
+Record the actual release request's method and encoded path (GitHub REST GET
+/repos/{owner}/{repo}/releases/tags/{tag}), even on errors. Independently
+supply the expected repository slug and ID; do not infer request identity from
+the response body. Only a matching request can contribute an HTTP status.
+The tag observation binds repository_id, requested tag and peeled_tag_commit.
+The download observation binds repository_id, release_id and asset_ids (name
+to REST ID). Both record their actual observed_at, not the release lookup's
+timestamp. All observations must be at most 24 hours old and within 15
+minutes of each other to support a match. Out-of-window HTTP status is only
+historical context. The caller must supply trusted records; this tool does not
+authenticate a capture or prove the remote state has not changed.
 Inventory is a JSON object of expected asset names to lower-case SHA-256 from
 a trusted build; downloaded must be a separate, stable local directory.
 Exit 0 means these supplied observations match; 2 means not verified.
@@ -33,11 +34,14 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 MAX_JSON = 2 * 1024 * 1024
 MAX_FILE = 128 * 1024 * 1024
 MAX_TOTAL = 512 * 1024 * 1024
 MAX_CAPTURE_AGE = timedelta(hours=24)
+MAX_CAPTURE_SPAN = timedelta(minutes=15)
+REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 ASSET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
@@ -85,10 +89,14 @@ def _timestamp(raw: object) -> datetime | None:
 
 
 def diagnose(
-    captured: object, *, repository_id: int, tag: str, commit: str,
+    captured: object, *, repository: str, repository_id: int, tag: str, commit: str,
     expected: dict[str, str], downloaded: Path | None,
 ) -> Diagnosis:
-    if repository_id <= 0 or not tag or COMMIT.fullmatch(commit) is None or not _inventory_valid(expected):
+    if (
+        repository_id <= 0 or REPOSITORY.fullmatch(repository) is None
+        or repository.split("/")[1] in {".", ".."} or not tag
+        or COMMIT.fullmatch(commit) is None or not _inventory_valid(expected)
+    ):
         return Diagnosis("unknown", "invalid_expectation")
     if not isinstance(captured, dict) or type(captured.get("http_status")) is not int:
         return Diagnosis("unknown", "invalid_capture")
@@ -99,13 +107,15 @@ def diagnose(
     if not _matches_id(captured.get("repository_id"), repository_id):
         return Diagnosis("unknown", "release_repository_mismatch", stamp)
     request = captured.get("release_request")
-    if not isinstance(request, dict) or request.get("operation") != "release_by_tag" or request.get("tag") != tag:
+    expected_path = f"/repos/{repository}/releases/tags/{quote(tag, safe='')}"
+    if not isinstance(request, dict) or request.get("method") != "GET" or request.get("path") != expected_path:
         return Diagnosis("unknown", "release_request_mismatch", stamp)
     status = captured["http_status"]
-    age = datetime.now(timezone.utc) - observed
+    now = datetime.now(timezone.utc)
+    age = now - observed
     if not timedelta(0) <= age <= MAX_CAPTURE_AGE:
         return Diagnosis("unknown", "observation_outside_freshness_window", stamp, status)
-    result = _diagnose_capture(captured, repository_id, tag, commit, expected, downloaded, observed)
+    result = _diagnose_capture(captured, repository_id, tag, commit, expected, downloaded, observed, now)
     return replace(result, observed_at=stamp, http_status=status)
 
 
@@ -115,7 +125,7 @@ def _matches_id(raw: object, expected: int) -> bool:
 
 def _diagnose_capture(
     captured: dict[str, Any], repository_id: int, tag: str, commit: str,
-    expected: dict[str, str], downloaded: Path | None, observed: datetime,
+    expected: dict[str, str], downloaded: Path | None, observed: datetime, now: datetime,
 ) -> Diagnosis:
     status = captured["http_status"]
     if status == 404:
@@ -133,10 +143,16 @@ def _diagnose_capture(
         return Diagnosis("unknown", "invalid_publication_state")
     if type(release_id) is not int or release_id <= 0:
         return Diagnosis("unknown", "invalid_release_id")
-    if not _matches_id(captured.get("tag_repository_id"), repository_id):
+    tag_evidence = captured.get("tag_observation")
+    if not isinstance(tag_evidence, dict) or not _matches_id(tag_evidence.get("repository_id"), repository_id):
         return Diagnosis("unknown", "tag_repository_mismatch")
+    if tag_evidence.get("tag") != tag:
+        return Diagnosis("unknown", "tag_observation_mismatch")
+    tag_time = _timestamp(tag_evidence.get("observed_at"))
+    if tag_time is None or not timedelta(0) <= now - tag_time <= MAX_CAPTURE_AGE:
+        return Diagnosis("unknown", "tag_observation_time_unverified")
     # The release API target_commitish is not the peeled Git tag.
-    observed_commit = captured.get("peeled_tag_commit")
+    observed_commit = tag_evidence.get("peeled_tag_commit")
     if not isinstance(observed_commit, str) or not COMMIT.fullmatch(observed_commit):
         return Diagnosis("unknown", "tag_commit_unverified")
     if observed_commit != commit:
@@ -178,6 +194,12 @@ def _diagnose_capture(
         and all(_matches_id(asset_ids[name], asset_id) for name, asset_id in ids.items())
     ):
         return Diagnosis("unknown", "download_identity_unverified")
+    download_time = _timestamp(download_evidence.get("observed_at"))
+    if download_time is None or not timedelta(0) <= now - download_time <= MAX_CAPTURE_AGE:
+        return Diagnosis("unknown", "download_observation_time_unverified")
+    times = (tag_time, observed, download_time)
+    if max(times) - min(times) > MAX_CAPTURE_SPAN:
+        return Diagnosis("unknown", "observation_batch_mismatch")
     if max(sizes.values()) > MAX_FILE or sum(sizes.values()) > MAX_TOTAL:
         return Diagnosis("unknown", "asset_read_budget")
     try:
@@ -219,12 +241,13 @@ def main() -> int:
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--downloaded", type=Path)
+    parser.add_argument("--repository", required=True, help="Canonical expected GitHub owner/repository")
     parser.add_argument("--repository-id", type=int, required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
     try:
-        result = diagnose(_read_json(args.capture), repository_id=args.repository_id, tag=args.tag, commit=args.commit,
+        result = diagnose(_read_json(args.capture), repository=args.repository, repository_id=args.repository_id, tag=args.tag, commit=args.commit,
                           expected=_read_json(args.inventory), downloaded=args.downloaded)
     except (OSError, ValueError, RecursionError):
         result = Diagnosis("unknown", "input_unreadable_or_invalid")

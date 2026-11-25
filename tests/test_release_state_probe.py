@@ -14,6 +14,8 @@ NAME = "synthetic-0.0.0.whl"
 GOOD = b"synthetic asset bytes"
 GIT_SHA = "a" * 40
 TAG = "v0.0.0"
+REPO = "owner/synthetic"
+REQUEST = {"method": "GET", "path": f"/repos/{REPO}/releases/tags/{TAG}"}
 SHA256 = hashlib.sha256(GOOD).hexdigest()
 REPO_ID, RELEASE_ID, ASSET_ID = 54321, 12345, 42
 ASSET = {"name": NAME, "state": "uploaded", "digest": f"sha256:{SHA256}", "size": len(GOOD), "id": ASSET_ID}
@@ -43,18 +45,19 @@ def probe(tmp_path: Path) -> Probe:
             expected.write_text(json.dumps(inventory), encoding="utf-8")
         body = {"tag_name": TAG, "draft": False, "published_at": "2026-01-01T00:00:00Z",
                 "target_commitish": GIT_SHA, "id": RELEASE_ID, "assets": [ASSET]}
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         capture = tmp_path / "capture.json"
         capture.write_text(raw if raw is not None else json.dumps({
-            "http_status": status, "peeled_tag_commit": observed, "body": {**body, **(release or {})},
-            "repository_id": REPO_ID, "tag_repository_id": REPO_ID,
-            "release_request": {"operation": "release_by_tag", "tag": TAG},
-            "observed_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+            "http_status": status, "body": {**body, **(release or {})},
+            "repository_id": REPO_ID, "release_request": REQUEST, "observed_at": stamp,
+            "tag_observation": {"repository_id": REPO_ID, "tag": TAG, "observed_at": stamp,
+                                "peeled_tag_commit": observed},
             "download_observation": {"repository_id": REPO_ID, "release_id": RELEASE_ID,
-                                     "asset_ids": {NAME: ASSET_ID}},
+                                     "asset_ids": {NAME: ASSET_ID}, "observed_at": stamp},
             **(evidence or {}),
         }), encoding="utf-8")
         args = [sys.executable, "-I", str(TOOL), "--capture", str(capture), "--inventory", str(expected),
-                "--repository-id", str(REPO_ID), "--tag", TAG, "--commit", GIT_SHA]
+                "--repository", REPO, "--repository-id", str(REPO_ID), "--tag", TAG, "--commit", GIT_SHA]
         if use_bytes:
             args += ["--downloaded", str(downloads)]
         if extra:
@@ -72,7 +75,7 @@ def probe(tmp_path: Path) -> Probe:
     ({}, "tag_and_downloaded_bytes_match"),
     ({"release": {"target_commitish": "master"}}, "tag_and_downloaded_bytes_match"),
     ({"evidence": {"repository_id": 7}}, "release_repository_mismatch"),
-    ({"evidence": {"tag_repository_id": 7}}, "tag_repository_mismatch"),
+    ({"evidence": {"tag_observation": {"repository_id": 7}}}, "tag_repository_mismatch"),
     ({"evidence": {"observed_at": "2001-01-01T00:00:00Z"}}, "observation_outside_freshness_window"),
     ({"evidence": {"observed_at": "2200-01-01T00:00:00Z"}}, "observation_outside_freshness_window"),
     ({"evidence": {"observed_at": None}}, "observation_time_unverified"),
@@ -128,6 +131,7 @@ def test_aggregate_asset_budget_is_checked_before_opening_files(probe: Probe) ->
         evidence={"download_observation": {
             "repository_id": REPO_ID, "release_id": RELEASE_ID,
             "asset_ids": {asset["name"]: asset["id"] for asset in assets},
+            "observed_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
         }},
     )
     assert code == 2
@@ -154,10 +158,10 @@ def test_http_status_not_attributed_to_wrong_repository(probe: Probe) -> None:
 
 
 @pytest.mark.parametrize(("status", "query"), [
-    (404, {"operation": "release_by_tag", "tag": "v0.0.1"}),
-    (503, {"operation": "release_by_tag", "tag": "v0.0.1"}),
-    (404, {"operation": "latest_release", "tag": TAG}),
-    (200, {"operation": "release_by_tag", "tag": "v0.0.1"}),
+    (404, {**REQUEST, "path": f"/repos/{REPO}/releases/tags/v0.0.1"}),
+    (503, {**REQUEST, "path": f"/repos/{REPO}/releases/tags/v0.0.1"}),
+    (404, {**REQUEST, "path": f"/repos/{REPO}/releases/latest"}),
+    (200, {**REQUEST, "path": f"/repos/{REPO}/releases/tags/v0.0.1"}),
     (404, None),
 ])
 def test_release_query_identity_is_required(probe: Probe, status: int, query: object) -> None:
@@ -170,9 +174,60 @@ def test_release_query_identity_is_required(probe: Probe, status: int, query: ob
 
 def test_stale_wrong_tag_cannot_report_http_status(probe: Probe) -> None:
     code, diagnostic = probe(status=404, evidence={
-        "release_request": {"operation": "release_by_tag", "tag": "v0.0.1"},
+        "release_request": {**REQUEST, "path": f"/repos/{REPO}/releases/tags/v0.0.1"},
         "observed_at": "2001-01-01T00:00:00Z",
     })
     assert code == 2
     assert diagnostic["reason"] == "release_request_mismatch"
     assert diagnostic["http_status"] is None
+
+
+@pytest.mark.parametrize(("status", "path"), [
+    (404, "/repos/other/synthetic/releases/tags/v0.0.0"),
+    (503, "/repos/other/synthetic/releases/tags/v0.0.0"),
+    (200, "/repos/other/synthetic/releases/tags/v0.0.0"),
+])
+def test_wrong_repository_path_not_attributed(probe: Probe, status: int, path: str) -> None:
+    code, result = probe(status=status, evidence={
+        "release_request": {**REQUEST, "path": path},
+    })
+    assert code == 2
+    assert result["reason"] == "release_request_mismatch"
+    assert result["http_status"] is None
+
+
+@pytest.mark.parametrize(("source", "stamp"), [
+    ("tag_observation", "2001-01-01T00:00:00Z"),
+    ("download_observation", "2001-01-01T00:00:00Z"),
+    ("tag_observation", "2200-01-01T00:00:00Z"),
+    ("download_observation", "2200-01-01T00:00:00Z"),
+    ("tag_observation", None),
+    ("download_observation", None),
+])
+def test_independent_observation_times_required(probe: Probe, source: str, stamp: str | None) -> None:
+    record = {
+        "repository_id": REPO_ID, "release_id": RELEASE_ID, "asset_ids": {NAME: ASSET_ID},
+        "tag": TAG, "peeled_tag_commit": GIT_SHA, "observed_at": stamp,
+    }
+    code, result = probe(evidence={source: record})
+    assert code == 2
+    assert result["state"] == "unknown"
+    assert result["reason"] == f"{source}_time_unverified"
+
+
+def test_individually_fresh_observations_cannot_span_unrelated_batches(probe: Probe) -> None:
+    code, result = probe(evidence={"tag_observation": {
+        "repository_id": REPO_ID, "tag": TAG, "peeled_tag_commit": GIT_SHA,
+        "observed_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+    }})
+    assert code == 2
+    assert result["reason"] == "observation_batch_mismatch"
+
+
+def test_same_repository_tag_observation_must_match_requested_tag(probe: Probe) -> None:
+    code, result = probe(evidence={"tag_observation": {
+        "repository_id": REPO_ID, "tag": "v0.0.1", "peeled_tag_commit": GIT_SHA,
+        "observed_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+    }})
+    assert code == 2
+    assert result["reason"] == "tag_observation_mismatch"
