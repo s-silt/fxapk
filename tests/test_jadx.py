@@ -35,10 +35,11 @@ def _owned(
     terminated: bool = True,
     forced: bool = False,
     stderr: str = "",
+    stdout: str = "",
     reasons: tuple[str, ...] = (),
 ) -> proctree.OwnedRun:
     return proctree.OwnedRun(
-        returncode=None if timed_out else returncode, stdout="", stderr=stderr,
+        returncode=None if timed_out else returncode, stdout=stdout, stderr=stderr,
         timed_out=timed_out, ownership_complete=ownership,
         termination_complete=terminated, forced_tree_kill=forced,
         reason_codes=tuple(sorted(set(reasons))),
@@ -57,7 +58,7 @@ def _patch_run_owned(monkeypatch: pytest.MonkeyPatch, handler) -> list[dict]:  #
     return calls
 
 
-def _writes(java_body: str, returncode: int = 0, stderr: str = ""):
+def _writes(java_body: str, returncode: int = 0, stderr: str = "", *, stdout: str = ""):
     """替身 handler：把 java_body 写进 jadx 的 -d 输出目录后返回对应结局。"""
 
     def _handler(cmd):  # noqa: ANN001
@@ -65,7 +66,7 @@ def _writes(java_body: str, returncode: int = 0, stderr: str = ""):
         pkg = out_dir / "sources" / "com" / "x"
         pkg.mkdir(parents=True, exist_ok=True)
         (pkg / "C.java").write_text(java_body, encoding="utf-8")
-        return _owned(returncode, stderr=stderr)
+        return _owned(returncode, stderr=stderr, stdout=stdout)
 
     return _handler
 
@@ -137,6 +138,32 @@ def test_clean_run_receipt_complete(monkeypatch, tmp_path) -> None:
     assert not scan["scan_limit_hit"]
     assert scan["selected_paths_digest"].startswith("sha256:")
     assert _java_vis(result.meta) == "complete"
+
+
+@pytest.mark.parametrize(("stdout", "stderr", "partial"), [
+    ("INFO  - loading ...\r\nERROR - Failed to read zip entry: fixture.apk:classes2.dex\r\n", "", True),
+    ("INFO  - done", "ERROR - Failed to read zip entry: fixture.apk:classes2.dex", True),
+    ("ERROR - Failed to read zip entry: jadx.zip.fallback.FallbackZipEntry@af23\njava.lang.RuntimeException: synthetic", "", True),
+    ("ERROR - Failed to read zip entry: jadx.zip.fallback.OtherEntry@af23", "", False),
+    ("WARN  - Failed to read zip entry: fixture.apk:classes2.dex", "", False),
+    ("INFO  - literal ERROR - Failed to read zip entry: fixture.apk:classes2.dex", "", False),
+    ("ERROR - Failed to read zip entry: fixture.apk:assets/example.txt", "", False),
+])
+def test_zero_exit_dex_read_error_preserves_finding_without_complete_coverage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout: str, stderr: str, partial: bool,
+) -> None:
+    java = 'class A { String u = "https://clean.example.com/x"; }'
+    _patch_run_owned(monkeypatch, _writes(java, stdout=stdout, stderr=stderr))
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+
+    receipt = result.meta["jadx_receipt"]
+    assert receipt["runs"][0]["returncode"] == 0
+    assert receipt["scan"]["files_total"] == receipt["scan"]["files_scanned"] == 1
+    assert receipt["complete"] is not partial
+    assert _java_vis(result.meta) == ("partial" if partial else "complete")
+    assert receipt["reason_codes"] == (["producer_dex_input_read_error", "producer_partial"] if partial else [])
+    assert "fixture.apk" not in repr(receipt)
+    assert "https://clean.example.com/x" in {item.value for item in result.endpoints}
 
 
 def test_timeout_records_status_not_crash(monkeypatch, tmp_path) -> None:
@@ -865,7 +892,7 @@ def jadx_coverage_report(
     calls = _patch_run_owned(monkeypatch, write_java)
     result = JadxAnalyzer().analyze(FakeContext(apk_path=str(apk)))
     assert calls and result.error is None
-    meta = dict(result.meta, dex_available=True, dex_scanned=True)
+    meta: dict[str, Any] = dict(result.meta, dex_available=True, dex_scanned=True)
     if mode == "legacy":
         meta["jadx_receipt"] = {
             k: v for k, v in meta["jadx_receipt"].items() if k != "scan"

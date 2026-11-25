@@ -33,15 +33,18 @@ def _stub_resolve_jadx(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: (["jadx"], {}))
 
 
-def _owned(returncode: int | None = 0, *, stdout: str = "") -> proctree.OwnedRun:
+def _owned(returncode: int | None = 0, *, stdout: str = "", timed_out: bool = False) -> proctree.OwnedRun:
     return proctree.OwnedRun(
         returncode=returncode, stdout=stdout, stderr="",
-        timed_out=False, ownership_complete=True,
+        timed_out=timed_out, ownership_complete=True,
         termination_complete=True, forced_tree_kill=False, reason_codes=(),
     )
 
 
-def _patch(monkeypatch: pytest.MonkeyPatch, *, version: str | None = "1.5.2") -> list[dict]:
+def _patch(
+    monkeypatch: pytest.MonkeyPatch, *, version: str | None = "1.5.2",
+    diagnostic: str = "", returncode: int | None = 0, timed_out: bool = False,
+) -> list[dict]:
     """run_owned 替身：--version 调用返回版本串；其余按 jadx 执行写合成 java 树。
 
     version=None 模拟版本探测失败（非零退出 + 空输出）。
@@ -58,7 +61,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch, *, version: str | None = "1.5.2") ->
         pkg = out_dir / "sources" / "com" / "x"
         pkg.mkdir(parents=True, exist_ok=True)
         (pkg / "C.java").write_text(_JAVA_BODY, encoding="utf-8")
-        return _owned(0)
+        return _owned(returncode, stdout=diagnostic, timed_out=timed_out)
 
     monkeypatch.setattr(jadx.proctree, "run_owned", _run)
     return calls
@@ -143,6 +146,40 @@ def test_reuse_on_second_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert first.meta["jadx_index_status"] == "built"
     assert second.meta["jadx_index_status"] == "reused"
     assert second.meta["jadx_index_key"] == first.meta["jadx_index_key"]
+
+
+@pytest.mark.parametrize("preexisting", [False, True])
+@pytest.mark.parametrize(("returncode", "timed_out"), [
+    (0, False), (3, False), (None, True), (3, True),
+])
+def test_unread_input_never_publishes_or_reuses_an_index_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, preexisting: bool, returncode: int | None, timed_out: bool,
+) -> None:
+    ctx = _ctx(tmp_path, dex_names=("classes.dex", "classes2.dex"))
+    old_key = None
+    if preexisting:
+        _patch(monkeypatch)
+        old_key = JadxAnalyzer().analyze(ctx).meta["jadx_index_key"]
+        assert _load(ctx, old_key).coverage == "complete"
+    _patch(
+        monkeypatch, diagnostic="ERROR - Failed to read zip entry: fixture.apk:classes2.dex",
+        returncode=returncode, timed_out=timed_out,
+    )
+    for _ in range(2):
+        result = JadxAnalyzer().analyze(ctx)
+        receipt = result.meta["jadx_receipt"]
+        assert not receipt["complete"] and result.meta["jadx_endpoint_count"] >= 1
+        assert receipt["status"] == ("timeout" if timed_out else "partial")
+        assert receipt["runs"][0]["returncode"] == returncode
+        assert "producer_dex_input_read_error" in receipt["reason_codes"]
+        assert result.meta["jadx_index_status"] == receipt["index"]["status"] == "disabled"
+        assert "producer_dex_input_read_error" in receipt["index"]["reason_codes"]
+        assert "jadx_index_key" not in result.meta and "key" not in receipt["index"]
+        assert "jadx_query_sources" not in result.meta
+    if old_key is not None:
+        assert _load(ctx, old_key).coverage == "complete"
+    else:
+        assert not (tmp_path / "jadx-cache").exists()
 
 
 def test_meta_keys_registered() -> None:
