@@ -53,7 +53,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Mapping, TypeGuard
 
 from fxapk.core.corpus_errors import CorpusRecordError, CorpusRecordErrorCode
 from fxapk.core.redact import safe_exception_diagnostic, safe_exception_text
@@ -672,6 +672,10 @@ def _count(report: dict, key: str) -> int:
     return len(v) if isinstance(v, list) else 0
 
 
+def _visibility_text_list(value: object) -> TypeGuard[list[str]]:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
 def visibility_summary(report: Any) -> dict | None:
     """``meta.visibility`` 的可比结构化指纹；**无求值（旧版报告）→ None**，与「求过值但全空」严格区分。
 
@@ -691,31 +695,50 @@ def visibility_summary(report: Any) -> dict | None:
     vis = _meta(report).get("visibility")
     if not isinstance(vis, dict):
         return None
-    raw_sources = vis.get("sources")
-    sources = raw_sources if isinstance(raw_sources, dict) else {}
-    raw_claims = vis.get("claims")
-    claims = raw_claims if isinstance(raw_claims, dict) else {}
-    blocked = vis.get("blocked_claims")
-    actions = vis.get("next_actions")
+    raw_sources = vis.get("sources", {})
+    raw_claims = vis.get("claims", {})
+    blocked = vis.get("blocked_claims", [])
+    actions = vis.get("next_actions", [])
+    degraded = vis.get("degraded", False)
+    remediation = vis.get("remediation")
+    if (
+        not isinstance(raw_sources, dict)
+        or not isinstance(raw_claims, dict)
+        or not _visibility_text_list(blocked)
+        or not _visibility_text_list(actions)
+        or not isinstance(degraded, bool)
+        or (remediation is not None and not isinstance(remediation, str))
+    ):
+        return None
+
+    sources: dict[str, str] = {}
+    for name, entry in raw_sources.items():
+        if not isinstance(name, str):
+            return None
+        if isinstance(entry, str):
+            continue  # Keep the existing corpus fingerprint for older scalar source entries.
+        if not isinstance(entry, dict) or not isinstance(level := entry.get("visibility"), str):
+            return None
+        sources[name] = level
+
+    claims: dict[str, dict[str, list[str]]] = {}
+    for claim, entry in raw_claims.items():
+        if not isinstance(claim, str) or not isinstance(entry, dict):
+            return None
+        missing = entry.get("missing_sources", [])
+        unassessed = entry.get("unassessed_sources", [])
+        if not _visibility_text_list(missing) or not _visibility_text_list(unassessed):
+            return None
+        # Confirmed missing and merely unassessed inputs have different effects on closure.
+        claims[claim] = {"missing_sources": sorted(missing), "unassessed_sources": sorted(unassessed)}
+
     return {
-        "blocked_claims": sorted(str(b) for b in blocked) if isinstance(blocked, list) else [],
-        "sources": {
-            str(k): _s(v.get("visibility")) for k, v in sources.items() if isinstance(v, dict)
-        },
-        # ★「确证盲区」与「未评估」之分也要收：同一条主张从 missing 退成 unassessed 时，
-        #   blocked_claims、各源档位、degraded、补法条数可以逐字不变，而 closure 的封顶语义
-        #   已经从「记 gap 封顶 partial」松成「只 warn」——办案人那边看到的警示悄悄少了一条。
-        #   这两个列表是 sources（已在指纹里）+ 分档语义的派生值，只在该变的时候变，不会刷屏。
-        "claims": {
-            str(c): {
-                "missing_sources": sorted(str(s) for s in (v.get("missing_sources") or [])),
-                "unassessed_sources": sorted(str(s) for s in (v.get("unassessed_sources") or [])),
-            }
-            for c, v in claims.items() if isinstance(v, dict)
-        },
-        "degraded": bool(vis.get("degraded")),
-        "remediation": _s(vis.get("remediation")) or None,
-        "next_actions": len(actions) if isinstance(actions, list) else 0,
+        "blocked_claims": sorted(blocked),
+        "sources": sources,
+        "claims": claims,
+        "degraded": degraded,
+        "remediation": (remediation or None),
+        "next_actions": len(actions),
     }
 
 

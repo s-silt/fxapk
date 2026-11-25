@@ -895,3 +895,24 @@ def test_unreadable_and_conflicting_provenance_keep_both_reasons(tmp_path):
     assert "advice_only_gaps" not in summary
     assert len(delta.notes) == 2
     assert not delta.findings_added and summary["hardening_newly_detected"] == 0
+
+
+@pytest.mark.parametrize("bad_fields", [
+    {"blocked_claims": False},
+    {"claims": {"static_endpoint_exhaustive": {"missing_sources": 7}}},
+])
+def test_visibility_malformed_fingerprint_is_unavailable_in_corpus_comparison(
+    tmp_path, bad_fields: dict,
+) -> None:
+    before = _vis()
+    malformed = {**before, **bad_fields}
+    first = _report("s1", "1.0.0", visibility=before)
+    next_report = _report("s1", "1.1.0", visibility=malformed)
+    root = _seed(tmp_path, [first, next_report])
+
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert summary["visibility_assessment_lost"] == 1
+    assert summary["visibility_comparable"] == summary["visibility_blocked_cleared"] == 0
+    assert diffs[0].visibility_from is not None and diffs[0].visibility_to is None
+    assert not diffs[0].comparison_blocked  # Other report dimensions remain available.
+    assert any("缺失可见性求值" in note for note in diffs[0].notes)
