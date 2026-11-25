@@ -864,3 +864,45 @@ def test_budget_note_does_not_mix_restored_history_with_remaining_rows(
     assert (historical_note in html) is keep_historical_count
     assert (f"[{source}] {historical_note}" in digest["notes"]) is keep_historical_count
     assert (current_note in html, f"[{source}] {current_note}" in digest["notes"]) == (False, False)
+
+
+@pytest.mark.parametrize(
+    ("source", "count_key", "paths"),
+    [
+        ("resource", "resource_files_scanned", ("assets/a.txt", "assets/b.txt")),
+        ("native", "native_files_scanned", ("lib/arm64/a.so", "lib/arm64/b.so")),
+    ],
+)
+def test_budget_note_saved_projection_preserves_count_until_snapshot_refresh(
+    source: str, count_key: str, paths: tuple[str, str],
+) -> None:
+    from copy import deepcopy
+
+    from fxapk.core.closure import refresh_visibility_snapshot
+
+    report = _report(**{count_key: 1}, file_read_visibility=[
+        {"path": path, "source": "probe", "reason": "decompression_budget"}
+        for path in paths
+    ])
+    meta = report["meta"]
+    meta["visibility"] = V.assess(report)
+    previous_blocked = meta["visibility"]["blocked_claims"]
+    meta["file_read_visibility"].pop()  # Keys still match the saved provenance.
+
+    for refreshed, expected, other in [(False, 2, 1), (True, 1, 2)]:
+        if refreshed:
+            refresh_visibility_snapshot(meta)
+        before = deepcopy(report)
+        wanted = f"其中 {expected} 个文件因累计解压预算耗尽未读取"
+        unexpected = f"其中 {other} 个文件因累计解压预算耗尽未读取"
+        digest = build_digest(report)["visibility"]
+        html = render_to_string(Report(
+            package_name="com.test", meta=meta, leads=[], endpoints=[], findings=[],
+            analyzer_status=[],
+        ))
+        assert report == before
+        assert digest["sources"][source] == "partial"
+        assert sorted(row["claim"] for row in digest["blocked_claims"]) == previous_blocked
+        assert wanted in html and unexpected not in html
+        assert digest["notes"].count(f"[{source}] {wanted}") == 1
+        assert f"[{source}] {unexpected}" not in digest["notes"]

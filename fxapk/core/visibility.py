@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -627,6 +628,10 @@ def _file_read_gaps(meta: dict, *, native: bool) -> list[dict]:
     return gaps
 
 
+_READ_BUDGET_NOTE = "其中 {count} 个文件因累计解压预算耗尽未读取"
+_READ_BUDGET_PATTERN = re.compile(re.escape(_READ_BUDGET_NOTE).replace(r"\{count\}", r"[1-9][0-9]*"))
+
+
 def _with_read_budget_notes(visibility: dict[str, Any], meta: dict) -> dict[str, Any]:
     """Add only deduplicated counts, retaining the already evaluated source states."""
     raw = meta.get("file_read_visibility")
@@ -654,10 +659,16 @@ def _with_read_budget_notes(visibility: dict[str, Any], meta: dict) -> dict[str,
         # are not a reliable basis for adding a second, potentially conflicting count.
         if RESTORED_SOURCE_NOTE in why:
             continue
-        detail = f"其中 {len(files)} 个文件因累计解压预算耗尽未读取"
+        detail = _READ_BUDGET_NOTE.format(count=len(files))
+        # Read-only views may augment a legacy snapshot that has no budget note,
+        # but must not mix a saved count with one derived from different raw rows.
+        prefix = f"[{source}] "
+        previous = [*why, *(n.removeprefix(prefix) for n in notes if isinstance(n, str) and n.startswith(prefix))]
+        if any(isinstance(n, str) and n != detail and _READ_BUDGET_PATTERN.fullmatch(n) for n in previous):
+            continue
         if detail not in why:
             updated[source] = {**entry, "why": [*why, detail]}
-        note = f"[{source}] {detail}"
+        note = prefix + detail
         if note not in notes:
             notes.append(note)
     if not updated and notes == visibility.get("notes", []):
