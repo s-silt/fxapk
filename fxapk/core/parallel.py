@@ -26,6 +26,7 @@ import time
 
 import psutil
 
+from fxapk.core.file_read import normalize_gap
 from fxapk.core.models import AnalyzerResult
 from fxapk.core.registry import discover_analyzers
 
@@ -261,18 +262,7 @@ def _invoke_analyzer(ctx: object, name: str, analyzer: object) -> tuple:
         raw = end_scope(name)
         if not isinstance(raw, list):
             return []
-        gaps: list[dict[str, str]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            path, source, reason = item.get("path"), item.get("source"), item.get("reason")
-            if (
-                isinstance(path, str)
-                and isinstance(source, str)
-                and isinstance(reason, str)
-            ):
-                gaps.append({"path": path, "source": source, "reason": reason})
-        return gaps
+        return [gap for item in raw if (gap := normalize_gap(item)) is not None]
     try:
         result = getattr(analyzer, "analyze")(ctx)
     except Exception as exc:  # noqa: BLE001 — 单分析器失败不炸 worker，回传错误

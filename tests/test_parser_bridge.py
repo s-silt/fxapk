@@ -450,6 +450,56 @@ def test_lazy_read_generic_failure_logs_only_safe_runner_fields(
     assert "fixture-private" not in messages[0]
 
 
+def test_worker_failures_stay_bound_to_the_right_file_in_reversed_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fxapk.core import pipeline
+
+    first, second = "assets/first.bin", "assets/second.bin"
+    apk_path = tmp_path / "synthetic.apk"
+    _make_apk(apk_path, **{first: b"one", second: b"two"})
+    serial_context = _snapshot(apk_path, _limits())
+    worker_context = pickle.loads(pickle.dumps(serial_context))
+    runs = {
+        first: OwnedRun(3, "", "", False, True, True, False, (), memory_limit_enforced=True),
+        second: OwnedRun(0, "", "", False, False, False, True, (), memory_limit_enforced=True),
+    }
+
+    def run_owned_fixture(argv, **_kwargs):
+        import json
+
+        request = json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
+        return runs[request["file_path"]]
+
+    class Reader:
+        name = "synthetic_reader"
+
+        def __init__(self, order: tuple[str, str]) -> None:
+            self.order = order
+
+        def analyze(self, ctx):
+            for member in self.order:
+                assert ctx.read_file(member) is None
+            return AnalyzerResult(self.name)
+
+    monkeypatch.setattr("fxapk.core.proctree.run_owned", run_owned_fixture)
+    serial = parallel._analyze_serial(serial_context, [(Reader.name, Reader((first, second)))])
+    monkeypatch.setitem(parallel._WORKER_STATE, "snapshot", worker_context)
+    monkeypatch.setitem(parallel._WORKER_STATE, "analyzers", {Reader.name: Reader((second, first))})
+    worker = parallel._worker_analyze(Reader.name)
+    assert serial == [worker]
+    result = worker[1]
+    assert result is not None
+    meta: dict = {}
+    pipeline._merge_file_read_gaps(meta, result.input_gaps)
+    assert meta["file_read_visibility"] == [
+        {"path": first, "source": Reader.name, "reason": "parser_worker_failed",
+         "diagnostic": "worker_nonzero_exit"},
+        {"path": second, "source": Reader.name, "reason": "parser_worker_failed",
+         "diagnostic": "worker_tree_unverified"},
+    ]
+
+
 def test_parser_read_rejects_data_with_failure_and_changed_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -463,7 +513,7 @@ def test_parser_read_rejects_data_with_failure_and_changed_policy(
     }
     monkeypatch.setattr(parser_worker, "_run_operation", lambda *_a, **_kw: dict(base_response))
 
-    data, reason = parser_worker.run_parser_read(
+    data, reason, diagnostic = parser_worker.run_parser_read(
         apk_path="synthetic.apk",
         expected_sha256="a" * 64,
         file_path="assets/sample.bin",
@@ -473,6 +523,7 @@ def test_parser_read_rejects_data_with_failure_and_changed_policy(
 
     assert data is None
     assert reason == "parser_invalid_response"
+    assert diagnostic is None
 
     changed_policy = dict(base_response)
     changed_policy["failure_reason"] = None
@@ -483,7 +534,7 @@ def test_parser_read_rejects_data_with_failure_and_changed_policy(
         parser_worker, "_run_operation", lambda *_a, **_kw: dict(changed_policy)
     )
 
-    data, reason = parser_worker.run_parser_read(
+    data, reason, diagnostic = parser_worker.run_parser_read(
         apk_path="synthetic.apk",
         expected_sha256="a" * 64,
         file_path="assets/sample.bin",
@@ -493,6 +544,7 @@ def test_parser_read_rejects_data_with_failure_and_changed_policy(
 
     assert data is None
     assert reason == "parser_invalid_response"
+    assert diagnostic is None
 
 
 def test_parser_load_rejects_snapshot_with_changed_policy(

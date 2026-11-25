@@ -24,9 +24,12 @@ _REQUEST_MAX_BYTES = 8 * 1024 * 1024
 
 
 class ParserBridgeError(RuntimeError):
-    def __init__(self, message: str, receipt: dict[str, Any]) -> None:
+    def __init__(
+        self, message: str, receipt: dict[str, Any], *, read_diagnostic: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.receipt = receipt
+        self.read_diagnostic = read_diagnostic
 
 
 def _backend() -> tuple[str, str]:
@@ -442,8 +445,15 @@ def _run_operation(request: dict[str, Any], limits: ParserLimits) -> dict[str, A
             )
             reason = _fail_reason(run)
             if reason:
+                read_diagnostic = None
                 if request["operation"] == "read_file" and reason == "parser_worker_failed":
-                    # Keep the stable ledger reason; expose only operational fields to logs.
+                    if not run.ownership_complete or not run.termination_complete:
+                        read_diagnostic = "worker_tree_unverified"
+                    elif run.forced_tree_kill:
+                        read_diagnostic = "worker_tree_forced_cleanup"
+                    elif run.returncode not in (None, 0):
+                        read_diagnostic = "worker_nonzero_exit"
+                    # Log bounded operational fields, not sample data or child output.
                     logger.warning(
                         "isolated parser read failed phase=owned_run returncode=%s "
                         "ownership_complete=%s termination_complete=%s forced_tree_kill=%s "
@@ -462,6 +472,7 @@ def _run_operation(request: dict[str, Any], limits: ParserLimits) -> dict[str, A
                         forced_tree_kill=run.forced_tree_kill,
                         memory_limit_enforced=run.memory_limit_enforced,
                     ),
+                    read_diagnostic=read_diagnostic,
                 )
             try:
                 response = _loads(run.stdout)
@@ -609,7 +620,7 @@ def run_parser_read(
     file_path: str,
     limits: ParserLimits,
     declared_sizes: dict[str, int],
-) -> tuple[bytes | None, str | None]:
+) -> tuple[bytes | None, str | None, str | None]:
     request = {
         "version": IPC_VERSION,
         "operation": "read_file",
@@ -624,7 +635,9 @@ def run_parser_read(
     try:
         response = _run_operation(request, limits)
     except ParserBridgeError as exc:
-        return None, str(exc.receipt.get("reason") or "parser_worker_failed")
+        return (
+            None, str(exc.receipt.get("reason") or "parser_worker_failed"), exc.read_diagnostic,
+        )
     response.pop("_run_receipt", None)
     if response["kind"] == "error":
         reason = response.get("reason")
@@ -634,28 +647,28 @@ def run_parser_read(
             "parser_memory_limit",
         }:
             reason = "parser_worker_failed"
-        return None, reason
+        return None, reason, None
     if response["kind"] != "read_file" or set(response) != {
         "version", "kind", "data", "failure_reason", "parser_limits",
     }:
-        return None, "parser_invalid_response"
+        return None, "parser_invalid_response", None
     if response["parser_limits"] != limits.to_dict():
-        return None, "parser_invalid_response"
+        return None, "parser_invalid_response", None
     failure_reason = response["failure_reason"]
     if failure_reason is not None and not isinstance(failure_reason, str):
-        return None, "parser_invalid_response"
+        return None, "parser_invalid_response", None
     encoded = response["data"]
     if encoded is not None and failure_reason is not None:
-        return None, "parser_invalid_response"
+        return None, "parser_invalid_response", None
     if encoded is None:
-        return None, failure_reason or "unavailable_context"
+        return None, failure_reason or "unavailable_context", None
     if not isinstance(encoded, str) or len(encoded) > limits.max_output_bytes:
-        return None, "parser_invalid_response"
+        return None, "parser_invalid_response", None
     try:
         data = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error):
-        return None, "parser_invalid_response"
-    return data, None
+        return None, "parser_invalid_response", None
+    return data, None, None
 
 
 def _handle_request(request: dict[str, Any]) -> dict[str, Any]:
