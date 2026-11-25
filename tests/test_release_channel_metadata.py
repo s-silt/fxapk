@@ -139,3 +139,25 @@ def test_channel_specific_digest_encoding_is_required(tmp_path: Path, channel: s
     assert code == 2
     assert receipt["state"] == "unknown"
     assert receipt[channel]["reason"] == "digest_unverified"
+
+
+@pytest.mark.parametrize("channel", ["github", "pypi"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_incomplete_file_does_not_mask_other_digest_conflict(
+    tmp_path: Path, channel: str, reverse: bool,
+) -> None:
+    github, pypi = _capture("github"), _capture("pypi")
+    if channel == "github":
+        files = github["body"]["assets"]
+        files[0].update(state="open", digest=None)
+        files[1]["digest"] = f"sha256:{'c' * 64}"
+    else:
+        files = pypi["body"]["urls"]
+        files[0]["yanked"] = True
+        files[1]["digests"]["sha256"] = "c" * 64
+    if reverse:
+        files.reverse()
+    code, receipt = _run(tmp_path, github, pypi)
+    assert code == 2
+    assert receipt["state"] == "conflict"
+    assert receipt[channel]["reason"] == "build_digest_mismatch"

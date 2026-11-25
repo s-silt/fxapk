@@ -98,32 +98,52 @@ def _inspect(
     if not isinstance(files, list):
         return result("unknown", "invalid_file_list")
     found: set[str] = set()
+    issues: set[str] = set()
     for item in files:
         if not isinstance(item, dict) or not isinstance(name := item.get("name" if github else "filename"), str):
-            return result("unknown", "invalid_file_list")
+            issues.add("invalid_file_list")
+            continue
         if name not in expected and github:
             continue
         if name in found or name not in expected:
-            return result("conflict", "unexpected_or_duplicate_core_file")
+            issues.add("unexpected_or_duplicate_core_file")
+            continue
         found.add(name)
         if github:
             if item.get("state") != "uploaded":
-                return result("incomplete", "asset_not_uploaded")
+                issues.add("asset_not_uploaded")
+                continue
             value = item.get("digest")
             digest = value[7:] if isinstance(value, str) and value.startswith("sha256:") else None
         else:
             if item.get("yanked") is True:
-                return result("incomplete", "file_yanked")
+                issues.add("file_yanked")
+                continue
             if item.get("yanked") is not False:
-                return result("unknown", "file_yank_state_unverified")
+                issues.add("file_yank_state_unverified")
+                continue
             digests = item.get("digests")
             digest = digests.get("sha256") if isinstance(digests, dict) else None
         if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
-            return result("unknown", "digest_unverified")
+            issues.add("digest_unverified")
+            continue
         if digest != expected[name]:
-            return result("conflict", "build_digest_mismatch")
+            issues.add("build_digest_mismatch")
     if found != expected.keys():
-        return result("incomplete", "core_file_missing")
+        issues.add("core_file_missing")
+    # Prefer observed conflicts, then unverified evidence, then incompleteness.
+    for state, reason in (
+        ("conflict", "unexpected_or_duplicate_core_file"),
+        ("conflict", "build_digest_mismatch"),
+        ("unknown", "invalid_file_list"),
+        ("unknown", "file_yank_state_unverified"),
+        ("unknown", "digest_unverified"),
+        ("incomplete", "asset_not_uploaded"),
+        ("incomplete", "file_yanked"),
+        ("incomplete", "core_file_missing"),
+    ):
+        if reason in issues:
+            return result(state, reason)
     return result("metadata_matches", "expected_core_digests_match_build_manifest")
 
 
