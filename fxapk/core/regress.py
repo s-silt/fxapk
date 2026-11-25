@@ -304,8 +304,8 @@ def diff_versions(
         ea, eb = idx_a[sha], idx_b[sha]
         ra, rb = _load_report(root, ea), _load_report(root, eb)
         case_ids = _case_ids(ea, eb)
-        visibility_a, invalid_a = corpus.inspect_visibility(ra)
-        visibility_b, invalid_b = corpus.inspect_visibility(rb)
+        visibility_a, invalid_a = corpus.inspect_visibility(ra, reconcile_java=True)
+        visibility_b, invalid_b = corpus.inspect_visibility(rb, reconcile_java=True)
         d = SampleDiff(
             sample_sha256=sha,
             package_name=eb.get("package_name") or ea.get("package_name"),

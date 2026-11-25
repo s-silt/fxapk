@@ -1042,3 +1042,63 @@ def test_visibility_diagnostic_is_counted_when_counterpart_unreadable(tmp_path, 
     assert summary["changed"] == summary["visibility_comparable"] == summary["visibility_assessment_lost"] == 0
     assert summary["comparison_blocked_pairs"] == summary["unreadable_report_pairs"] == 1
     assert summary["invalid_visibility_pairs"] == 1
+
+
+@pytest.mark.parametrize(("truncated", "expected_cleared"), [(1, 0), (0, 1), ("1", 1)])
+def test_regress_projects_only_verified_java_receipt_conflicts(tmp_path, truncated, expected_cleared):
+    from copy import deepcopy
+
+    from fxapk.core import visibility
+
+    saved = {"sources": {"java": {"visibility": "complete", "why": []}}, "claims": {},
+             "blocked_claims": [], "next_actions": [], "degraded": False}
+    clipped = {"status": "ok", "complete": True, "reason_codes": [],
+               "scan": {"files_scanned": 3, "files_total": 3, "truncated_files": 1}}
+    previous = visibility.project_persisted_visibility({"visibility": saved, "jadx_receipt": clipped})
+    old = _report("synthetic-jadx", "2.0.0", visibility=previous)
+    new = _report("synthetic-jadx", "2.1.0", visibility=saved)
+    old["meta"]["jadx_receipt"] = deepcopy(clipped)
+    new["meta"]["jadx_receipt"] = deepcopy(clipped)
+    new["meta"]["jadx_receipt"]["scan"]["truncated_files"] = truncated
+    snapshot = deepcopy(new)
+    root = _seed(tmp_path, [old, new])
+
+    [delta], summary = regress.load_and_diff(root, "2.0.0@dd", "2.1.0@dd")
+    assert summary["visibility_comparable"] == 1
+    assert summary["visibility_blocked_cleared"] == expected_cleared
+    assert delta.changed is bool(expected_cleared)
+    assert delta.visibility_to["sources"]["java"] == ("complete" if expected_cleared else "partial")
+    assert corpus.manifest_entry(new)["visibility"]["sources"]["java"] == "complete"
+    assert json.loads((root / corpus.report_relpath(new)).read_bytes()) == snapshot
+    assert new == snapshot
+
+
+def test_regress_verified_java_file_limit_keeps_claims_without_byte_truncation(tmp_path):
+    from copy import deepcopy
+
+    from fxapk.core import visibility
+
+    full = {"sources": {"java": {"visibility": "complete", "why": []}}, "blocked_claims": []}
+    limited_receipt = {
+        "status": "ok", "complete": False, "reason_codes": ["scan_limit_hit"],
+        "cleanup": {"complete": True},
+        "scan": {
+            "files_scanned": 2, "files_selected": 2, "files_total": 3,
+            "scan_limit_hit": True, "truncated_files": 0, "read_failed": 0,
+            "scan_exceptions": 0, "discovery_failed": False,
+        },
+    }
+    limited = visibility.project_persisted_visibility({"visibility": full, "jadx_receipt": limited_receipt})
+    old = _report("synthetic-file-limit", "2.0.0", visibility=limited)
+    new = _report("synthetic-file-limit", "2.1.0", visibility=full)
+    old["meta"]["jadx_receipt"] = deepcopy(limited_receipt)
+    new["meta"]["jadx_receipt"] = deepcopy(limited_receipt)
+    root = _seed(tmp_path, [old, new])
+
+    [delta], summary = regress.load_and_diff(root, "2.0.0@dd", "2.1.0@dd")
+    assert summary["visibility_comparable"] == 1
+    assert summary["visibility_blocked_cleared"] == 0
+    assert not delta.changed
+    assert delta.visibility_to["sources"]["java"] == "partial"
+    assert set(delta.visibility_to["blocked_claims"]) == {"static_endpoint_exhaustive", "no_hardcoded_credential"}
+    assert corpus.manifest_entry(new)["visibility"]["sources"]["java"] == "complete"
