@@ -6,6 +6,7 @@ import base64
 import binascii
 import contextlib
 import json
+import logging
 import sys
 import tempfile
 from dataclasses import asdict
@@ -15,6 +16,8 @@ from typing import Any
 from fxapk.core.models import AnalysisConfig, CertInfo, Component, ComponentSet
 from fxapk.core.observations import DexStringRecord
 from fxapk.core.parser_limits import ParserLimits
+
+logger = logging.getLogger(__name__)
 
 IPC_VERSION = 1
 _REQUEST_MAX_BYTES = 8 * 1024 * 1024
@@ -439,6 +442,15 @@ def _run_operation(request: dict[str, Any], limits: ParserLimits) -> dict[str, A
             )
             reason = _fail_reason(run)
             if reason:
+                if request["operation"] == "read_file" and reason == "parser_worker_failed":
+                    # Keep the stable ledger reason; expose only operational fields to logs.
+                    logger.warning(
+                        "isolated parser read failed phase=owned_run returncode=%s "
+                        "ownership_complete=%s termination_complete=%s forced_tree_kill=%s "
+                        "memory_limit_enforced=%s",
+                        run.returncode, run.ownership_complete, run.termination_complete,
+                        run.forced_tree_kill, run.memory_limit_enforced,
+                    )
                 raise ParserBridgeError(
                     "Parser worker did not complete within its configured policy.",
                     _receipt(
