@@ -131,3 +131,22 @@ def test_aggregate_asset_budget_is_checked_before_opening_files(probe: Probe) ->
     )
     assert code == 2
     assert diagnostic["reason"] == "asset_read_budget"
+
+
+@pytest.mark.parametrize("status", [404, 503])
+def test_stale_observation_preserves_http_status_without_proving_current_state(probe: Probe, status: int) -> None:
+    code, actual = probe(status=status, evidence={"observed_at": "2001-01-01T00:00:00Z"})
+    assert code == 2
+    assert actual == {
+        "state": "unknown",
+        "reason": "observation_outside_freshness_window",
+        "observed_at": "2001-01-01T00:00:00+00:00",
+        "http_status": status,
+    }
+
+
+def test_http_status_not_attributed_to_wrong_repository(probe: Probe) -> None:
+    code, actual = probe(status=404, evidence={"repository_id": 7})
+    assert code == 2
+    assert actual["reason"] == "release_repository_mismatch"
+    assert actual["http_status"] is None

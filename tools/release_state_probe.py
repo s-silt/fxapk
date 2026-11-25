@@ -9,7 +9,10 @@ Capture fields: http_status, body, repository_id, observed_at (UTC or with
 offset), tag_repository_id, peeled_tag_commit, and download_observation.
 The latter binds repository_id, release_id and asset_ids (name to REST ID).
 These records must come from the same trusted capture, not from generated
-assertions. An old snapshot cannot establish present-day publication.
+assertions. The 24-hour freshness limit applies to every HTTP response,
+including 404 and query failures. For a capture attributed to the requested
+repository with a valid timestamp, the receipt preserves the HTTP status for
+diagnosis even when freshness prevents a present-day conclusion.
 Inventory is a JSON object of expected asset names to lower-case SHA-256 from
 a trusted build; downloaded must be a separate, stable local directory.
 Exit 0 means these supplied observations match; 2 means not verified.
@@ -41,6 +44,7 @@ class Diagnosis:
     state: str
     reason: str
     observed_at: str | None = None
+    http_status: int | None = None
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -88,13 +92,14 @@ def diagnose(
     if observed is None:
         return Diagnosis("unknown", "observation_time_unverified")
     stamp = observed.isoformat()
-    age = datetime.now(timezone.utc) - observed
-    if not timedelta(0) <= age <= MAX_CAPTURE_AGE:
-        return Diagnosis("unknown", "observation_outside_freshness_window", stamp)
     if not _matches_id(captured.get("repository_id"), repository_id):
         return Diagnosis("unknown", "release_repository_mismatch", stamp)
+    status = captured["http_status"]
+    age = datetime.now(timezone.utc) - observed
+    if not timedelta(0) <= age <= MAX_CAPTURE_AGE:
+        return Diagnosis("unknown", "observation_outside_freshness_window", stamp, status)
     result = _diagnose_capture(captured, repository_id, tag, commit, expected, downloaded, observed)
-    return replace(result, observed_at=stamp)
+    return replace(result, observed_at=stamp, http_status=status)
 
 
 def _matches_id(raw: object, expected: int) -> bool:
