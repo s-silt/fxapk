@@ -413,23 +413,39 @@ def test_initial_parser_load_rejects_input_mutation(
 
 
 @pytest.mark.parametrize(
-    ("run", "expected_fields"),
+    ("run", "expected_fields", "expected_tree_codes"),
     [
         (
             OwnedRun(3, "fixture-private-output", "fixture-private-error", False, True,
                      True, False, (), memory_limit_enforced=True),
             "returncode=3 ownership_complete=True termination_complete=True forced_tree_kill=False",
+            "none",
         ),
         (
             OwnedRun(0, "", "fixture-private-error", False, False, False, True,
                      ("tree_state_unverified", "fixture-private-code"), memory_limit_enforced=True),
             "returncode=0 ownership_complete=False termination_complete=False forced_tree_kill=True",
+            "tree_state_unverified",
+        ),
+        (
+            OwnedRun(0, "fixture-private-output", "fixture-private-error", False, True,
+                     False, False, ("survivors_after_kill",), memory_limit_enforced=True),
+            "returncode=0 ownership_complete=True termination_complete=False forced_tree_kill=False",
+            "survivors_after_kill",
+        ),
+        (
+            OwnedRun(0, "fixture-private-output", "fixture-private-error", False, True,
+                     False, False, ("survivors_after_kill", "process_exit_unverified",
+                                    "survivors_after_kill", "fixture-private-code"),
+                     memory_limit_enforced=True),
+            "returncode=0 ownership_complete=True termination_complete=False forced_tree_kill=False",
+            "process_exit_unverified,survivors_after_kill",
         ),
     ],
 )
 def test_lazy_read_generic_failure_logs_only_safe_runner_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-    run: OwnedRun, expected_fields: str,
+    run: OwnedRun, expected_fields: str, expected_tree_codes: str,
 ) -> None:
     apk_path = tmp_path / "fixture-private-path.apk"
     _make_apk(apk_path, **{"assets/fixture-private-member.bin": b"benign"})
@@ -447,6 +463,7 @@ def test_lazy_read_generic_failure_logs_only_safe_runner_fields(
     assert len(messages) == 1
     assert "phase=owned_run" in messages[0]
     assert expected_fields in messages[0]
+    assert messages[0].endswith(f"tree_reason_codes={expected_tree_codes}")
     assert "fixture-private" not in messages[0]
 
 

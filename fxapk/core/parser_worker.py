@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 
 IPC_VERSION = 1
 _REQUEST_MAX_BYTES = 8 * 1024 * 1024
+# Fixed log vocabulary. Keep backend detail out of persisted receipts and never log arbitrary codes.
+_LOG_TREE_REASON_CODES = frozenset({
+    "process_exit_unverified",
+    "survivors_after_kill",
+    "tree_state_unverified",
+})
 
 
 class ParserBridgeError(RuntimeError):
@@ -454,12 +460,14 @@ def _run_operation(request: dict[str, Any], limits: ParserLimits) -> dict[str, A
                     elif run.returncode not in (None, 0):
                         read_diagnostic = "worker_nonzero_exit"
                     # Log bounded operational fields, not sample data or child output.
+                    tree_codes = _LOG_TREE_REASON_CODES.intersection(run.reason_codes)
                     logger.warning(
                         "isolated parser read failed phase=owned_run returncode=%s "
                         "ownership_complete=%s termination_complete=%s forced_tree_kill=%s "
-                        "memory_limit_enforced=%s",
+                        "memory_limit_enforced=%s tree_reason_codes=%s",
                         run.returncode, run.ownership_complete, run.termination_complete,
                         run.forced_tree_kill, run.memory_limit_enforced,
+                        ",".join(sorted(tree_codes)) or "none",
                     )
                 raise ParserBridgeError(
                     "Parser worker did not complete within its configured policy.",
