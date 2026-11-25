@@ -208,8 +208,6 @@ def test_receipt_identifies_exact_inputs_without_file_paths(tmp_path: Path) -> N
 
 @pytest.mark.parametrize("problem", ["invalid_json", "missing", "oversized", "invalid_inventory"])
 def test_failed_input_receipt_identifies_only_complete_reads(tmp_path: Path, problem: str) -> None:
-    from tools.release_state_probe import MAX_JSON
-
     raw = {
         name: json.dumps(value).encode()
         for name, value in (("inventory", INVENTORY), ("github", _capture("github")), ("pypi", _capture("pypi")))
@@ -217,7 +215,7 @@ def test_failed_input_receipt_identifies_only_complete_reads(tmp_path: Path, pro
     if problem == "invalid_json":
         raw["pypi"] = b"{invalid"
     elif problem == "oversized":
-        raw["pypi"] = b" " * (MAX_JSON + 1)
+        raw["pypi"] = b" " * (2 * 1024 * 1024 + 1)
     elif problem == "invalid_inventory":
         raw["inventory"] = b"{}"
     args = [sys.executable, "-m", "tools.release_channel_metadata", "--version", VERSION, "--repository-id", str(REPO_ID)]
@@ -238,3 +236,22 @@ def test_failed_input_receipt_identifies_only_complete_reads(tmp_path: Path, pro
         "version": VERSION, "state": "unknown", "reason": "input_unreadable_or_invalid",
         "input_sha256": {name: hashlib.sha256(raw[name]).hexdigest() for name in keys},
     }
+
+
+
+def test_capture_exactly_at_two_mib_is_verified(tmp_path: Path) -> None:
+    raw = {
+        name: json.dumps(value).encode()
+        for name, value in (("inventory", INVENTORY), ("github", _capture("github")), ("pypi", _capture("pypi")))
+    }
+    raw["pypi"] = raw["pypi"].ljust(2 * 1024 * 1024, b" ")
+    args = [sys.executable, "-m", "tools.release_channel_metadata", "--version", VERSION, "--repository-id", str(REPO_ID)]
+    for name, content in raw.items():
+        path = tmp_path / f"{name}.json"
+        path.write_bytes(content)
+        args.extend((f"--{name}", str(path)))
+    result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=10, check=False)
+    assert result.returncode == 0 and not result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["state"] == "metadata_agrees"
+    assert receipt["input_sha256"]["pypi"] == hashlib.sha256(raw["pypi"]).hexdigest()
