@@ -143,6 +143,8 @@ def test_clean_run_receipt_complete(monkeypatch, tmp_path) -> None:
 @pytest.mark.parametrize(("stdout", "stderr", "partial"), [
     ("INFO  - loading ...\r\nERROR - Failed to read zip entry: fixture.apk:classes2.dex\r\n", "", True),
     ("INFO  - done", "ERROR - Failed to read zip entry: fixture.apk:classes2.dex", True),
+    ("ERROR - Failed to read zip entry: jadx.zip.fallback.FallbackZipEntry@af23\njava.lang.RuntimeException: synthetic", "", True),
+    ("ERROR - Failed to read zip entry: jadx.zip.fallback.OtherEntry@af23", "", False),
     ("WARN  - Failed to read zip entry: fixture.apk:classes2.dex", "", False),
     ("INFO  - literal ERROR - Failed to read zip entry: fixture.apk:classes2.dex", "", False),
     ("ERROR - Failed to read zip entry: fixture.apk:assets/example.txt", "", False),

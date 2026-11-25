@@ -41,7 +41,10 @@ def _owned(returncode: int | None = 0, *, stdout: str = "") -> proctree.OwnedRun
     )
 
 
-def _patch(monkeypatch: pytest.MonkeyPatch, *, version: str | None = "1.5.2") -> list[dict]:
+def _patch(
+    monkeypatch: pytest.MonkeyPatch, *, version: str | None = "1.5.2",
+    diagnostic: str = "", returncode: int = 0,
+) -> list[dict]:
     """run_owned 替身：--version 调用返回版本串；其余按 jadx 执行写合成 java 树。
 
     version=None 模拟版本探测失败（非零退出 + 空输出）。
@@ -58,7 +61,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch, *, version: str | None = "1.5.2") ->
         pkg = out_dir / "sources" / "com" / "x"
         pkg.mkdir(parents=True, exist_ok=True)
         (pkg / "C.java").write_text(_JAVA_BODY, encoding="utf-8")
-        return _owned(0)
+        return _owned(returncode, stdout=diagnostic)
 
     monkeypatch.setattr(jadx.proctree, "run_owned", _run)
     return calls
@@ -143,6 +146,32 @@ def test_reuse_on_second_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert first.meta["jadx_index_status"] == "built"
     assert second.meta["jadx_index_status"] == "reused"
     assert second.meta["jadx_index_key"] == first.meta["jadx_index_key"]
+
+
+@pytest.mark.parametrize("preexisting", [False, True])
+@pytest.mark.parametrize("returncode", [0, 3])
+def test_unread_input_never_publishes_or_reuses_an_index_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, preexisting: bool, returncode: int,
+) -> None:
+    ctx = _ctx(tmp_path, dex_names=("classes.dex", "classes2.dex"))
+    old_key = None
+    if preexisting:
+        _patch(monkeypatch)
+        old_key = JadxAnalyzer().analyze(ctx).meta["jadx_index_key"]
+        assert _load(ctx, old_key).coverage == "complete"
+    _patch(monkeypatch, diagnostic="ERROR - Failed to read zip entry: fixture.apk:classes2.dex", returncode=returncode)
+    for _ in range(2):
+        result = JadxAnalyzer().analyze(ctx)
+        receipt = result.meta["jadx_receipt"]
+        assert not receipt["complete"] and result.meta["jadx_endpoint_count"] >= 1
+        assert result.meta["jadx_index_status"] == receipt["index"]["status"] == "disabled"
+        assert "producer_dex_input_read_error" in receipt["index"]["reason_codes"]
+        assert "jadx_index_key" not in result.meta and "key" not in receipt["index"]
+        assert "jadx_query_sources" not in result.meta
+    if old_key is not None:
+        assert _load(ctx, old_key).coverage == "complete"
+    else:
+        assert not (tmp_path / "jadx-cache").exists()
 
 
 def test_meta_keys_registered() -> None:

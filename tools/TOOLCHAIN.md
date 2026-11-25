@@ -66,7 +66,7 @@ Frida 和 mitmproxy 控制台脚本优先从当前解释器的 scripts 目录解
 上游 JADX v1.5.7（发布于 2026-11-18，https://github.com/skylot/jadx/releases）
 是更新随附 Java 的安全版本；独立安装的系统 Java 仍需单独维护。fxapk 记录的基线仍为
 JADX 1.5.6。两版已用合成 APK 做过小范围对照，不代表已完成升级验收。若 JADX 报告
-无法从 APK 读取某个 DEX 条目，即使退出码为 0，fxapk 也会保留已提取的发现并将 Java 覆盖标为部分。
+无法从 APK 读取某个 DEX 条目，即使退出码为 0，fxapk 也会保留已提取的发现、将 Java 覆盖标为部分，并且不为本轮发布或复用索引。旧索引不改写，不能替代本轮核验。
 
 设备端 frida-server 应与主机 Frida 版本匹配，并在获授权的测试设备上确认 root、枚举、
 native attach 和 Java bridge。安装工具不应顺带升级另一台设备或替换其系统 tcpdump；

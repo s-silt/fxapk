@@ -78,7 +78,9 @@ updating bundled Java; separately installed system Java still requires separate
 maintenance. fxapk's recorded baseline remains JADX 1.5.6. A small synthetic
 comparison is not upgrade acceptance. When JADX reports it could not read a
 DEX entry from the APK, fxapk retains extracted findings and marks Java
-coverage partial even if JADX exits with code 0.
+coverage partial even if JADX exits with code 0. That run neither publishes
+nor reuses an index. Existing indexes are not rewritten and do not verify
+the current run.
 
 Match the device's frida-server to the host Frida version, confirm root, and test
 enumeration, native attach and Java bridge operation on an authorized test device.
