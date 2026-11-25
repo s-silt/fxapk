@@ -1515,7 +1515,7 @@ def corpus_regress_cmd(
                     ),
                     "findings_added": d.findings_added,
                     "findings_removed": d.findings_removed,
-                    "notes": [*d.notes, diagnostic] if (diagnostic := d.invalid_visibility_note) else d.notes,
+                    "notes": d.display_notes,
                     **(
                         {"version_conflict_sides": d.version_conflict_sides}
                         if d.version_conflict_sides else {}
@@ -1575,25 +1575,20 @@ def corpus_regress_cmd(
     for d in shown:
         case_label = "、".join(d.case_ids) if d.case_ids else "—"
         typer.echo(f"\n  [{d.sample_sha256[:12]}] {d.package_name or '?'}  案={case_label}")
-        if d.comparison_blocked:
-            for note in d.notes:
-                typer.echo(f"    {note}")
-            continue
-        if d.status_from != d.status_to:
-            typer.echo(f"    状态 {d.status_from} → {d.status_to}")
-        if d.counts_from != d.counts_to:
-            typer.echo(f"    计数 {d.counts_from} → {d.counts_to}")
-        if d.advice_from != d.advice_to:
-            typer.echo(f"    线索分档 {d.advice_from} → {d.advice_to}")
-        if d.hardened_from != d.hardened_to:
-            typer.echo(f"    加固判定 {d.hardened_from} → {d.hardened_to}")
-        if not d.invalid_visibility_sides and d.visibility_changed:
-            typer.echo(f"    可见性受限主张 {_vis_brief(d.visibility_from)} → {_vis_brief(d.visibility_to)}")
-        if d.findings_added:
-            typer.echo(f"    + {', '.join(d.findings_added)}")
-        if d.findings_removed:
-            typer.echo(f"    - {', '.join(d.findings_removed)}")
-        for n in d.notes:
-            typer.echo(f"    {n}")
-        if diagnostic := d.invalid_visibility_note:
-            typer.echo(f"    {diagnostic}")
+        if not d.comparison_blocked:
+            if d.status_from != d.status_to:
+                typer.echo(f"    状态 {d.status_from} → {d.status_to}")
+            if d.counts_from != d.counts_to:
+                typer.echo(f"    计数 {d.counts_from} → {d.counts_to}")
+            if d.advice_from != d.advice_to:
+                typer.echo(f"    线索分档 {d.advice_from} → {d.advice_to}")
+            if d.hardened_from != d.hardened_to:
+                typer.echo(f"    加固判定 {d.hardened_from} → {d.hardened_to}")
+            if not d.invalid_visibility_sides and d.visibility_changed:
+                typer.echo(f"    可见性受限主张 {_vis_brief(d.visibility_from)} → {_vis_brief(d.visibility_to)}")
+            if d.findings_added:
+                typer.echo(f"    + {', '.join(d.findings_added)}")
+            if d.findings_removed:
+                typer.echo(f"    - {', '.join(d.findings_removed)}")
+        for note in d.display_notes:
+            typer.echo(f"    {note}")

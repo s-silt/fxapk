@@ -990,7 +990,10 @@ def test_cli_visibility_diagnostics_keep_changed_only_filter(tmp_path):
         _report("new-malformed", "2.1.0", visibility=malformed),
         _report("other-change", "2.0.0", visibility=malformed),
         _report("other-change", "2.1.0", visibility=malformed, findings=["SYNTHETIC-FINDING"]),
+        _report("mixed-unreadable", "2.0.0", visibility=malformed),
+        _report("mixed-unreadable", "2.1.0", visibility=_vis()),
     ])
+    (root / corpus.report_relpath(_report("mixed-unreadable", "2.1.0"))).unlink()
     args = ["corpus", "regress", "--corpus", str(root), "--from", "2.0.0@dd", "--to", "2.1.0@dd"]
     runner = CliRunner()
     result = runner.invoke(cli.app, [*args, "--json"])
@@ -998,19 +1001,44 @@ def test_cli_visibility_diagnostics_keep_changed_only_filter(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["summary"]["changed"] == 2
     assert payload["summary"]["visibility_assessment_lost"] == 1
-    assert payload["summary"]["invalid_visibility_pairs"] == 3
-    assert {row["sample_sha256"] for row in payload["diffs"]} == {"new-malformed", "other-change"}
+    assert payload["summary"]["invalid_visibility_pairs"] == 4
+    assert payload["summary"]["comparison_blocked_pairs"] == 1
+    # Existing read failures stay visible by default, but do not increment changed.
+    assert {row["sample_sha256"] for row in payload["diffs"]} == {"new-malformed", "other-change", "mixed-unreadable"}
 
     result = runner.invoke(cli.app, [*args, "--json", "--all"])
     assert result.exit_code == 0, result.output
-    diagnostic = next(r for r in json.loads(result.stdout)["diffs"] if r["sample_sha256"] == "same-malformed")
-    assert diagnostic["invalid_visibility_sides"] == ["from", "to"]
-    assert any("结构异常" in note for note in diagnostic["notes"])
+    rows = {row["sample_sha256"]: row for row in json.loads(result.stdout)["diffs"]}
+    assert rows["same-malformed"]["invalid_visibility_sides"] == ["from", "to"]
+    mixed = rows["mixed-unreadable"]
+    assert mixed["invalid_visibility_sides"] == ["from"]
+    assert mixed["unreadable_report_sides"] == ["to"]
+    assert not mixed["findings_added"] and not mixed["findings_removed"]
 
     result = runner.invoke(cli.app, args)
     assert result.exit_code == 0, result.output
-    assert "新版求值不再可用 1" in result.stdout and "3 个样本至少一版可见性求值结构异常" in result.stdout
+    assert "新版求值不再可用 1" in result.stdout and "4 个样本至少一版可见性求值结构异常" in result.stdout
     assert "[same-malform]" not in result.stdout and "可见性受限主张 " not in result.stdout
     result = runner.invoke(cli.app, [*args, "--all"])
     assert result.exit_code == 0, result.output
     assert "[same-malform]" in result.stdout and "旧版、新版报告的可见性求值结构异常" in result.stdout
+    assert all(note in result.stdout for note in mixed["notes"])
+
+
+@pytest.mark.parametrize("bad_side", ["from", "to"])
+def test_visibility_diagnostic_is_counted_when_counterpart_unreadable(tmp_path, bad_side):
+    bad = {**_vis(), "next_actions": {}}
+    first = _report("mixed-unreadable", "2.0.0", visibility=bad if bad_side == "from" else _vis())
+    second = _report("mixed-unreadable", "2.1.0", visibility=bad if bad_side == "to" else _vis())
+    root = _seed(tmp_path, [first, second])
+    (root / corpus.report_relpath(second if bad_side == "from" else first)).unlink()
+
+    [delta], summary = regress.load_and_diff(root, "2.0.0@dd", "2.1.0@dd")
+    assert delta.invalid_visibility_sides == (bad_side,)
+    assert len(delta.display_notes) == 2
+    assert any("结构异常" in note for note in delta.display_notes)
+    assert delta.unreadable_report_sides == (("to" if bad_side == "from" else "from"),)
+    assert not delta.findings_added and not delta.findings_removed
+    assert summary["changed"] == summary["visibility_comparable"] == summary["visibility_assessment_lost"] == 0
+    assert summary["comparison_blocked_pairs"] == summary["unreadable_report_pairs"] == 1
+    assert summary["invalid_visibility_pairs"] == 1

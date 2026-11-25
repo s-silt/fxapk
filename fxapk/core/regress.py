@@ -103,6 +103,13 @@ class SampleDiff:
         return f"⚠ {affected}报告的可见性求值结构异常；该维度不可比较（须人核）"
 
     @property
+    def display_notes(self) -> list[str]:
+        """Render the same diagnostics whether or not directional comparison is possible."""
+        if diagnostic := self.invalid_visibility_note:
+            return [*self.notes, diagnostic]
+        return self.notes
+
+    @property
     def changed(self) -> bool:
         return bool(
             self.findings_added or self.findings_removed or self.notes
@@ -484,7 +491,8 @@ def _summarize(
 ) -> dict[str, Any]:
     qualified = [d for d in diffs if not d.comparison_blocked]
     blocked_pairs = len(diffs) - len(qualified)
-    invalid_visibility_pairs = sum(bool(d.invalid_visibility_sides) for d in qualified)
+    # Count observable diagnostics even when the other side blocks direction comparisons.
+    invalid_visibility_pairs = sum(bool(d.invalid_visibility_sides) for d in diffs)
     conflict_pairs = sum(bool(d.version_conflict_sides) for d in diffs)
     unreadable_report_pairs = sum(bool(d.unreadable_report_sides) for d in diffs)
     changed = [d for d in qualified if d.changed]
