@@ -204,3 +204,37 @@ def test_receipt_identifies_exact_inputs_without_file_paths(tmp_path: Path) -> N
     assert hashes["same-collection"]["github"] != hashes["another-collection"]["github"]
     assert hashes["same-collection"]["pypi"] != hashes["another-collection"]["pypi"]
     assert hashes["same-collection"]["inventory"] == hashes["another-collection"]["inventory"]
+
+
+@pytest.mark.parametrize("problem", ["invalid_json", "missing", "oversized", "invalid_inventory"])
+def test_failed_input_receipt_identifies_only_complete_reads(tmp_path: Path, problem: str) -> None:
+    from tools.release_state_probe import MAX_JSON
+
+    raw = {
+        name: json.dumps(value).encode()
+        for name, value in (("inventory", INVENTORY), ("github", _capture("github")), ("pypi", _capture("pypi")))
+    }
+    if problem == "invalid_json":
+        raw["pypi"] = b"{invalid"
+    elif problem == "oversized":
+        raw["pypi"] = b" " * (MAX_JSON + 1)
+    elif problem == "invalid_inventory":
+        raw["inventory"] = b"{}"
+    args = [sys.executable, "-m", "tools.release_channel_metadata", "--version", VERSION, "--repository-id", str(REPO_ID)]
+    for name, content in raw.items():
+        path = tmp_path / f"{name}.json"
+        if not (problem == "missing" and name == "pypi"):
+            path.write_bytes(content)
+        args.extend((f"--{name}", str(path)))
+    result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=10, check=False)
+    assert result.returncode == 2 and not result.stderr
+    receipt = json.loads(result.stdout)
+    keys = ["inventory"]
+    if problem != "invalid_inventory":
+        keys.append("github")
+    if problem == "invalid_json":
+        keys.append("pypi")
+    assert receipt == {
+        "version": VERSION, "state": "unknown", "reason": "input_unreadable_or_invalid",
+        "input_sha256": {name: hashlib.sha256(raw[name]).hexdigest() for name in keys},
+    }

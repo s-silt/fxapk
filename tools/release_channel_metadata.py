@@ -10,7 +10,8 @@ The build manifest maps this version's core wheel and sdist names to SHA-256
 digests. Comparisons cover the two named files, not the complete GitHub
 release or its other attached packages. Matching is about metadata digests,
 not downloaded bytes, the Git tag commit, or permission to publish or retry.
-Input SHA-256 values identify the exact saved JSON bytes, not package bytes.
+Input SHA-256 values identify exactly the input files read in full within the
+size limit, even on parse failure. They are not package hashes or validation.
 """
 from __future__ import annotations
 
@@ -163,18 +164,27 @@ def main() -> int:
     args = parser.parse_args()
     version = args.version
     names = {f"fxapk-{version}-py3-none-any.whl", f"fxapk-{version}.tar.gz"}
+    input_sha256: dict[str, str] = {}
+
+    def load(name: str, path: Path) -> object:
+        raw = _read_json_bytes(path)
+        input_sha256[name] = hashlib.sha256(raw).hexdigest()
+        return _parse_json(raw)
+
     try:
-        inputs = {"inventory": _read_json_bytes(args.inventory)}
-        expected = _parse_json(inputs["inventory"])
-        if (
-            not VERSION.fullmatch(version) or args.repository_id <= 0
-            or not _inventory_valid(expected) or expected.keys() != names
-        ):
+        if not VERSION.fullmatch(version) or args.repository_id <= 0:
+            raise ValueError("expected a final version and positive repository ID")
+        expected = load("inventory", args.inventory)
+        if not isinstance(expected, dict) or not _inventory_valid(expected) or expected.keys() != names:
             raise ValueError("expected the two core fxapk files")
-        inputs.update(github=_read_json_bytes(args.github), pypi=_read_json_bytes(args.pypi))
-        github, pypi = _parse_json(inputs["github"]), _parse_json(inputs["pypi"])
+        github = load("github", args.github)
+        pypi = load("pypi", args.pypi)
     except (OSError, ValueError, RecursionError):
-        print(json.dumps({"state": "unknown", "reason": "input_unreadable_or_invalid"}))
+        print(json.dumps({
+            "state": "unknown", "reason": "input_unreadable_or_invalid",
+            "version": version if VERSION.fullmatch(version) else None,
+            "input_sha256": input_sha256,
+        }, sort_keys=True))
         return 2
     now = datetime.now(timezone.utc)
     g = _inspect(github, github=True, version=version, repository_id=args.repository_id, expected=expected, now=now)
@@ -199,7 +209,7 @@ def main() -> int:
     print(json.dumps({
         "state": state, "reason": reason, "version": version,
         "github": asdict(g), "pypi": asdict(p),
-        "input_sha256": {key: hashlib.sha256(raw).hexdigest() for key, raw in inputs.items()},
+        "input_sha256": input_sha256,
     }, sort_keys=True))
     return 0 if state == "metadata_agrees" else 2
 
