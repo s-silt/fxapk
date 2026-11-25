@@ -1515,7 +1515,7 @@ def corpus_regress_cmd(
                     ),
                     "findings_added": d.findings_added,
                     "findings_removed": d.findings_removed,
-                    "notes": d.notes,
+                    "notes": [*d.notes, diagnostic] if (diagnostic := d.invalid_visibility_note) else d.notes,
                     **(
                         {"version_conflict_sides": d.version_conflict_sides}
                         if d.version_conflict_sides else {}
@@ -1548,9 +1548,12 @@ def corpus_regress_cmd(
     )
     typer.echo(
         f"  可见性受限解除 {s['visibility_blocked_cleared']}（须人核）；"
-        f"新增受限 {s['visibility_blocked_added']}；求值丢失 {s['visibility_assessment_lost']}"
-        f"（基于两版都有可见性求值的 {s['visibility_comparable']} 个样本）"
+        f"新增受限 {s['visibility_blocked_added']}"
+        f"（基于两版都有可用求值的 {s['visibility_comparable']} 个样本）；"
+        f"新版求值不再可用 {s['visibility_assessment_lost']}（缺失或结构异常，须人核）"
     )
+    if invalid_pairs := s.get("invalid_visibility_pairs"):
+        typer.echo(f"  ⚠ {invalid_pairs} 个样本至少一版可见性求值结构异常（--all 查看未列出样本的异常侧）")
     typer.echo(
         f"  建议调证线索合计 {s['advice_investigate_from']} → {s['advice_investigate_to']}"
         f"（基于两版报告都读得到的 {s['advice_comparable']} 个样本）"
@@ -1584,7 +1587,7 @@ def corpus_regress_cmd(
             typer.echo(f"    线索分档 {d.advice_from} → {d.advice_to}")
         if d.hardened_from != d.hardened_to:
             typer.echo(f"    加固判定 {d.hardened_from} → {d.hardened_to}")
-        if d.visibility_from != d.visibility_to:
+        if not d.invalid_visibility_sides and d.visibility_changed:
             typer.echo(f"    可见性受限主张 {_vis_brief(d.visibility_from)} → {_vis_brief(d.visibility_to)}")
         if d.findings_added:
             typer.echo(f"    + {', '.join(d.findings_added)}")
@@ -1592,3 +1595,5 @@ def corpus_regress_cmd(
             typer.echo(f"    - {', '.join(d.findings_removed)}")
         for n in d.notes:
             typer.echo(f"    {n}")
+        if diagnostic := d.invalid_visibility_note:
+            typer.echo(f"    {diagnostic}")

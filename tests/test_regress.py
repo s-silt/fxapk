@@ -850,7 +850,7 @@ def test_closure_and_visibility_summary_independent_of_advice(tmp_path, missing_
     text = CliRunner().invoke(cli.app, args)
     assert text.exit_code == 0, text.output
     assert f"闭环降级 {expected_close}" in text.stdout
-    assert f"求值丢失 {expected_vis}" in text.stdout
+    assert f"新版求值不再可用 {expected_vis}" in text.stdout
 
 
 def test_cli_reports_unreadable_side_without_publishing_a_delta(tmp_path):
@@ -915,8 +915,9 @@ def test_visibility_malformed_fingerprint_is_unavailable_in_corpus_comparison(
     assert summary["visibility_comparable"] == summary["visibility_blocked_cleared"] == 0
     assert diffs[0].visibility_from is not None and diffs[0].visibility_to is None
     assert not diffs[0].comparison_blocked  # Other report dimensions remain available.
-    assert any("结构异常" in note for note in diffs[0].notes)
-    assert diffs[0].invalid_visibility_sides == ("to",)
+    assert "结构异常" in (diffs[0].invalid_visibility_note or "")
+    assert summary["invalid_visibility_pairs"] == 1
+    assert diffs[0].changed and diffs[0].invalid_visibility_sides == ("to",)
 
 
 @pytest.mark.parametrize("invalid_sides", [("from",), ("from", "to")])
@@ -928,9 +929,9 @@ def test_visibility_invalid_is_not_an_unassessed_legacy_report(tmp_path, invalid
         _report("s1", "1.1.0", visibility=invalid if "to" in invalid_sides else valid),
     ])
     diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
-    assert diffs[0].changed and not diffs[0].comparison_blocked
+    assert not diffs[0].changed and not diffs[0].comparison_blocked
     assert summary["visibility_comparable"] == summary["visibility_blocked_cleared"] == 0
-    assert any("结构异常" in note for note in diffs[0].notes)
+    assert "结构异常" in (diffs[0].invalid_visibility_note or "")
     assert not any("旧版本产物" in note for note in diffs[0].notes)
     assert diffs[0].invalid_visibility_sides == invalid_sides
 
@@ -948,3 +949,68 @@ def test_visibility_explicit_empty_and_absent_blocked_list_are_distinct(tmp_path
     diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
     assert summary["visibility_blocked_cleared"] == int(explicit_empty)
     assert summary["visibility_comparable"] == int(explicit_empty)
+
+
+def test_visibility_legacy_explicit_null_matches_omitted_assessment(tmp_path):
+    old = _report("legacy-null", "2.0.0")
+    old["meta"]["visibility"] = None
+    new = _report("legacy-null", "2.1.0", visibility=_vis())
+    root = _seed(tmp_path, [old, new])
+
+    [delta], summary = regress.load_and_diff(root, "2.0.0@dd", "2.1.0@dd")
+    assert delta.invalid_visibility_sides == ()
+    assert any("旧版本产物" in note for note in delta.notes)
+    assert summary["visibility_assessment_lost"] == 0
+
+
+def test_visibility_identical_malformed_is_diagnostic_not_change(tmp_path):
+    malformed = {**_vis(), "next_actions": {}}
+    root = _seed(tmp_path, [
+        _report("same-malformed", "2.0.0", visibility=malformed),
+        _report("same-malformed", "2.1.0", visibility=malformed),
+    ])
+
+    [delta], summary = regress.load_and_diff(root, "2.0.0@dd", "2.1.0@dd")
+    assert not delta.changed
+    assert summary["changed"] == summary["visibility_assessment_lost"] == 0
+    assert summary["invalid_visibility_pairs"] == 1
+    assert delta.invalid_visibility_sides == ("from", "to")
+
+
+def test_cli_visibility_diagnostics_keep_changed_only_filter(tmp_path):
+    from typer.testing import CliRunner
+
+    from fxapk import cli
+
+    malformed = {**_vis(), "next_actions": {}}
+    root = _seed(tmp_path, [
+        _report("same-malformed", "2.0.0", visibility=malformed),
+        _report("same-malformed", "2.1.0", visibility=malformed),
+        _report("new-malformed", "2.0.0", visibility=_vis()),
+        _report("new-malformed", "2.1.0", visibility=malformed),
+        _report("other-change", "2.0.0", visibility=malformed),
+        _report("other-change", "2.1.0", visibility=malformed, findings=["SYNTHETIC-FINDING"]),
+    ])
+    args = ["corpus", "regress", "--corpus", str(root), "--from", "2.0.0@dd", "--to", "2.1.0@dd"]
+    runner = CliRunner()
+    result = runner.invoke(cli.app, [*args, "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["summary"]["changed"] == 2
+    assert payload["summary"]["visibility_assessment_lost"] == 1
+    assert payload["summary"]["invalid_visibility_pairs"] == 3
+    assert {row["sample_sha256"] for row in payload["diffs"]} == {"new-malformed", "other-change"}
+
+    result = runner.invoke(cli.app, [*args, "--json", "--all"])
+    assert result.exit_code == 0, result.output
+    diagnostic = next(r for r in json.loads(result.stdout)["diffs"] if r["sample_sha256"] == "same-malformed")
+    assert diagnostic["invalid_visibility_sides"] == ["from", "to"]
+    assert any("结构异常" in note for note in diagnostic["notes"])
+
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert "新版求值不再可用 1" in result.stdout and "3 个样本至少一版可见性求值结构异常" in result.stdout
+    assert "[same-malform]" not in result.stdout and "可见性受限主张 " not in result.stdout
+    result = runner.invoke(cli.app, [*args, "--all"])
+    assert result.exit_code == 0, result.output
+    assert "[same-malform]" in result.stdout and "旧版、新版报告的可见性求值结构异常" in result.stdout

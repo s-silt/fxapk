@@ -85,8 +85,22 @@ class SampleDiff:
 
     @property
     def visibility_assessment_lost(self) -> bool:
-        """A readable, attributable new report lacks a previously present assessment."""
+        """A previous usable assessment is now missing or malformed (stable summary key)."""
         return not self.comparison_blocked and self.visibility_from is not None and self.visibility_to is None
+
+    @property
+    def visibility_changed(self) -> bool:
+        """Do not use malformed inputs as evidence of a change in restricted claims."""
+        return self.visibility_assessment_lost or (
+            not self.invalid_visibility_sides and self.visibility_from != self.visibility_to
+        )
+
+    @property
+    def invalid_visibility_note(self) -> str | None:
+        if not self.invalid_visibility_sides:
+            return None
+        affected = "、".join("旧版" if side == "from" else "新版" for side in self.invalid_visibility_sides)
+        return f"⚠ {affected}报告的可见性求值结构异常；该维度不可比较（须人核）"
 
     @property
     def changed(self) -> bool:
@@ -94,7 +108,7 @@ class SampleDiff:
             self.findings_added or self.findings_removed or self.notes
             or self.counts_from != self.counts_to
             or self.advice_from != self.advice_to
-            or self.visibility_from != self.visibility_to
+            or self.visibility_changed
             or self.status_from != self.status_to
             or self.closure_from != self.closure_to
             or self.hardened_from != self.hardened_to
@@ -410,8 +424,7 @@ def _visibility_notes(d: SampleDiff) -> list[str]:
     """
     va, vb = d.visibility_from, d.visibility_to
     if d.invalid_visibility_sides:
-        affected = "、".join("旧版" if side == "from" else "新版" for side in d.invalid_visibility_sides)
-        return [f"⚠ {affected}报告的可见性求值结构异常；该维度不可比较（须人核）"]
+        return []  # Diagnostics are kept separate from directional changes.
     if d.visibility_assessment_lost:
         return ["⚠ 新版报告缺失可见性求值（求值阶段丢失？须人核）"]
     if va is None and vb is not None:
@@ -471,6 +484,7 @@ def _summarize(
 ) -> dict[str, Any]:
     qualified = [d for d in diffs if not d.comparison_blocked]
     blocked_pairs = len(diffs) - len(qualified)
+    invalid_visibility_pairs = sum(bool(d.invalid_visibility_sides) for d in qualified)
     conflict_pairs = sum(bool(d.version_conflict_sides) for d in diffs)
     unreadable_report_pairs = sum(bool(d.unreadable_report_sides) for d in diffs)
     changed = [d for d in qualified if d.changed]
@@ -524,6 +538,7 @@ def _summarize(
             and set(d.visibility_to["blocked_claims"]) - set(d.visibility_from["blocked_claims"])
         ),
         "visibility_assessment_lost": sum(d.visibility_assessment_lost for d in diffs),
+        **({"invalid_visibility_pairs": invalid_visibility_pairs} if invalid_visibility_pairs else {}),
     }
 
 

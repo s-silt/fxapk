@@ -697,10 +697,10 @@ def inspect_visibility(report: Any) -> tuple[dict | None, bool]:
     """Return the comparable fingerprint and whether a present assessment was malformed."""
     if not isinstance(report, dict):
         return None, False
-    meta = _meta(report)
-    if "visibility" not in meta:
+    visibility = _meta(report).get("visibility")
+    if visibility is None:  # Older reports used both omission and explicit null for "not assessed".
         return None, False
-    summary = _project_visibility_fingerprint(meta["visibility"])
+    summary = _project_visibility_fingerprint(visibility)
     return summary, summary is None
 
 
