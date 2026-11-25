@@ -1509,6 +1509,10 @@ def corpus_regress_cmd(
                     "counts": [d.counts_from, d.counts_to],
                     "advice": [d.advice_from, d.advice_to],
                     "visibility": [d.visibility_from, d.visibility_to],
+                    **(
+                        {"invalid_visibility_sides": d.invalid_visibility_sides}
+                        if d.invalid_visibility_sides else {}
+                    ),
                     "findings_added": d.findings_added,
                     "findings_removed": d.findings_removed,
                     "notes": d.notes,

@@ -59,8 +59,7 @@ class SampleDiff:
     #: None = 分档不可观察（报告未通过校验或 leads 缺失/坏形状），不等于确证零线索 {}。
     advice_from: dict[str, int] | None = None
     advice_to: dict[str, int] | None = None
-    #: 证据可见性指纹（:func:`corpus.visibility_summary`）。None = 该版报告没有可见性求值——
-    #: 与「求过值、无受限主张」的 dict 严格区分，否则「整个求值阶段丢了」的退化会静默通过。
+    #: None = no comparable assessment; inspect invalid_visibility_sides to distinguish malformed data.
     visibility_from: dict | None = None
     visibility_to: dict | None = None
     # 检出类
@@ -72,6 +71,8 @@ class SampleDiff:
     version_conflict_sides: tuple[str, ...] = ()
     #: The stored report could not be read and validated; independent of the lead array.
     unreadable_report_sides: tuple[str, ...] = ()
+    #: Only the visibility dimension is unavailable on these readable report sides.
+    invalid_visibility_sides: tuple[str, ...] = ()
 
     @property
     def comparison_blocked(self) -> bool:
@@ -282,6 +283,8 @@ def diff_versions(
         ea, eb = idx_a[sha], idx_b[sha]
         ra, rb = _load_report(root, ea), _load_report(root, eb)
         case_ids = _case_ids(ea, eb)
+        visibility_a, invalid_a = corpus.inspect_visibility(ra)
+        visibility_b, invalid_b = corpus.inspect_visibility(rb)
         d = SampleDiff(
             sample_sha256=sha,
             package_name=eb.get("package_name") or ea.get("package_name"),
@@ -299,8 +302,11 @@ def diff_versions(
             advice_to=advice_counts(rb),
             # ★读报告全文而非 manifest 投影：upsert 按主键幂等跳过，存量行在 reindex 前没有
             #   visibility 字段，信投影会把「老行没记」读成「没有受限主张」。与 advice_counts 同路径。
-            visibility_from=corpus.visibility_summary(ra),
-            visibility_to=corpus.visibility_summary(rb),
+            visibility_from=visibility_a,
+            visibility_to=visibility_b,
+            invalid_visibility_sides=tuple(
+                side for side, invalid in (("from", invalid_a), ("to", invalid_b)) if invalid
+            ),
             version_conflict_sides=tuple(
                 side for side, report in (("from", ra), ("to", rb))
                 if _has_version_provenance_conflict(report)
@@ -403,6 +409,9 @@ def _visibility_notes(d: SampleDiff) -> list[str]:
     新增受限主张多半是新约束在正确降级，记中性备注、不告警。
     """
     va, vb = d.visibility_from, d.visibility_to
+    if d.invalid_visibility_sides:
+        affected = "、".join("旧版" if side == "from" else "新版" for side in d.invalid_visibility_sides)
+        return [f"⚠ {affected}报告的可见性求值结构异常；该维度不可比较（须人核）"]
     if d.visibility_assessment_lost:
         return ["⚠ 新版报告缺失可见性求值（求值阶段丢失？须人核）"]
     if va is None and vb is not None:

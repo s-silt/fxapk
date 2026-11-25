@@ -690,14 +690,26 @@ def visibility_summary(report: Any) -> dict | None:
     ★字段缺失 / None 不得被读成「无受限主张」——那正是本函数要防的误读（同 :func:`advice_counts`
     的 None-vs-{} 教训）。畸形值一律折到 None，表现同「求值丢失」、会被标出而非静默吞掉。
     """
+    return inspect_visibility(report)[0]
+
+
+def inspect_visibility(report: Any) -> tuple[dict | None, bool]:
+    """Return the comparable fingerprint and whether a present assessment was malformed."""
     if not isinstance(report, dict):
-        return None
-    vis = _meta(report).get("visibility")
+        return None, False
+    meta = _meta(report)
+    if "visibility" not in meta:
+        return None, False
+    summary = _project_visibility_fingerprint(meta["visibility"])
+    return summary, summary is None
+
+
+def _project_visibility_fingerprint(vis: object) -> dict | None:
     if not isinstance(vis, dict):
         return None
     raw_sources = vis.get("sources", {})
     raw_claims = vis.get("claims", {})
-    blocked = vis.get("blocked_claims", [])
+    blocked = vis.get("blocked_claims")  # An explicit empty list is evidence; absence is not.
     actions = vis.get("next_actions", [])
     degraded = vis.get("degraded", False)
     remediation = vis.get("remediation")

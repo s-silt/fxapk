@@ -915,4 +915,36 @@ def test_visibility_malformed_fingerprint_is_unavailable_in_corpus_comparison(
     assert summary["visibility_comparable"] == summary["visibility_blocked_cleared"] == 0
     assert diffs[0].visibility_from is not None and diffs[0].visibility_to is None
     assert not diffs[0].comparison_blocked  # Other report dimensions remain available.
-    assert any("缺失可见性求值" in note for note in diffs[0].notes)
+    assert any("结构异常" in note for note in diffs[0].notes)
+    assert diffs[0].invalid_visibility_sides == ("to",)
+
+
+@pytest.mark.parametrize("invalid_sides", [("from",), ("from", "to")])
+def test_visibility_invalid_is_not_an_unassessed_legacy_report(tmp_path, invalid_sides: tuple[str, ...]) -> None:
+    valid = _vis()
+    invalid = {**valid, "next_actions": {}}
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", visibility=invalid),
+        _report("s1", "1.1.0", visibility=invalid if "to" in invalid_sides else valid),
+    ])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert diffs[0].changed and not diffs[0].comparison_blocked
+    assert summary["visibility_comparable"] == summary["visibility_blocked_cleared"] == 0
+    assert any("结构异常" in note for note in diffs[0].notes)
+    assert not any("旧版本产物" in note for note in diffs[0].notes)
+    assert diffs[0].invalid_visibility_sides == invalid_sides
+
+
+@pytest.mark.parametrize("explicit_empty", [False, True])
+def test_visibility_explicit_empty_and_absent_blocked_list_are_distinct(tmp_path, explicit_empty: bool) -> None:
+    previous = _vis()
+    current = _vis(blocked=(), dex="complete") if explicit_empty else _vis()
+    if not explicit_empty:
+        del current["blocked_claims"]
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", visibility=previous),
+        _report("s1", "1.1.0", visibility=current),
+    ])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert summary["visibility_blocked_cleared"] == int(explicit_empty)
+    assert summary["visibility_comparable"] == int(explicit_empty)
