@@ -373,13 +373,13 @@ _JAVA_SAVED_CONFLICT_CLAIMS = ("static_endpoint_exhaustive", "no_hardcoded_crede
 
 def project_persisted_visibility(meta: dict[str, Any]) -> object:
     """Project saved evidence without reassessing legacy coverage."""
-    saved = _project_saved_java_visibility(meta)
+    saved = project_saved_java_visibility(meta)
     if isinstance(saved, dict) and persisted_visibility_containers_valid(saved):
         return _with_read_budget_notes(saved, meta)
     return saved
 
 
-def _project_saved_java_visibility(meta: dict[str, Any]) -> object:
+def project_saved_java_visibility(meta: dict[str, Any]) -> object:
     """Downgrade only a saved complete Java view contradicted by a verified scan shape."""
     saved = meta.get("visibility")
     if not isinstance(saved, dict) or not persisted_visibility_containers_valid(saved):

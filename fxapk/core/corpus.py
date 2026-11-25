@@ -693,14 +693,27 @@ def visibility_summary(report: Any) -> dict | None:
     return inspect_visibility(report)[0]
 
 
-def inspect_visibility(report: Any) -> tuple[dict | None, bool]:
-    """Return the comparable fingerprint and whether a present assessment was malformed."""
+def inspect_visibility(report: Any, *, reconcile_java: bool = False) -> tuple[dict | None, bool]:
+    """Return the fingerprint and whether a present assessment was malformed.
+
+    Regression comparisons reconcile proven Java receipt conflicts; the manifest
+    keeps the original saved assessment's fingerprint for reproducible indexing.
+    """
     if not isinstance(report, dict):
         return None, False
-    visibility = _meta(report).get("visibility")
+    meta = _meta(report)
+    visibility = meta.get("visibility")
     if visibility is None:  # Older reports used both omission and explicit null for "not assessed".
         return None, False
     summary = _project_visibility_fingerprint(visibility)
+    if summary is None:
+        return None, True
+    if reconcile_java:
+        from fxapk.core.visibility import project_saved_java_visibility
+
+        corrected = project_saved_java_visibility(meta)
+        if corrected is not visibility:
+            summary = _project_visibility_fingerprint(corrected)
     return summary, summary is None
 
 
