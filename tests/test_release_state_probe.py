@@ -15,7 +15,9 @@ GOOD = b"synthetic asset bytes"
 GIT_SHA = "a" * 40
 TAG = "v0.0.0"
 REPO = "owner/synthetic"
-REQUEST = {"method": "GET", "path": f"/repos/{REPO}/releases/tags/{TAG}"}
+API = "https://api.github.com"
+PATH = f"/repos/{REPO}/releases/tags/{TAG}"
+REQUEST = {"method": "GET", "path": PATH, "response_path": PATH, "request_origin": API, "response_origin": API}
 SHA256 = hashlib.sha256(GOOD).hexdigest()
 REPO_ID, RELEASE_ID, ASSET_ID = 54321, 12345, 42
 ASSET = {"name": NAME, "state": "uploaded", "digest": f"sha256:{SHA256}", "size": len(GOOD), "id": ASSET_ID}
@@ -231,3 +233,46 @@ def test_same_repository_tag_observation_must_match_requested_tag(probe: Probe) 
     }})
     assert code == 2
     assert result["reason"] == "tag_observation_mismatch"
+
+
+def test_github_repository_path_ignores_case_only_in_slug(probe: Probe) -> None:
+    code, result = probe(status=404, evidence={"release_request": {
+        **REQUEST, "path": f"/repos/{REPO.upper()}/releases/tags/{TAG}",
+    }})
+    assert code == 2
+    assert result["state"] == "not_observed"
+    assert result["http_status"] == 404
+
+
+@pytest.mark.parametrize("field", ["request_origin", "response_origin"])
+def test_github_origin_required_for_attribution(probe: Probe, field: str) -> None:
+    code, result = probe(status=404, evidence={"release_request": {
+        **REQUEST, field: "https://mirror.example.test",
+    }})
+    assert code == 2
+    assert result["state"] == "unknown"
+    assert result["reason"] == "release_request_mismatch"
+    assert result["http_status"] is None
+
+
+def test_older_batch_different_tag_commit_is_not_a_conflict(probe: Probe) -> None:
+    code, result = probe(evidence={"tag_observation": {
+        "repository_id": REPO_ID, "tag": TAG, "peeled_tag_commit": "b" * 40,
+        "observed_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+    }})
+    assert code == 2
+    assert result["state"] == "unknown"
+    assert result["reason"] == "observation_batch_mismatch"
+
+
+@pytest.mark.parametrize("path", [
+    f"/repos/{REPO}/releases/tags/{TAG.upper()}",
+    f"/repos/{REPO}/releases/tags/v0.0.1",
+    f"/repos/{REPO}/releases/latest",
+])
+def test_response_redirect_must_preserve_exact_tag_endpoint(probe: Probe, path: str) -> None:
+    # The tag includes a lowercase v, deliberately distinct from uppercase V.
+    code, result = probe(status=404, evidence={"release_request": {**REQUEST, "response_path": path}})
+    assert code == 2
+    assert result["state"] == "unknown"
+    assert result["http_status"] is None

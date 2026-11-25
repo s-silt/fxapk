@@ -7,10 +7,12 @@ reads credentials.
 
 Capture fields: http_status, body, repository_id, observed_at (UTC or with
 offset), release_request, tag_observation, and download_observation.
-Record the actual release request's method and encoded path (GitHub REST GET
-/repos/{owner}/{repo}/releases/tags/{tag}), even on errors. Independently
-supply the expected repository slug and ID; do not infer request identity from
-the response body. Only a matching request can contribute an HTTP status.
+Record method, path, request_origin, response_origin and response_path from
+the actual GET /repos/{owner}/{repo}/releases/tags/{tag}, including on errors.
+Origins must be https://api.github.com and both encoded paths must match the
+independently expected repository slug and tag (only the repository slug is
+case-insensitive). A redirect to a different endpoint cannot contribute an
+HTTP status. Independently supply the expected numeric repository ID too.
 The tag observation binds repository_id, requested tag and peeled_tag_commit.
 The download observation binds repository_id, release_id and asset_ids (name
 to REST ID). Both record their actual observed_at, not the release lookup's
@@ -107,8 +109,7 @@ def diagnose(
     if not _matches_id(captured.get("repository_id"), repository_id):
         return Diagnosis("unknown", "release_repository_mismatch", stamp)
     request = captured.get("release_request")
-    expected_path = f"/repos/{repository}/releases/tags/{quote(tag, safe='')}"
-    if not isinstance(request, dict) or request.get("method") != "GET" or request.get("path") != expected_path:
+    if not _matches_github_release_request(request, repository, tag):
         return Diagnosis("unknown", "release_request_mismatch", stamp)
     status = captured["http_status"]
     now = datetime.now(timezone.utc)
@@ -117,6 +118,25 @@ def diagnose(
         return Diagnosis("unknown", "observation_outside_freshness_window", stamp, status)
     result = _diagnose_capture(captured, repository_id, tag, commit, expected, downloaded, observed, now)
     return replace(result, observed_at=stamp, http_status=status)
+
+
+def _matches_github_release_request(request: object, repository: str, tag: str) -> bool:
+    if not isinstance(request, dict) or request.get("method") != "GET" or any(
+        request.get(field) != "https://api.github.com" for field in ("request_origin", "response_origin")
+    ):
+        return False
+    suffix = f"releases/tags/{quote(tag, safe='')}"
+    for field in ("path", "response_path"):
+        path = request.get(field)
+        if not isinstance(path, str):
+            return False
+        parts = path.split("/", 4)
+        if len(parts) != 5 or parts[:2] != ["", "repos"] or parts[4] != suffix:
+            return False
+        slug = "/".join(parts[2:4])
+        if not REPOSITORY.fullmatch(slug) or slug.lower() != repository.lower():
+            return False
+    return True
 
 
 def _matches_id(raw: object, expected: int) -> bool:
@@ -151,6 +171,8 @@ def _diagnose_capture(
     tag_time = _timestamp(tag_evidence.get("observed_at"))
     if tag_time is None or not timedelta(0) <= now - tag_time <= MAX_CAPTURE_AGE:
         return Diagnosis("unknown", "tag_observation_time_unverified")
+    if abs(tag_time - observed) > MAX_CAPTURE_SPAN:
+        return Diagnosis("unknown", "observation_batch_mismatch")
     # The release API target_commitish is not the peeled Git tag.
     observed_commit = tag_evidence.get("peeled_tag_commit")
     if not isinstance(observed_commit, str) or not COMMIT.fullmatch(observed_commit):
