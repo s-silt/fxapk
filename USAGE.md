@@ -78,7 +78,7 @@
 
 `analysis_notes` 列出两份报告各自记录的失败和跳过项，不包含原始错误说明。`not_recorded` 表示报告没记录分析项状态，`invalid` 表示状态记录不可用。这些提示不判断每组列表是否扫全，也不改变原有增删或计数。
 
-`coverage_observations.java` 分别展示两份报告的 JADX 覆盖，而不是分析器是否运行成功。仅带出已知的产出不全（`producer_partial`）与文件数上限（`scan_limit_hit`）原因码，不输出原始错误文本。旧报告只有 JADX 成功、没有覆盖回执时是 `unknown`。这不会改变端点差异，也不能证明任何清单已查全。
+`coverage_observations.java` 分别展示两份报告的 JADX 覆盖，而不是分析器是否运行成功。仅带出已知的产出不全（`producer_partial`）、文件数上限（`scan_limit_hit`）和经同次运行回执佐证的 DEX 输入读取失败（`producer_dex_input_read_error`，也可能出现在超时报告中），不输出原始错误文本。旧报告只有 JADX 成功、没有覆盖回执时是 `unknown`。这不会改变端点差异，也不能证明任何清单已查全。
 
 ## 隐私与输出
 

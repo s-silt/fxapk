@@ -78,7 +78,7 @@ Use `--report-details` to include the fields below. Without it, the top-level ke
 
 `analysis_notes` lists failures and skips recorded by each report, without free-form error messages. `not_recorded` means no analyzer status was recorded; `invalid` means the status records are unusable. These notes neither certify list coverage nor change any counts or deltas.
 
-`coverage_observations.java` shows what JADX covered in each report, separately from analyzer execution. It exposes only the known partial-output (`producer_partial`) and file-count-limit (`scan_limit_hit`) codes, not raw diagnostics. An older report that only says JADX succeeded, without a coverage receipt, is `unknown`. This does not change endpoint differences or certify exhaustive coverage.
+`coverage_observations.java` shows what JADX covered in each report, separately from analyzer execution. It exposes only the known partial-output (`producer_partial`), file-count-limit (`scan_limit_hit`), and DEX input read error (`producer_dex_input_read_error`) codes, not raw diagnostics. The DEX code requires corroboration from the same run receipt and can also appear in a timeout report. An older report that only says JADX succeeded, without a coverage receipt, is `unknown`. This does not change endpoint differences or certify exhaustive coverage.
 
 ## Privacy and output
 
