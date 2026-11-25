@@ -6,7 +6,7 @@ not establish that a draft is absent. This tool neither calls the network nor
 reads credentials.
 
 Capture fields: http_status, body, repository_id, observed_at (UTC or with
-offset), release_request, tag_observation, and download_observation.
+offset), capture_id, release_request, tag_observation, and download_observation.
 Record method, path, request_origin, response_origin and response_path from
 the actual GET /repos/{owner}/{repo}/releases/tags/{tag}, including on errors.
 Origins must be https://api.github.com and both encoded paths must match the
@@ -16,10 +16,14 @@ HTTP status. Independently supply the expected numeric repository ID too.
 The tag observation binds repository_id, requested tag and peeled_tag_commit.
 The download observation binds repository_id, release_id and asset_ids (name
 to REST ID). Both record their actual observed_at, not the release lookup's
-timestamp. All observations must be at most 24 hours old and within 15
-minutes of each other to support a match. Out-of-window HTTP status is only
-historical context. The caller must supply trusted records; this tool does not
-authenticate a capture or prove the remote state has not changed.
+timestamp. Use a new capture_id per collection attempt, recorded by each
+source when collected (never retroactively assigned to mixed records).
+For a match, read the release again after obtaining the tag and downloads and
+store that final response and time. The observations must be at most 24 hours
+old and within 15 minutes of one another. Out-of-window HTTP status is only
+historical context. These checks catch accidental mixing of trusted records;
+they do not authenticate inputs, give an atomic remote snapshot, or prove
+that the remote state has not changed.
 Inventory is a JSON object of expected asset names to lower-case SHA-256 from
 a trusted build; downloaded must be a separate, stable local directory.
 Exit 0 means these supplied observations match; 2 means not verified.
@@ -43,6 +47,7 @@ MAX_FILE = 128 * 1024 * 1024
 MAX_TOTAL = 512 * 1024 * 1024
 MAX_CAPTURE_AGE = timedelta(hours=24)
 MAX_CAPTURE_SPAN = timedelta(minutes=15)
+CAPTURE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -111,12 +116,15 @@ def diagnose(
     request = captured.get("release_request")
     if not _matches_github_release_request(request, repository, tag):
         return Diagnosis("unknown", "release_request_mismatch", stamp)
+    capture_id = captured.get("capture_id")
+    if not isinstance(capture_id, str) or not CAPTURE_ID.fullmatch(capture_id):
+        return Diagnosis("unknown", "capture_id_unverified", stamp)
     status = captured["http_status"]
     now = datetime.now(timezone.utc)
     age = now - observed
     if not timedelta(0) <= age <= MAX_CAPTURE_AGE:
         return Diagnosis("unknown", "observation_outside_freshness_window", stamp, status)
-    result = _diagnose_capture(captured, repository_id, tag, commit, expected, downloaded, observed, now)
+    result = _diagnose_capture(captured, repository_id, tag, commit, expected, downloaded, observed, now, capture_id)
     return replace(result, observed_at=stamp, http_status=status)
 
 
@@ -145,7 +153,7 @@ def _matches_id(raw: object, expected: int) -> bool:
 
 def _diagnose_capture(
     captured: dict[str, Any], repository_id: int, tag: str, commit: str,
-    expected: dict[str, str], downloaded: Path | None, observed: datetime, now: datetime,
+    expected: dict[str, str], downloaded: Path | None, observed: datetime, now: datetime, capture_id: str,
 ) -> Diagnosis:
     status = captured["http_status"]
     if status == 404:
@@ -171,7 +179,7 @@ def _diagnose_capture(
     tag_time = _timestamp(tag_evidence.get("observed_at"))
     if tag_time is None or not timedelta(0) <= now - tag_time <= MAX_CAPTURE_AGE:
         return Diagnosis("unknown", "tag_observation_time_unverified")
-    if abs(tag_time - observed) > MAX_CAPTURE_SPAN:
+    if tag_evidence.get("capture_id") != capture_id or not timedelta(0) <= observed - tag_time <= MAX_CAPTURE_SPAN:
         return Diagnosis("unknown", "observation_batch_mismatch")
     # The release API target_commitish is not the peeled Git tag.
     observed_commit = tag_evidence.get("peeled_tag_commit")
@@ -219,8 +227,7 @@ def _diagnose_capture(
     download_time = _timestamp(download_evidence.get("observed_at"))
     if download_time is None or not timedelta(0) <= now - download_time <= MAX_CAPTURE_AGE:
         return Diagnosis("unknown", "download_observation_time_unverified")
-    times = (tag_time, observed, download_time)
-    if max(times) - min(times) > MAX_CAPTURE_SPAN:
+    if download_evidence.get("capture_id") != capture_id or not timedelta(0) <= observed - download_time <= MAX_CAPTURE_SPAN:
         return Diagnosis("unknown", "observation_batch_mismatch")
     if max(sizes.values()) > MAX_FILE or sum(sizes.values()) > MAX_TOTAL:
         return Diagnosis("unknown", "asset_read_budget")
