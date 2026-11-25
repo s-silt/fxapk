@@ -178,6 +178,7 @@ HTML 报告的「看到了多少」和 `digest` 的 `visibility.java_scan` 会�
 - 案件级 IOC 索引只接收至少一条显式 `case_evidence` 的 `Lead.source_refs[]` / `Endpoint.evidences[]`。
 - corpus 关系索引使用 `relation_index_version=evidence-admission/1`；缺少标记的历史关系保持 unknown，只有显式 `corpus reindex` 才重建索引，报告原始字节不改。证据准入按 occurrence 和用途分别评估：静态候选不代表运行时观测或业务归属。
 - `corpus migrate-catalog` 把旧 `manifest.case_id` 迁到 `catalog.jsonl`：先 dry-run，再 `--apply`。**迁移不可回滚，`--apply` 前整目录备份**——`corpus restore` 恢复的 manifest 会被 catalog 立刻重新物化，手删 `catalog.jsonl` 则整库 fail-closed。
+- `corpus regress` 把旧报告的缺失值或 `null` 视为未求值。结构异常单列计数，即使另一版报告不可读，也不把异常当作可见性结论发生变化的证据；默认仅列有变化的样本，用 `--all` 可查看其他样本哪一版异常。新版求值不再可用（缺失或结构异常）仍需复核。缺少受限主张列表不等于显式空列表；报告原始内容不变。
 - `corpus reconcile` 默认只读列计划；`--apply` 只新增不可变报告或并入案件关联，字节冲突、隔离记录或包哈希变化非零退出。Phase 2 始终消费精确 package 哈希。
 
 ## 阶段间证据契约与四种状态

@@ -1887,3 +1887,34 @@ def test_cli_backfill_dry_run_default_then_apply(tmp_path: Path) -> None:
     assert "不能追溯" in ap_payload["evidence_boundary"]
     [e] = corpus.load_manifest(corpus_dir)
     assert e["report_bytes_sha256_origin"] == corpus.HASH_ORIGIN_BACKFILL
+
+
+@pytest.mark.parametrize("bad_fields", [
+    {"blocked_claims": False},
+    {"blocked_claims": [False]},
+    {"sources": []},
+    {"sources": {"java": {"visibility": False}}},
+    {"claims": []},
+    {"claims": {"static_endpoint_exhaustive": None}},
+    {"claims": {"static_endpoint_exhaustive": {"missing_sources": 7}}},
+    {"claims": {"static_endpoint_exhaustive": {"unassessed_sources": "java"}}},
+    {"next_actions": {}},
+    {"degraded": "false"},
+])
+def test_visibility_invalid_fingerprint_is_not_an_empty_assessment(bad_fields: dict) -> None:
+    report = _vis_report(**bad_fields)
+    original = json.dumps(report, ensure_ascii=False)
+    assert corpus.visibility_summary(report) is None
+    assert corpus.manifest_entry(report)["visibility"] is None
+    assert json.dumps(report, ensure_ascii=False) == original
+
+
+def test_visibility_legacy_optional_fields_still_comparable() -> None:
+    report = _vis_report(claims={"static_endpoint_exhaustive": {"missing_sources": ["dex"]}})
+    del report["meta"]["visibility"]["next_actions"]
+    result = corpus.visibility_summary(report)
+    assert result is not None
+    assert result["claims"]["static_endpoint_exhaustive"] == {
+        "missing_sources": ["dex"], "unassessed_sources": [],
+    }
+    assert result["next_actions"] == 0
