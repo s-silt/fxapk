@@ -43,7 +43,7 @@ def _owned(returncode: int | None = 0, *, stdout: str = "", timed_out: bool = Fa
 
 def _patch(
     monkeypatch: pytest.MonkeyPatch, *, version: str | None = "1.5.2",
-    diagnostic: str = "", returncode: int | None = 0,
+    diagnostic: str = "", returncode: int | None = 0, timed_out: bool = False,
 ) -> list[dict]:
     """run_owned 替身：--version 调用返回版本串；其余按 jadx 执行写合成 java 树。
 
@@ -61,7 +61,7 @@ def _patch(
         pkg = out_dir / "sources" / "com" / "x"
         pkg.mkdir(parents=True, exist_ok=True)
         (pkg / "C.java").write_text(_JAVA_BODY, encoding="utf-8")
-        return _owned(returncode, stdout=diagnostic, timed_out=returncode is None)
+        return _owned(returncode, stdout=diagnostic, timed_out=timed_out)
 
     monkeypatch.setattr(jadx.proctree, "run_owned", _run)
     return calls
@@ -149,9 +149,11 @@ def test_reuse_on_second_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("preexisting", [False, True])
-@pytest.mark.parametrize("returncode", [0, 3, None])
+@pytest.mark.parametrize(("returncode", "timed_out"), [
+    (0, False), (3, False), (None, True), (3, True),
+])
 def test_unread_input_never_publishes_or_reuses_an_index_key(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, preexisting: bool, returncode: int | None,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, preexisting: bool, returncode: int | None, timed_out: bool,
 ) -> None:
     ctx = _ctx(tmp_path, dex_names=("classes.dex", "classes2.dex"))
     old_key = None
@@ -159,12 +161,15 @@ def test_unread_input_never_publishes_or_reuses_an_index_key(
         _patch(monkeypatch)
         old_key = JadxAnalyzer().analyze(ctx).meta["jadx_index_key"]
         assert _load(ctx, old_key).coverage == "complete"
-    _patch(monkeypatch, diagnostic="ERROR - Failed to read zip entry: fixture.apk:classes2.dex", returncode=returncode)
+    _patch(
+        monkeypatch, diagnostic="ERROR - Failed to read zip entry: fixture.apk:classes2.dex",
+        returncode=returncode, timed_out=timed_out,
+    )
     for _ in range(2):
         result = JadxAnalyzer().analyze(ctx)
         receipt = result.meta["jadx_receipt"]
         assert not receipt["complete"] and result.meta["jadx_endpoint_count"] >= 1
-        assert receipt["status"] == ("timeout" if returncode is None else "partial")
+        assert receipt["status"] == ("timeout" if timed_out else "partial")
         assert receipt["runs"][0]["returncode"] == returncode
         assert "producer_dex_input_read_error" in receipt["reason_codes"]
         assert result.meta["jadx_index_status"] == receipt["index"]["status"] == "disabled"
