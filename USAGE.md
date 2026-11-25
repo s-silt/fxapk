@@ -59,7 +59,7 @@
 
 ## 阅读文件覆盖缺口
 
-在 JSON 报告的 `meta.file_read_visibility` 中，`reason: decompression_budget` 表示累计解压预算已用完，该文件未读取。这不是文件损坏，也不是“未发现”；以 `visibility` 中对应来源的状态为准。部分隔离读取失败还会带一项可选的 `diagnostic`，旧报告没有该项也正常。已有明确预算记录时，`digest` 和 HTML 的可见性提示只显示各来源受影响的文件数，不显示路径。
+在 JSON 报告的 `meta.file_read_visibility` 中，`reason: decompression_budget` 表示累计解压预算已用完，该文件未读取。这不是文件损坏，也不是“未发现”；以 `visibility` 中对应来源的状态为准。部分隔离读取失败还会带一项可选的 `diagnostic`，旧报告没有该项也正常。`digest` 和 HTML 只为已判为部分可见的来源显示预算跳过文件数，不显示路径。计数只含开始读取前因累计预算耗尽而跳过的文件；读取过程中才触及解压上限（`actual_decompression_limit`）的文件不计入。
 
 ## 比较两份报告
 
