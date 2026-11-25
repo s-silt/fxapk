@@ -1,11 +1,19 @@
 """Check the offline CLI contract of installed fxapk wheels; does not build or publish.
 
-Run with the Python of a fresh wheel-only venv, from outside the checkout:
+Create a fresh venv for each mode. Pass the exact paths of the core and,
+for registered mode, the three plugin wheels directly to pip (not package
+names found through an index). For example, install from a local wheelhouse::
+
+    /path/to/venv/bin/python -m pip install --no-index --find-links /path/to/wheelhouse CORE.whl UI.whl FLUTTER.whl REA.whl
+
+Then run from outside the checkout with the same venv Python::
+
     /path/to/venv/bin/python -I /path/to/checkout/tools/release_plugin_smoke.py \
         --expect-version 2.0.6 registered
 
-Use separate environments for "core" and "registered". This complements, rather
-than replaces, dependency checks and the existing core release smoke.
+Use separate environments for "core" and "registered". The REA probe tests local
+registration only; it never changes the CLI opt-in setting. This complements
+dependency checks and the existing core release smoke.
 """
 
 from __future__ import annotations
@@ -52,8 +60,7 @@ def validate_registry(entries: list[EntryPoint], mode: str) -> None:
         require_local_wheel(owner)
 
 
-def run_cli(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-    exe = Path(sys.executable).parent / ("fxapk.exe" if os.name == "nt" else "fxapk")
+def run_installed(argv: list[str], root: Path) -> subprocess.CompletedProcess[str]:
     # Retain OS runtime settings, but not project flags, Python import paths or user config.
     env = {
         key: value for key, value in os.environ.items()
@@ -64,13 +71,84 @@ def run_cli(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
     env.update(PYTHONUTF8="1", NO_COLOR="1")
     try:
         return subprocess.run(
-            [str(exe), *args], cwd=root, env=env, capture_output=True,
+            argv, cwd=root, env=env, capture_output=True,
             text=True, encoding="utf-8", timeout=30, check=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise SmokeFailure("cli_timeout") from exc
     except (OSError, UnicodeError) as exc:
         raise SmokeFailure("cli_unavailable") from exc
+
+
+def run_cli(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    exe = Path(sys.executable).parent / ("fxapk.exe" if os.name == "nt" else "fxapk")
+    return run_installed([str(exe), *args], root)
+
+
+_REA_PROBE = r"""
+import sys
+
+attempted = False
+
+def audit(event, args):
+    global attempted
+    if event == "import" and args[0].split(".")[0] == "fxapk_rea":
+        attempted = True
+
+sys.addaudithook(audit)
+sys.argv = ["fxapk", "rea", "--help"]
+try:
+    from fxapk.cli import main
+    main()
+finally:
+    # importlib-based entry loaders may not fire the Python import audit event.
+    if attempted or any(name.split(".")[0] == "fxapk_rea" for name in sys.modules):
+        sys.stderr.write("rea_default_import_detected\n")
+"""
+
+def check_rea_default(root: Path) -> None:
+    probe = run_installed([sys.executable, "-I", "-c", _REA_PROBE], root)
+    require("rea_default_import_detected" not in probe.stderr, "rea_imported_by_default")
+    require(probe.returncode == 2 and "No such command 'rea'" in probe.stderr, "rea_not_disabled")
+
+
+# Test only local command registration, without turning on REA in the core CLI.
+# A sentinel is added so Typer cannot flatten the REA group into a single command.
+_REA_REGISTRATION = """
+from contextlib import redirect_stderr, redirect_stdout
+from importlib.metadata import entry_points
+from io import StringIO
+import sys
+
+try:
+    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+        import typer
+        from fxapk.plugins.contracts import PLUGIN_API_VERSION
+
+        entry = entry_points(group="fxapk.plugins", name="rea")["rea"]
+        plugin = entry.load()()
+        if plugin.name != "rea" or plugin.api_version != PLUGIN_API_VERSION:
+            raise ValueError("rea_plugin_contract")
+        app = typer.Typer()
+        @app.command()
+        def sentinel():
+            pass
+        plugin.register_cli(app)
+        command = typer.main.get_command(app)
+        context = command.make_context("fxapk", ["rea", "--help"], resilient_parsing=True)
+        group = command.get_command(context, "rea")
+        if group is None or "attach" not in group.commands:
+            raise ValueError("rea_commands_missing")
+except Exception:
+    sys.exit(1)
+print("rea_registration_ok")
+"""
+
+
+def check_rea_registration(root: Path) -> None:
+    proc = run_installed([sys.executable, "-I", "-c", _REA_REGISTRATION], root)
+    require(proc.returncode == 0 and proc.stdout.strip() == "rea_registration_ok",
+            "rea_registration_failed")
 
 
 def flutter_check(root: Path, *, valid: bool) -> None:
@@ -131,17 +209,18 @@ def smoke(mode: str, expect_version: str, root: Path, checks: list[str]) -> None
         for entry in entries:
             try:
                 factory = entry.load()
-            except (ImportError, AttributeError, OSError) as exc:
+            except Exception as exc:  # Third-party plugin boundary: never expose its traceback.
                 raise SmokeFailure("plugin_load_failed") from exc
             require(callable(factory), "plugin_factory_not_callable")
         checks.append("entry_point_loading")
         ui = run_cli(["ui", "--help"], root)
         require(ui.returncode == 0 and "capabilities" in ui.stdout, "ui_help")
         checks.append("ui_help")
-    rea = run_cli(["rea", "--help"], root)
-    require(rea.returncode == 2 and "No such command 'rea'" in rea.stderr, "rea_not_disabled")
+    check_rea_default(root)
     checks.append("rea_default_off")
     if mode == "registered":
+        check_rea_registration(root)
+        checks.append("rea_registration_offline")
         for valid in (True, False):
             flutter_check(root, valid=valid)
             checks.append("flutter_valid" if valid else "flutter_invalid")
