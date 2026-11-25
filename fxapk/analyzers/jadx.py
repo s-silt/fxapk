@@ -1194,43 +1194,33 @@ class JadxAnalyzer(BaseAnalyzer):
                 ", ".join(owned.reason_codes),
             )
             return _JadxRun(status="failed", options_digest=digest, process=owned)
-        if owned.timed_out:
-            # 超时不静默：返回 "timeout" 落进 meta.jadx_status，且调用方仍扫已生成的部分产物
-            # （jadx_java_files 记录实际反编译出的文件数）。二者合看即可与「真·壳样本」区分——
-            # 真壳样本是 status=ok + 个位数文件，超时是 status=timeout + 可能被腰斩的文件数。
-            logger.warning(
-                "[jadx] 反编译超时（%ss，额外 DEX %d 个），进程树已终止：%s",
-                timeout, len(dex_inputs), apk_path,
-            )
-            return _JadxRun(status="timeout", options_digest=digest, process=owned)
-        # Both upstream versions can log a skipped ZIP member yet exit 0.
-        # The fallback reader does not even expose the member name; completeness
-        # cannot be proven in that case. Persist only a stable reason, not its log.
+        # Input loss and process termination are independent. Preserve the
+        # producer diagnostic for every outcome after ownership is established.
         dex_input_read_error = any(
             _ZIP_ENTRY_READ_ERROR.fullmatch(line.rstrip())
             for stream in (owned.stdout, owned.stderr)
             for line in (stream or "").splitlines()
         )
-        if owned.returncode != 0:
-            # jadx 对部分类反编译失败时返回非零，但通常已产出大部分 .java。
+        if owned.timed_out:
+            logger.warning("[jadx] 反编译超时（%ss），进程树已终止：%s", timeout, apk_path)
+            status = "timeout"
+        elif owned.returncode != 0:
             logger.warning(
                 "[jadx] 非零退出（%s），按部分产物继续扫描。stderr 尾部：%s",
                 owned.returncode,
                 (owned.stderr or "")[-1000:],
             )
-            return _JadxRun("partial", digest, owned, dex_input_read_error=dex_input_read_error)
-        if owned.forced_tree_kill or not owned.termination_complete:
-            # 干净退出但留了后代被强杀 / 树终止未获确认：产物可能被仍在写的 java 腰斩，
-            # 按 partial 定性，不许读成「全部成功」。
-            logger.warning(
-                "[jadx] 退出码 0 但进程树未干净收尾（%s），按 partial 计",
-                ", ".join(owned.reason_codes),
-            )
-            return _JadxRun("partial", digest, owned, dex_input_read_error=dex_input_read_error)
-        if dex_input_read_error:
+            status = "partial"
+        elif owned.forced_tree_kill or not owned.termination_complete:
+            # Sources may still have been in flight when the root exited.
+            logger.warning("[jadx] 退出码 0 但进程树未干净收尾（%s），按 partial 计", ", ".join(owned.reason_codes))
+            status = "partial"
+        elif dex_input_read_error:
             logger.warning("[jadx] 有输入条目未能载入，保留其余产物，覆盖按 partial 计")
-            return _JadxRun(status="partial", options_digest=digest, process=owned, dex_input_read_error=True)
-        return _JadxRun(status="ok", options_digest=digest, process=owned)
+            status = "partial"
+        else:
+            status = "ok"
+        return _JadxRun(status, digest, owned, dex_input_read_error=dex_input_read_error)
 
     @staticmethod
     def _jadx_timeout(n_extra_dex: int) -> float:
