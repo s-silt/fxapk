@@ -47,6 +47,7 @@ def probe(tmp_path: Path) -> Probe:
         capture.write_text(raw if raw is not None else json.dumps({
             "http_status": status, "peeled_tag_commit": observed, "body": {**body, **(release or {})},
             "repository_id": REPO_ID, "tag_repository_id": REPO_ID,
+            "release_request": {"operation": "release_by_tag", "tag": TAG},
             "observed_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
             "download_observation": {"repository_id": REPO_ID, "release_id": RELEASE_ID,
                                      "asset_ids": {NAME: ASSET_ID}},
@@ -150,3 +151,28 @@ def test_http_status_not_attributed_to_wrong_repository(probe: Probe) -> None:
     assert code == 2
     assert actual["reason"] == "release_repository_mismatch"
     assert actual["http_status"] is None
+
+
+@pytest.mark.parametrize(("status", "query"), [
+    (404, {"operation": "release_by_tag", "tag": "v0.0.1"}),
+    (503, {"operation": "release_by_tag", "tag": "v0.0.1"}),
+    (404, {"operation": "latest_release", "tag": TAG}),
+    (200, {"operation": "release_by_tag", "tag": "v0.0.1"}),
+    (404, None),
+])
+def test_release_query_identity_is_required(probe: Probe, status: int, query: object) -> None:
+    code, diagnostic = probe(status=status, evidence={"release_request": query})
+    assert code == 2
+    assert diagnostic["state"] == "unknown"
+    assert diagnostic["reason"] == "release_request_mismatch"
+    assert diagnostic["http_status"] is None
+
+
+def test_stale_wrong_tag_cannot_report_http_status(probe: Probe) -> None:
+    code, diagnostic = probe(status=404, evidence={
+        "release_request": {"operation": "release_by_tag", "tag": "v0.0.1"},
+        "observed_at": "2001-01-01T00:00:00Z",
+    })
+    assert code == 2
+    assert diagnostic["reason"] == "release_request_mismatch"
+    assert diagnostic["http_status"] is None

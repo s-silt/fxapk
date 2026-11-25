@@ -6,12 +6,16 @@ not establish that a draft is absent. This tool neither calls the network nor
 reads credentials.
 
 Capture fields: http_status, body, repository_id, observed_at (UTC or with
-offset), tag_repository_id, peeled_tag_commit, and download_observation.
+offset), release_request, tag_repository_id, peeled_tag_commit, and
+download_observation. Set release_request to {"operation": "release_by_tag",
+"tag": "<requested tag>"} from the actual GET /repos/{owner}/{repo}/releases/tags/{tag}
+request, including on HTTP errors; do not infer it from the response body.
+A missing or mismatched request does not establish a result for the target tag.
 The latter binds repository_id, release_id and asset_ids (name to REST ID).
 These records must come from the same trusted capture, not from generated
 assertions. The 24-hour freshness limit applies to every HTTP response,
 including 404 and query failures. For a capture attributed to the requested
-repository with a valid timestamp, the receipt preserves the HTTP status for
+repository and tag with a valid timestamp, the receipt preserves the HTTP status for
 diagnosis even when freshness prevents a present-day conclusion.
 Inventory is a JSON object of expected asset names to lower-case SHA-256 from
 a trusted build; downloaded must be a separate, stable local directory.
@@ -94,6 +98,9 @@ def diagnose(
     stamp = observed.isoformat()
     if not _matches_id(captured.get("repository_id"), repository_id):
         return Diagnosis("unknown", "release_repository_mismatch", stamp)
+    request = captured.get("release_request")
+    if not isinstance(request, dict) or request.get("operation") != "release_by_tag" or request.get("tag") != tag:
+        return Diagnosis("unknown", "release_request_mismatch", stamp)
     status = captured["http_status"]
     age = datetime.now(timezone.utc) - observed
     if not timedelta(0) <= age <= MAX_CAPTURE_AGE:
