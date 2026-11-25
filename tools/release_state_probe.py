@@ -16,8 +16,9 @@ HTTP status. Independently supply the expected numeric repository ID too.
 The tag observation binds repository_id, requested tag and peeled_tag_commit.
 The download observation binds repository_id, release_id and asset_ids (name
 to REST ID). Both record their actual observed_at, not the release lookup's
-timestamp. Use a new capture_id per collection attempt, recorded by each
-source when collected (never retroactively assigned to mixed records).
+timestamp. Use a new capture_id per collection attempt: 1 to 128 ASCII
+letters, digits, underscores or hyphens. Record it at each source when
+collected (never retroactively assign it to mixed records).
 For a match, read the release again after obtaining the tag and downloads and
 store that final response and time. The observations must be at most 24 hours
 old and within 15 minutes of one another. Out-of-window HTTP status is only

@@ -298,13 +298,19 @@ def test_nearby_observations_from_distinct_captures_do_not_match(probe: Probe, s
 @pytest.mark.parametrize("source", ["tag_observation", "download_observation"])
 def test_release_lookup_must_follow_tag_and_download_observations(probe: Probe, source: str) -> None:
     now = datetime.now(timezone.utc)
-    code, result = probe(evidence={
+    baseline = {
+        "repository_id": REPO_ID, "tag": TAG, "peeled_tag_commit": GIT_SHA,
+        "release_id": RELEASE_ID, "asset_ids": {NAME: ASSET_ID}, "capture_id": CAPTURE_ID,
+        "observed_at": (now - timedelta(minutes=3)).isoformat(),
+    }
+    evidence = {
         "observed_at": (now - timedelta(minutes=2)).isoformat(),
-        source: {
-            "repository_id": REPO_ID, "tag": TAG, "peeled_tag_commit": GIT_SHA,
-            "release_id": RELEASE_ID, "asset_ids": {NAME: ASSET_ID}, "capture_id": CAPTURE_ID,
-            "observed_at": (now - timedelta(minutes=1)).isoformat(),
-        },
+        "tag_observation": baseline,
+        "download_observation": baseline,
+    }
+    assert probe(evidence=evidence)[0] == 0
+    code, result = probe(evidence={
+        **evidence, source: {**baseline, "observed_at": (now - timedelta(minutes=1)).isoformat()},
     })
     assert code == 2
     assert result["reason"] == "observation_batch_mismatch"
@@ -315,3 +321,11 @@ def test_missing_capture_identity_does_not_attribute_http_status(probe: Probe) -
     assert code == 2
     assert result["reason"] == "capture_id_unverified"
     assert result["http_status"] is None
+
+
+
+def test_cli_help_describes_capture_id_format() -> None:
+    result = subprocess.run(
+        [sys.executable, "-I", str(TOOL), "--help"], capture_output=True, text=True, check=True, timeout=10,
+    )
+    assert "1 to 128 ASCII letters, digits, underscores or hyphens" in " ".join(result.stdout.split())
