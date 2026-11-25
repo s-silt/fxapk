@@ -338,6 +338,7 @@ def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
     return {"state": state, "reason_codes": codes}
 
 
+RESTORED_SOURCE_NOTE = "★沿用先前快照：支撑该判定的原始信号已不在 meta 中（报告疑经裁剪）"
 PERSISTED_VISIBILITY_INVALID_NOTE = "可见性字段结构异常；输入完整性未知"
 
 
@@ -648,6 +649,10 @@ def _with_read_budget_notes(visibility: dict[str, Any], meta: dict) -> dict[str,
             continue
         seen, why = entry.get("inputs_seen"), entry.get("why")
         if not isinstance(seen, list) or "file_read_visibility" not in seen or not isinstance(why, list):
+            continue
+        # When closure had to restore a historical source, its current rows
+        # are not a reliable basis for adding a second, potentially conflicting count.
+        if RESTORED_SOURCE_NOTE in why:
             continue
         detail = f"其中 {len(files)} 个文件因累计解压预算耗尽未读取"
         if detail not in why:

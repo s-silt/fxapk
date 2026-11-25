@@ -252,7 +252,7 @@ def _preserve_confirmed_gaps(previous: dict, fresh: dict, meta: dict) -> dict:
         if not should_restore:
             continue
         why = [str(w) for w in (old_info.get("why") or [])]
-        marker = "★沿用先前快照：支撑该判定的原始信号已不在 meta 中（报告疑经裁剪）"
+        marker = _visibility.RESTORED_SOURCE_NOTE
         if marker not in why:
             why.append(marker)
         new_sources[name] = {**old_info, "why": why}

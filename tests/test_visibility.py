@@ -817,3 +817,50 @@ def test_budget_note_is_not_inferred_or_used_to_reclassify_saved_reports() -> No
         )
         assert V.project_persisted_visibility(report["meta"]) is saved
         assert "累计解压预算" not in str(build_digest(report)["visibility"])
+
+
+@pytest.mark.parametrize(
+    ("source", "count_key", "paths"),
+    [
+        ("resource", "resource_files_scanned", ("assets/a.txt", "assets/b.txt")),
+        ("native", "native_files_scanned", ("lib/arm64/a.so", "lib/arm64/b.so")),
+    ],
+)
+@pytest.mark.parametrize("keep_historical_count", [True, False])
+def test_budget_note_does_not_mix_restored_history_with_remaining_rows(
+    source: str, count_key: str, paths: tuple[str, str], keep_historical_count: bool,
+) -> None:
+    from copy import deepcopy
+
+    from fxapk.core.closure import refresh_visibility_snapshot
+
+    historical_note = "其中 2 个文件因累计解压预算耗尽未读取"
+    current_note = "其中 1 个文件因累计解压预算耗尽未读取"
+    report = _report(**{count_key: 1}, file_read_visibility=[
+        {"path": path, "source": "probe", "reason": "decompression_budget"}
+        for path in paths
+    ])
+    meta = report["meta"]
+    saved = V.assess(report)
+    assert historical_note in saved["sources"][source]["why"]
+    if not keep_historical_count:  # Simulate a historical version that only recorded the raw reason.
+        saved["sources"][source]["why"].remove(historical_note)
+        saved["notes"].remove(f"[{source}] {historical_note}")
+    del meta[count_key]
+    meta["file_read_visibility"].pop()
+    meta["visibility"] = saved
+
+    refresh_visibility_snapshot(meta)
+    assert any("沿用先前快照" in note for note in meta["visibility"]["sources"][source]["why"])
+    assert meta["visibility"]["blocked_claims"] == saved["blocked_claims"]
+    before = deepcopy(report)
+    digest = build_digest(report)["visibility"]
+    html = render_to_string(Report(
+        package_name="com.test", meta=meta, leads=[], endpoints=[], findings=[], analyzer_status=[],
+    ))
+    assert report == before
+    assert digest["sources"][source] == "partial"
+    assert sorted(row["claim"] for row in digest["blocked_claims"]) == saved["blocked_claims"]
+    assert (historical_note in html) is keep_historical_count
+    assert (f"[{source}] {historical_note}" in digest["notes"]) is keep_historical_count
+    assert (current_note in html, f"[{source}] {current_note}" in digest["notes"]) == (False, False)

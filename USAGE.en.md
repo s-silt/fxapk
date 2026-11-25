@@ -59,7 +59,7 @@ This reference lists public core top-level commands and groups. Use each entryâ€
 
 ## Read file coverage gaps
 
-In a JSON report, `reason: decompression_budget` under `meta.file_read_visibility` means the cumulative decompression budget was exhausted and that file was not read. It does not mean the file is corrupt or that nothing was found; check the corresponding source in `visibility`. Some isolated read failures also have an optional `diagnostic` field. Older reports may not contain it. For sources already marked partial, `digest` and HTML show how many files were skipped before reading because the cumulative budget was exhausted, without showing paths. Files that hit a decompression limit during reading (`actual_decompression_limit`) are not included in that count.
+In a JSON report, `reason: decompression_budget` under `meta.file_read_visibility` means the cumulative decompression budget was exhausted and that file was not read. It does not mean the file is corrupt or that nothing was found; check the corresponding source in `visibility`. Some isolated read failures also have an optional `diagnostic` field. Older reports may not contain it. For sources already marked partial, `digest` and HTML show how many files were skipped before reading because the cumulative budget was exhausted, without showing paths. Files that hit a decompression limit during reading (`actual_decompression_limit`) are not included in that count. If a trimmed report falls back to a previous snapshot for a source, it keeps the historical notes and does not recalculate the count from the remaining entries.
 
 ## Compare two saved reports
 
