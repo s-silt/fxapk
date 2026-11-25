@@ -57,6 +57,10 @@ This reference lists public core top-level commands and groups. Use each entryâ€
 | Bounded checks; view help without executing | `fxapk probe-target --help` |
 | Read-only offline addressing-chain evaluation | `fxapk addressing-evaluate <manifest.json> --out <result.json>`; verifies supplied hashes, missing independent labels remain unknown |
 
+## Read file coverage gaps
+
+In a JSON report, `reason: decompression_budget` under `meta.file_read_visibility` means the cumulative decompression budget was exhausted and that file was not read. It does not mean the file is corrupt or that nothing was found; check the corresponding source in `visibility`. Some isolated read failures also have an optional `diagnostic` field. Older reports may not contain it.
+
 ## Compare two saved reports
 
 `fxapk diff old.json new.json` compares two saved reports without analyzing either APK again. For leads, endpoints, and findings, read `comparison.status` before interpreting `added`, `removed`, or `changed`:

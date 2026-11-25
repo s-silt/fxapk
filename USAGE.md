@@ -57,6 +57,10 @@
 | 真机脱壳；仅已授权设备，查看参数不执行 | `fxapk unpack --help` |
 | 重打包/装回设备；仅已授权设备，查看参数不执行 | `fxapk repackage --help` |
 
+## 阅读文件覆盖缺口
+
+在 JSON 报告的 `meta.file_read_visibility` 中，`reason: decompression_budget` 表示累计解压预算已用完，该文件未读取。这不是文件损坏，也不是“未发现”；以 `visibility` 中对应来源的状态为准。部分隔离读取失败还会带一项可选的 `diagnostic`，旧报告没有该项也正常。
+
 ## 比较两份报告
 
 `fxapk diff old.json new.json` 只比较两份已保存报告，不重新分析 APK。线索、端点和发现各有一个 `comparison`。先看它的 `status`，再看 `added`、`removed` 或 `changed`：

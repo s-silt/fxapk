@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from fxapk.core import parallel, pipeline
+import pickle
+
+import pytest
+
+from fxapk.core import apk, parallel, pipeline
 from fxapk.core.apk import ApkContext
 from fxapk.core.file_read import FileReadLedger
 from fxapk.core.models import AnalysisConfig, AnalyzerResult
@@ -99,6 +103,70 @@ def test_worker_lazy_read_failure_is_safe_and_matches_serial_scope(monkeypatch) 
         assert "private read failure detail" not in error
     assert serial_row[1].input_gaps == worker_row[1].input_gaps
     assert worker_ctx.file_read_ledger.failure_reasons[path] == "read_failure"
+
+
+@pytest.mark.parametrize(("path", "visibility_source"), [
+    ("assets/example.txt", "resource"),
+    ("lib/arm64/libexample.so", "native"),
+])
+def test_snapshot_total_budget_retains_exact_partial_coverage_reason(
+    monkeypatch: pytest.MonkeyPatch, path: str, visibility_source: str,
+) -> None:
+    opened: list[str] = []
+
+    class APK:
+        def get_file(self, member: str) -> bytes:
+            opened.append(member)
+            return b"ok"
+
+    class Reader:
+        name = "budget_probe"
+
+        def analyze(self, ctx) -> AnalyzerResult:
+            data = ctx.read_file(path)
+            return AnalyzerResult(self.name, meta={"read": data is not None})
+
+    snapshot = SnapshotContext(
+        package_name="com.test",
+        manifest_xml="",
+        platform="android",
+        config=None,
+        apk_path="synthetic.apk",
+        extra_dex_paths=[],
+        jadx_cache_root=None,
+        jadx_baseline_index=None,
+        permissions=[],
+        components=None,
+        dex_strings=(),
+        file_list=[path],
+        native_libs=[],
+        certificates=[],
+        files={},
+        declared_sizes={path: 2},
+    )
+    monkeypatch.setattr(SnapshotContext, "_ensure_worker_apk", lambda _self: APK())
+    analyzer = Reader()
+    eligible = [(analyzer.name, analyzer)]
+    below = parallel._analyze_serial(snapshot, eligible)[0][1]
+    assert below.meta["read"] is True
+    assert below.input_gaps == []
+    assert opened == [path]
+
+    snapshot._lazy_other_extract_bytes = apk._OTHER_TOTAL_LIMIT_BYTES
+    worker_context = pickle.loads(pickle.dumps(snapshot))
+    serial = parallel._analyze_serial(snapshot, eligible)
+    monkeypatch.setitem(parallel._WORKER_STATE, "snapshot", worker_context)
+    monkeypatch.setitem(parallel._WORKER_STATE, "analyzers", dict(eligible))
+    worker = parallel._worker_analyze(analyzer.name)
+    assert serial == [worker]
+    assert opened == [path]
+    assert worker[1].meta["read"] is False
+    meta: dict = {"resource_files_scanned": 1, "native_files_scanned": 1}
+    pipeline._merge_file_read_gaps(meta, worker[1].input_gaps)
+    assert meta["file_read_visibility"] == [{
+        "path": path, "source": analyzer.name, "reason": "decompression_budget",
+    }]
+    assert assess({"meta": meta})["sources"][visibility_source]["visibility"] == VIS_PARTIAL
 
 
 def test_pipeline_folds_failed_analyzer_gaps_and_visibility_marks_partial(monkeypatch) -> None:

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 FILE_READ_FAILURE_REASONS = frozenset({
     "declared_limit",
     "actual_decompression_limit",
+    "decompression_budget",
     "read_failure",
     "unavailable_context",
     "parser_timeout",
