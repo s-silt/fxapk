@@ -370,6 +370,14 @@ _JAVA_SAVED_CONFLICT_CLAIMS = ("static_endpoint_exhaustive", "no_hardcoded_crede
 
 
 def project_persisted_visibility(meta: dict[str, Any]) -> object:
+    """Project saved evidence without reassessing legacy coverage."""
+    saved = _project_saved_java_visibility(meta)
+    if isinstance(saved, dict) and persisted_visibility_containers_valid(saved):
+        return _with_read_budget_notes(saved, meta)
+    return saved
+
+
+def _project_saved_java_visibility(meta: dict[str, Any]) -> object:
     """Downgrade only a saved complete Java view contradicted by a verified scan shape."""
     saved = meta.get("visibility")
     if not isinstance(saved, dict) or not persisted_visibility_containers_valid(saved):
@@ -616,6 +624,40 @@ def _file_read_gaps(meta: dict, *, native: bool) -> list[dict]:
         if is_native is native:
             gaps.append(item)
     return gaps
+
+
+def _with_read_budget_notes(visibility: dict[str, Any], meta: dict) -> dict[str, Any]:
+    """Add only deduplicated counts, retaining the already evaluated source states."""
+    raw = meta.get("file_read_visibility")
+    if not isinstance(raw, list):
+        return visibility
+    paths: dict[str, set[str]] = {"native": set(), "resource": set()}
+    for row in raw:
+        if not isinstance(row, dict) or row.get("reason") != "decompression_budget":
+            continue
+        path, producer = row.get("path"), row.get("source")
+        if isinstance(path, str) and path and isinstance(producer, str) and producer:
+            source = "native" if path.lower().endswith(".so") else "resource"
+            paths[source].add(path)
+    sources = visibility.get("sources", {})
+    notes = list(visibility.get("notes", []))
+    updated = {}
+    for source, files in paths.items():
+        entry = sources.get(source)
+        if not files or not isinstance(entry, dict) or entry.get("visibility") != VIS_PARTIAL:
+            continue
+        seen, why = entry.get("inputs_seen"), entry.get("why")
+        if not isinstance(seen, list) or "file_read_visibility" not in seen or not isinstance(why, list):
+            continue
+        detail = f"其中 {len(files)} 个文件因累计解压预算耗尽未读取"
+        if detail not in why:
+            updated[source] = {**entry, "why": [*why, detail]}
+        note = f"[{source}] {detail}"
+        if note not in notes:
+            notes.append(note)
+    if not updated and notes == visibility.get("notes", []):
+        return visibility
+    return {**visibility, "sources": {**sources, **updated}, "notes": notes}
 
 
 def _runtime_visibility(meta: dict) -> tuple[str, list[str]]:
@@ -907,7 +949,7 @@ def assess(report: Any) -> dict[str, Any]:
                 "此处的「未发现」只说明本次没看到，不能解读为不存在。"
             )
 
-        return {
+        return _with_read_budget_notes({
             "schema_version": "1.1",
             "sources": sources,
             "claims": claims,
@@ -916,7 +958,7 @@ def assess(report: Any) -> dict[str, Any]:
             "notes": notes,
             "next_actions": next_actions,
             "degraded": bool(blocked),
-        }
+        }, meta)
     except Exception:  # noqa: BLE001 — 求值失败不得影响主流程；返回保守的"全未知"
         logger.exception("[visibility] 可见性求值异常，返回保守结果")
         return {
