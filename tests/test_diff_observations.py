@@ -301,6 +301,15 @@ def test_cli_details_preserve_java_coverage_evidence(tmp_path) -> None:
         "new": {"state": "complete", "reason_codes": []},
     }
 
+    input_gap = "producer_dex_input_read_error"
+    recorded_gap = write("recorded-gap", receipt={
+        "schema": 1, "status": "timeout", "complete": False,
+        "reason_codes": ["producer_timeout", input_gap, "/private/exception"],
+        "runs": [{"status": "timeout", "ownership_complete": True, "reason_codes": [input_gap]}],
+    })
+    observed = compare(good, recorded_gap, "--report-details")["coverage_observations"]["java"]
+    assert observed["new"] == {"state": "timeout", "reason_codes": [input_gap]}
+
 
 def test_saved_diff_does_not_compare_sdk_from_rejected_apk(tmp_path, monkeypatch) -> None:
     from typer.testing import CliRunner

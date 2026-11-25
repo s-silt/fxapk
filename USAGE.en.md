@@ -175,7 +175,7 @@ Hunter reads the account's free balance before searching and reserves credits in
 
 ## JADX index
 
-The HTML visibility section and `visibility.java_scan` in `digest` show how many Java files JADX analysis read and enumerated. A count such as 2/3 refers to the enumerated Java files, not coverage of the whole APK. Even at N/N, the byte limit can truncate an individual Java file. Read it alongside the Java visibility status and gap notes. Older reports without reliable counts omit this value.
+The HTML visibility section and `visibility.java_scan` in `digest` show how many Java files JADX analysis read and enumerated. A count such as 2/3 refers to the enumerated Java files, not coverage of the whole APK. Even at N/N, the byte limit can truncate an individual Java file. Read it alongside the Java visibility status and gap notes. Older reports without reliable counts omit this value. If the run records that JADX could not read an input, the view does not claim complete coverage even if every enumerated Java file was read.
 
 In `digest.jadx_index.comparison`, missing or invalid bucket counts are `null`, not zero; `total_regions` is calculated only when all four counts are recorded nonnegative integers.
 

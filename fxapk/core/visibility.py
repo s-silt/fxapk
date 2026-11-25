@@ -325,6 +325,33 @@ def _java_visibility(meta: dict) -> tuple[str, list[str]]:
     return VIS_UNKNOWN, ["Java 面无扫描信号（jadx 未运行，或旧报告）"]
 
 
+_JAVA_PRODUCER_INPUT_GAP = "producer_dex_input_read_error"
+
+
+def _java_producer_input_gap(receipt: object) -> bool:
+    """Require corroboration in an owned producer run, not just a saved reason."""
+    if not isinstance(receipt, dict) or receipt.get("complete") is not False:
+        return False
+    schema = receipt.get("schema")
+    if type(schema) is not int or schema != 1:
+        return False
+    status = receipt.get("status")
+    if status not in (VIS_PARTIAL, VIS_TIMEOUT):
+        return False
+    reasons, runs = receipt.get("reason_codes"), receipt.get("runs")
+    if not isinstance(reasons, list) or not isinstance(runs, list):
+        return False
+    status_reason = "producer_partial" if status == VIS_PARTIAL else "producer_timeout"
+    return _JAVA_PRODUCER_INPUT_GAP in reasons and status_reason in reasons and any(
+        isinstance(run, dict)
+        and run.get("status") in (VIS_PARTIAL, VIS_TIMEOUT)
+        and run.get("ownership_complete") is True
+        and isinstance(run.get("reason_codes"), list)
+        and _JAVA_PRODUCER_INPUT_GAP in run["reason_codes"]
+        for run in runs
+    )
+
+
 def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
     """Project Java coverage without emitting report-supplied diagnostic text."""
     meta = _meta(report)
@@ -336,6 +363,8 @@ def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
         sorted({code for code in raw if isinstance(code, str) and code in allowed})
         if state == VIS_PARTIAL and isinstance(raw, list) else []
     )
+    if state in (VIS_PARTIAL, VIS_TIMEOUT) and _java_producer_input_gap(receipt):
+        codes = sorted([*codes, _JAVA_PRODUCER_INPUT_GAP])
     return {"state": state, "reason_codes": codes}
 
 
@@ -380,7 +409,7 @@ def project_persisted_visibility(meta: dict[str, Any]) -> object:
 
 
 def project_saved_java_visibility(meta: dict[str, Any]) -> object:
-    """Downgrade only a saved complete Java view contradicted by a verified scan shape."""
+    """Downgrade only a saved complete Java view contradicted by a verified receipt."""
     saved = meta.get("visibility")
     if not isinstance(saved, dict) or not persisted_visibility_containers_valid(saved):
         return saved
@@ -397,51 +426,16 @@ def project_saved_java_visibility(meta: dict[str, Any]) -> object:
     if not isinstance(why, list):
         return saved
 
-    # The current evaluator checks all contradictions in a complete producer claim.
-    # Saved views use only validated byte truncation or an explicit producer file limit.
     receipt = meta.get("jadx_receipt")
-    if not isinstance(receipt, dict) or receipt.get("status") != "ok" or type(receipt.get("complete")) is not bool:
+    state = VIS_PARTIAL
+    if _java_producer_input_gap(receipt):
+        state, _ = _java_visibility(meta)
+        # Scheduler status still overrides the producer, just as for a fresh report.
+        conflict_note = "JADX 本轮记录了输入读取失败，保存的 Java 可见性不能判为完整"
+    elif (scan_note := _saved_java_scan_conflict(meta)) is not None:
+        conflict_note = scan_note
+    else:
         return saved
-    scan = receipt.get("scan")
-    counts = java_scan_counts(meta)
-    if not isinstance(scan, dict) or counts is None:
-        return saved
-    truncated = scan.get("truncated_files")
-    if type(truncated) is not int or not 0 <= truncated <= counts["files_scanned"]:
-        return saved
-    if any(type(scan.get(key, False)) is not bool for key in ("scan_limit_hit", "discovery_failed")):
-        return saved
-    if any(type(scan.get(key, 0)) is not int or scan.get(key, 0) < 0 for key in ("read_failed", "scan_exceptions")):
-        return saved
-    selected = scan.get("files_selected", counts["files_total"])
-    if type(selected) is not int or not counts["files_scanned"] <= selected <= counts["files_total"]:
-        return saved
-
-    conflict_note = _JAVA_SAVED_CONFLICT_NOTE
-    if truncated == 0:
-        # A native count-limited scan has a positive selection. Each selected file
-        # is read or counted as a read failure; cleanup can fail independently.
-        cleanup = receipt.get("cleanup")
-        read_failed = scan.get("read_failed")
-        if (
-            receipt["complete"] is not False
-            or scan.get("scan_limit_hit") is not True
-            or not 0 < selected < counts["files_total"]
-            or read_failed != selected - counts["files_scanned"]
-            or scan.get("discovery_failed") is not False
-            or scan.get("scan_exceptions") != 0
-            or not isinstance(cleanup, dict)
-            or type(cleanup.get("complete")) is not bool
-        ):
-            return saved
-        expected_reasons = ["scan_limit_hit"]
-        if read_failed:
-            expected_reasons.append("read_failed")
-        if cleanup["complete"] is False:
-            expected_reasons.append("cleanup_incomplete")
-        if receipt.get("reason_codes") != sorted(expected_reasons):
-            return saved
-        conflict_note = _JAVA_SAVED_FILE_LIMIT_NOTE
 
     raw_claims = saved.get("claims")
     claims = dict(raw_claims) if isinstance(raw_claims, dict) else {}
@@ -475,7 +469,7 @@ def project_saved_java_visibility(meta: dict[str, Any]) -> object:
             **sources,
             "java": {
                 **java,
-                "visibility": VIS_PARTIAL,
+                "visibility": state,
                 "why": why if conflict_note in why else [*why, conflict_note],
             },
         },
@@ -484,6 +478,54 @@ def project_saved_java_visibility(meta: dict[str, Any]) -> object:
         "notes": notes,
         "degraded": True,
     }
+
+
+def _saved_java_scan_conflict(meta: dict[str, Any]) -> str | None:
+    """Validate the established file-count and byte-truncation projections."""
+    receipt = meta.get("jadx_receipt")
+    if not isinstance(receipt, dict) or receipt.get("status") != "ok" or type(receipt.get("complete")) is not bool:
+        return None
+    scan = receipt.get("scan")
+    counts = java_scan_counts(meta)
+    if not isinstance(scan, dict) or counts is None:
+        return None
+    truncated = scan.get("truncated_files")
+    if type(truncated) is not int or not 0 <= truncated <= counts["files_scanned"]:
+        return None
+    if any(type(scan.get(key, False)) is not bool for key in ("scan_limit_hit", "discovery_failed")):
+        return None
+    if any(type(scan.get(key, 0)) is not int or scan.get(key, 0) < 0 for key in ("read_failed", "scan_exceptions")):
+        return None
+    selected = scan.get("files_selected", counts["files_total"])
+    if type(selected) is not int or not counts["files_scanned"] <= selected <= counts["files_total"]:
+        return None
+
+    conflict_note = _JAVA_SAVED_CONFLICT_NOTE
+    if truncated == 0:
+        # A native count-limited scan has a positive selection. Each selected file
+        # is read or counted as a read failure; cleanup can fail independently.
+        cleanup = receipt.get("cleanup")
+        read_failed = scan.get("read_failed")
+        if (
+            receipt["complete"] is not False
+            or scan.get("scan_limit_hit") is not True
+            or not 0 < selected < counts["files_total"]
+            or read_failed != selected - counts["files_scanned"]
+            or scan.get("discovery_failed") is not False
+            or scan.get("scan_exceptions") != 0
+            or not isinstance(cleanup, dict)
+            or type(cleanup.get("complete")) is not bool
+        ):
+            return None
+        expected_reasons = ["scan_limit_hit"]
+        if read_failed:
+            expected_reasons.append("read_failed")
+        if cleanup["complete"] is False:
+            expected_reasons.append("cleanup_incomplete")
+        if receipt.get("reason_codes") != sorted(expected_reasons):
+            return None
+        conflict_note = _JAVA_SAVED_FILE_LIMIT_NOTE
+    return conflict_note
 
 
 def _native_visibility(meta: dict) -> tuple[str, list[str]]:

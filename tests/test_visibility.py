@@ -906,3 +906,53 @@ def test_budget_note_saved_projection_preserves_count_until_snapshot_refresh(
         assert wanted in html and unexpected not in html
         assert digest["notes"].count(f"[{source}] {wanted}") == 1
         assert f"[{source}] {unexpected}" not in digest["notes"]
+
+
+@pytest.mark.parametrize("status", ["partial", "timeout"])
+@pytest.mark.parametrize("run_confirmed", [True, False])
+def test_saved_producer_input_gap_agrees_across_report_views(status: str, run_confirmed: bool) -> None:
+    from copy import deepcopy
+
+    from fxapk.core.corpus import inspect_visibility
+
+    reason = "producer_dex_input_read_error"
+    scan = {"files_scanned": 2, "files_total": 2, "truncated_files": 0}
+    receipt = _build_jadx_receipt(
+        status=status, runs=[{
+            "status": status, "options_digest": "synthetic", "ownership_complete": True,
+            "termination_complete": True, "reason_codes": [reason],
+        }], scan=scan, cleanup={"complete": True}, analyzer_error=False,
+    )
+    if not run_confirmed:
+        receipt["runs"][0]["reason_codes"] = []
+    meta = {
+        "jadx_receipt": receipt,
+        "visibility": {
+            "sources": {"java": {"visibility": "complete", "why": []}, "dex": {"visibility": "complete"}},
+            "blocked_claims": [], "claims": {}, "notes": [], "next_actions": [],
+        },
+    }
+    original = deepcopy(meta)
+    raw = _report(**meta)
+    rendered = Report(package_name="com.synthetic.coverage", meta=meta, leads=[], endpoints=[], findings=[],
+                      analyzer_status=[])
+    html = render_to_string(rendered)
+    view = build_digest(raw)["visibility"]
+    corrected, malformed = inspect_visibility(raw, reconcile_java=True)
+    assert not malformed and corrected is not None
+    stored, _ = inspect_visibility(raw)
+    assert stored is not None and stored["sources"]["java"] == "complete"
+    expected = status if run_confirmed else "complete"
+    assert view["sources"]["java"] == corrected["sources"]["java"] == expected
+    assert view["sources"]["dex"] == corrected["sources"]["dex"] == "complete"
+    assert f"<td>{expected}</td>" in html.split("<td>java</td>", 1)[1].split("</tr>", 1)[0]
+    assert view["java_scan"] == {"files_scanned": 2, "files_total": 2}
+    if run_confirmed:
+        expected_claims = {"static_endpoint_exhaustive", "no_hardcoded_credential"}
+        assert {row["claim"] for row in view["blocked_claims"]} == expected_claims
+        assert set(corrected["blocked_claims"]) == expected_claims
+        assert reason in V.java_coverage_observation(raw)["reason_codes"]
+    else:
+        assert view["blocked_claims"] == [] and corrected["blocked_claims"] == []
+        assert reason not in V.java_coverage_observation(raw)["reason_codes"]
+    assert meta == original

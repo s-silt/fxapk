@@ -163,7 +163,7 @@ Hunter 默认在搜索前读取账户免费余额并在本机账本（`~/.fxapk/
 
 ## JADX 索引
 
-HTML 报告的「看到了多少」和 `digest` 的 `visibility.java_scan` 会显示 JADX 已读取和已枚举的 Java 文件数。例如 2/3 只描述本次枚举出的 Java 文件，不是整个 APK 的覆盖率。即使显示 N/N，单个 Java 文件的内容也可能因字节上限而截断。结合 Java 可见性状态和缺口说明阅读；旧报告没有可靠计数时不显示比例。
+HTML 报告的「看到了多少」和 `digest` 的 `visibility.java_scan` 会显示 JADX 已读取和已枚举的 Java 文件数。例如 2/3 只描述本次枚举出的 Java 文件，不是整个 APK 的覆盖率。即使显示 N/N，单个 Java 文件的内容也可能因字节上限而截断。结合 Java 可见性状态和缺口说明阅读；旧报告没有可靠计数时不显示比例。若执行回执明确记录 JADX 漏载输入，即使已枚举的 Java 文件全都读完，报告也不会标为完整覆盖。
 
 在 `digest.jadx_index.comparison` 中，缺失或无效的分项计数为 `null`（不是零）；仅当四项都有已记录的非负整数时才计算 `total_regions`。
 
