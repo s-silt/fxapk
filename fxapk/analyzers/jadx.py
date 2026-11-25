@@ -166,6 +166,7 @@ class _JadxRun:
     status: str  # ok|partial|timeout|failed
     options_digest: str
     process: proctree.OwnedRun | None = None
+    dex_input_read_error: bool = False
 
 
 @dataclass
@@ -1209,6 +1210,15 @@ class JadxAnalyzer(BaseAnalyzer):
                 ", ".join(owned.reason_codes),
             )
             return _JadxRun(status="partial", options_digest=digest, process=owned)
+        # JADX 1.5.6/1.5.7 can log a rejected DEX ZIP member while exiting 0
+        # with sources from other members. Do not persist producer text or paths.
+        if any(
+            line.startswith("ERROR - Failed to read zip entry: ") and line.rstrip().lower().endswith(".dex")
+            for stream in (owned.stdout, owned.stderr)
+            for line in (stream or "").splitlines()
+        ):
+            logger.warning("[jadx] 有 DEX 未能载入，保留其余产物，覆盖按 partial 计")
+            return _JadxRun(status="partial", options_digest=digest, process=owned, dex_input_read_error=True)
         return _JadxRun(status="ok", options_digest=digest, process=owned)
 
     @staticmethod
@@ -1511,7 +1521,9 @@ def _run_receipt(run: _JadxRun) -> dict:
         "termination_complete": bool(p.termination_complete),
         "forced_tree_kill": bool(p.forced_tree_kill),
         "returncode": p.returncode,
-        "reason_codes": sorted(p.reason_codes),
+        "reason_codes": sorted(
+            set(p.reason_codes) | ({"producer_dex_input_read_error"} if run.dex_input_read_error else set())
+        ),
     }
 
 
@@ -1551,7 +1563,10 @@ def _build_jadx_receipt(
             reasons.add("termination_unverified")
         if run.get("forced_tree_kill"):
             reasons.add("descendants_after_root_exit")
-        if "tree_state_unverified" in (run.get("reason_codes") or ()):
+        run_reasons = run.get("reason_codes") or ()
+        if "producer_dex_input_read_error" in run_reasons:
+            reasons.add("producer_dex_input_read_error")
+        if "tree_state_unverified" in run_reasons:
             # 根退出后的即时树状态查询失败过：最终 quiesce 即便成功，中间窗口无从复核，
             # 按覆盖不完整计（fail closed）。
             reasons.add("tree_state_unverified")
