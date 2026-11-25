@@ -749,3 +749,71 @@ def test_pipeline_stage_registered():
 
     src = inspect.getsource(pipeline)
     assert '_run_stage(state, "visibility"' in src
+
+
+def test_budget_partial_note_is_counted_per_source_and_never_displays_member() -> None:
+    from copy import deepcopy
+
+    resource_a = "assets/example-a.txt"
+    resource_b = "assets/example-b.txt"
+    native = "lib/arm64/libexample.so"
+    rows = [
+        {"path": resource_a, "source": "one", "reason": "decompression_budget"},
+        {"path": resource_a, "source": "two", "reason": "decompression_budget"},
+        {"path": resource_b, "source": "one", "reason": "decompression_budget"},
+        {"path": "assets/other.txt", "source": "one", "reason": "read_failure"},
+        {"path": "assets/bad.txt", "source": None, "reason": "decompression_budget"},
+        {"path": native, "source": "three", "reason": "decompression_budget",
+         "diagnostic": "fixture-untrusted-diagnostic"},
+    ]
+    report = _report(file_read_visibility=rows, resource_files_scanned=1)
+    fresh = V.assess(report)
+    resource_note = "其中 2 个文件因累计解压预算耗尽未读取"
+    native_note = "其中 1 个文件因累计解压预算耗尽未读取"
+    assert resource_note in fresh["sources"]["resource"]["why"]
+    assert native_note in fresh["sources"]["native"]["why"]
+
+    # Model an already saved #195 report that has the raw budget reason but no
+    # matching notes yet. Read-only projection must not modify it.
+    saved = deepcopy(fresh)
+    saved["sources"]["resource"]["why"].remove(resource_note)
+    saved["sources"]["native"]["why"].remove(native_note)
+    saved["notes"].remove(f"[resource] {resource_note}")
+    saved["notes"].remove(f"[native] {native_note}")
+    report["meta"]["visibility"] = saved
+    before = deepcopy(report)
+    digest = build_digest(report)["visibility"]
+    assert digest["notes"].count(f"[resource] {resource_note}") == 1
+    assert digest["notes"].count(f"[native] {native_note}") == 1
+    assert digest["sources"]["resource"] == digest["sources"]["native"] == "partial"
+    assert sorted(row["claim"] for row in digest["blocked_claims"]) == saved["blocked_claims"]
+    html = render_to_string(Report(
+        package_name="com.test", meta=report["meta"], leads=[], endpoints=[], findings=[],
+        analyzer_status=[],
+    ))
+    assert resource_note in html and native_note in html
+    assert all(p not in html and p not in str(digest) for p in (
+        resource_a, resource_b, native, "fixture-untrusted-diagnostic",
+    ))
+    assert report == before
+
+    projected = V.project_persisted_visibility(report["meta"])
+    assert projected == V.project_persisted_visibility({**report["meta"], "visibility": projected})
+
+
+def test_budget_note_is_not_inferred_or_used_to_reclassify_saved_reports() -> None:
+    path = "assets/example.txt"
+    for reason, seen, level in [
+        ("read_failure", ["file_read_visibility"], "partial"),
+        ("decompression_budget", [], "partial"),
+        ("decompression_budget", ["file_read_visibility"], "complete"),
+    ]:
+        saved = {"sources": {"resource": {
+            "visibility": level, "why": ["fixture persisted note"], "inputs_seen": seen,
+        }}, "notes": ["fixture persisted note"]}
+        report = _report(
+            visibility=saved,
+            file_read_visibility=[{"path": path, "source": "probe", "reason": reason}],
+        )
+        assert V.project_persisted_visibility(report["meta"]) is saved
+        assert "累计解压预算" not in str(build_digest(report)["visibility"])
