@@ -70,12 +70,20 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return obj
 
 
-def _read_json(path: Path) -> Any:
+def _read_json_bytes(path: Path) -> bytes:
     with path.open("rb") as stream:
         raw = stream.read(MAX_JSON + 1)
     if len(raw) > MAX_JSON:
         raise ValueError("JSON capture exceeds size limit")
+    return raw
+
+
+def _parse_json(raw: bytes) -> Any:
     return json.loads(raw, object_pairs_hook=_unique_object)
+
+
+def _read_json(path: Path) -> Any:
+    return _parse_json(_read_json_bytes(path))
 
 
 def _inventory_valid(expected: object) -> bool:

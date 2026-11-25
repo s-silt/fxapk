@@ -1,4 +1,5 @@
 """Exercise the offline two-channel diagnostic using inert captures."""
+import hashlib
 import json
 import subprocess
 import sys
@@ -161,3 +162,45 @@ def test_incomplete_file_does_not_mask_other_digest_conflict(
     assert code == 2
     assert receipt["state"] == "conflict"
     assert receipt[channel]["reason"] == "build_digest_mismatch"
+
+
+def test_yanked_file_cannot_hide_its_own_recorded_digest_conflict(tmp_path: Path) -> None:
+    pypi = _capture("pypi")
+    pypi["body"]["urls"][0].update(yanked=True, digests={"sha256": "c" * 64})
+    code, receipt = _run(tmp_path, _capture("github"), pypi)
+    assert code == 2
+    assert receipt["state"] == "conflict"
+    assert receipt["pypi"]["reason"] == "build_digest_mismatch"
+
+
+@pytest.mark.parametrize("extra_seconds", [0, 1])
+def test_same_batch_capture_span_boundary(tmp_path: Path, extra_seconds: int) -> None:
+    github, pypi = _capture("github"), _capture("pypi")
+    gt = datetime.fromisoformat(github["observed_at"])
+    pypi["observed_at"] = (gt - timedelta(minutes=15, seconds=extra_seconds)).isoformat()
+    code, receipt = _run(tmp_path, github, pypi)
+    assert receipt["github"]["state"] == receipt["pypi"]["state"] == "metadata_matches"
+    assert code == (2 if extra_seconds else 0)
+    assert receipt["reason"] == (
+        "snapshots_not_comparable" if extra_seconds else "both_channels_match_expected_core_digests"
+    )
+
+
+def test_receipt_identifies_exact_inputs_without_file_paths(tmp_path: Path) -> None:
+    github, pypi = _capture("github"), _capture("pypi")
+    hashes = {}
+    for capture_id in ("same-collection", "another-collection"):
+        github["capture_id"] = pypi["capture_id"] = capture_id
+        code, receipt = _run(tmp_path, github, pypi)
+        assert code == 0
+        assert receipt["version"] == VERSION
+        assert receipt["github"]["capture_id"] == receipt["pypi"]["capture_id"] == capture_id
+        hashes[capture_id] = receipt["input_sha256"]
+        assert hashes[capture_id] == {
+            key: hashlib.sha256((tmp_path / f"{key}.json").read_bytes()).hexdigest()
+            for key in ("github", "pypi", "inventory")
+        }
+        assert str(tmp_path) not in json.dumps(receipt)
+    assert hashes["same-collection"]["github"] != hashes["another-collection"]["github"]
+    assert hashes["same-collection"]["pypi"] != hashes["another-collection"]["pypi"]
+    assert hashes["same-collection"]["inventory"] == hashes["another-collection"]["inventory"]

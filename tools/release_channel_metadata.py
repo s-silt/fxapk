@@ -10,10 +10,12 @@ The build manifest maps this version's core wheel and sdist names to SHA-256
 digests. Comparisons cover the two named files, not the complete GitHub
 release or its other attached packages. Matching is about metadata digests,
 not downloaded bytes, the Git tag commit, or permission to publish or retry.
+Input SHA-256 values identify the exact saved JSON bytes, not package bytes.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
@@ -27,7 +29,8 @@ from tools.release_state_probe import (
     _inventory_valid,
     _matches_github_release_request,
     _matches_id,
-    _read_json,
+    _parse_json,
+    _read_json_bytes,
     _timestamp,
 )
 
@@ -43,6 +46,7 @@ class Channel:
     reason: str
     observed_at: str | None = None
     http_status: int | None = None
+    capture_id: str | None = None
 
 
 def _inspect(
@@ -70,7 +74,7 @@ def _inspect(
         return Channel("unknown", "observation_unverified")
 
     def result(state: str, reason: str) -> Channel:
-        return Channel(state, reason, observed.isoformat(), capture["http_status"])
+        return Channel(state, reason, observed.isoformat(), capture["http_status"], batch)
 
     if not timedelta(0) <= now - observed <= MAX_CAPTURE_AGE:
         return result("unknown", "stale_or_future_observation")
@@ -109,6 +113,7 @@ def _inspect(
             issues.add("unexpected_or_duplicate_core_file")
             continue
         found.add(name)
+        yanked = False
         if github:
             if item.get("state") != "uploaded":
                 issues.add("asset_not_uploaded")
@@ -116,16 +121,17 @@ def _inspect(
             value = item.get("digest")
             digest = value[7:] if isinstance(value, str) and value.startswith("sha256:") else None
         else:
-            if item.get("yanked") is True:
+            yanked = item.get("yanked") is True
+            if yanked:
                 issues.add("file_yanked")
-                continue
-            if item.get("yanked") is not False:
+            elif item.get("yanked") is not False:
                 issues.add("file_yank_state_unverified")
                 continue
             digests = item.get("digests")
             digest = digests.get("sha256") if isinstance(digests, dict) else None
         if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
-            issues.add("digest_unverified")
+            if not yanked:
+                issues.add("digest_unverified")
             continue
         if digest != expected[name]:
             issues.add("build_digest_mismatch")
@@ -158,13 +164,15 @@ def main() -> int:
     version = args.version
     names = {f"fxapk-{version}-py3-none-any.whl", f"fxapk-{version}.tar.gz"}
     try:
-        expected = _read_json(args.inventory)
+        inputs = {"inventory": _read_json_bytes(args.inventory)}
+        expected = _parse_json(inputs["inventory"])
         if (
             not VERSION.fullmatch(version) or args.repository_id <= 0
             or not _inventory_valid(expected) or expected.keys() != names
         ):
             raise ValueError("expected the two core fxapk files")
-        github, pypi = _read_json(args.github), _read_json(args.pypi)
+        inputs.update(github=_read_json_bytes(args.github), pypi=_read_json_bytes(args.pypi))
+        github, pypi = _parse_json(inputs["github"]), _parse_json(inputs["pypi"])
     except (OSError, ValueError, RecursionError):
         print(json.dumps({"state": "unknown", "reason": "input_unreadable_or_invalid"}))
         return 2
@@ -175,7 +183,7 @@ def main() -> int:
     comparable = (
         gt is not None and pt is not None and abs(gt - pt) <= MAX_CAPTURE_SPAN
         and timedelta(0) <= now - gt <= MAX_CAPTURE_AGE and timedelta(0) <= now - pt <= MAX_CAPTURE_AGE
-        and github["capture_id"] == pypi["capture_id"]
+        and g.capture_id == p.capture_id
     )
     state = "unknown"
     reason = "snapshots_not_comparable"
@@ -188,7 +196,11 @@ def main() -> int:
             reason = "channel_unverified"
         else:
             state, reason = "incomplete", "channel_not_verified"
-    print(json.dumps({"state": state, "reason": reason, "github": asdict(g), "pypi": asdict(p)}, sort_keys=True))
+    print(json.dumps({
+        "state": state, "reason": reason, "version": version,
+        "github": asdict(g), "pypi": asdict(p),
+        "input_sha256": {key: hashlib.sha256(raw).hexdigest() for key, raw in inputs.items()},
+    }, sort_keys=True))
     return 0 if state == "metadata_agrees" else 2
 
 
