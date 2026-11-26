@@ -330,6 +330,7 @@ def _java_visibility(meta: dict) -> tuple[str, list[str]]:
 
 
 _JAVA_PRODUCER_INPUT_GAP = "producer_dex_input_read_error"
+_JAVA_PRODUCER_SAVE_GAP = "producer_java_save_error"
 _JAVA_CLEANUP_GAP = "cleanup_incomplete"
 
 
@@ -353,7 +354,7 @@ def _java_cleanup_gap(receipt: object) -> bool:
     )
 
 
-def _java_producer_input_gap(receipt: object) -> bool:
+def _java_producer_gap(receipt: object, reason: str) -> bool:
     """Require corroboration in an owned producer run, not just a saved reason."""
     if not isinstance(receipt, dict) or receipt.get("complete") is not False:
         return False
@@ -367,12 +368,12 @@ def _java_producer_input_gap(receipt: object) -> bool:
     if not isinstance(reasons, list) or not isinstance(runs, list):
         return False
     status_reason = "producer_partial" if status == VIS_PARTIAL else "producer_timeout"
-    return _JAVA_PRODUCER_INPUT_GAP in reasons and status_reason in reasons and any(
+    return reason in reasons and status_reason in reasons and any(
         isinstance(run, dict)
         and run.get("status") in (VIS_PARTIAL, VIS_TIMEOUT)
         and run.get("ownership_complete") is True
         and isinstance(run.get("reason_codes"), list)
-        and _JAVA_PRODUCER_INPUT_GAP in run["reason_codes"]
+        and reason in run["reason_codes"]
         for run in runs
     )
 
@@ -388,8 +389,10 @@ def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
         sorted({code for code in raw if isinstance(code, str) and code in allowed})
         if state == VIS_PARTIAL and isinstance(raw, list) else []
     )
-    if state in (VIS_PARTIAL, VIS_TIMEOUT) and _java_producer_input_gap(receipt):
+    if state in (VIS_PARTIAL, VIS_TIMEOUT) and _java_producer_gap(receipt, _JAVA_PRODUCER_INPUT_GAP):
         codes = sorted([*codes, _JAVA_PRODUCER_INPUT_GAP])
+    if state in (VIS_PARTIAL, VIS_TIMEOUT) and _java_producer_gap(receipt, _JAVA_PRODUCER_SAVE_GAP):
+        codes = sorted([*codes, _JAVA_PRODUCER_SAVE_GAP])
     if state in (VIS_PARTIAL, VIS_TIMEOUT) and _java_cleanup_gap(receipt):
         codes = sorted([*codes, _JAVA_CLEANUP_GAP])
     return {"state": state, "reason_codes": codes}
@@ -455,7 +458,7 @@ def project_saved_java_visibility(meta: dict[str, Any]) -> object:
 
     receipt = meta.get("jadx_receipt")
     state = VIS_PARTIAL
-    if _java_producer_input_gap(receipt):
+    if _java_producer_gap(receipt, _JAVA_PRODUCER_INPUT_GAP):
         state, _ = _java_visibility(meta)
         # Scheduler status still overrides the producer, just as for a fresh report.
         conflict_note = "JADX 本轮记录了输入读取失败，保存的 Java 可见性不能判为完整"

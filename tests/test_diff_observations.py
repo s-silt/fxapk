@@ -310,6 +310,23 @@ def test_cli_details_preserve_java_coverage_evidence(tmp_path) -> None:
     observed = compare(good, recorded_gap, "--report-details")["coverage_observations"]["java"]
     assert observed["new"] == {"state": "timeout", "reason_codes": [input_gap]}
 
+    output_gap = "producer_java_save_error"
+    for confirmed in (False, True):
+        partial = write(f"java-save-{confirmed}", receipt={
+            "schema": 1, "status": "partial", "complete": False,
+            "reason_codes": ["producer_partial", output_gap, "/private/exception"],
+            "runs": [{
+                "status": "partial", "ownership_complete": confirmed,
+                "reason_codes": [output_gap, "synthetic.fixture.Blocked"],
+            }],
+        })
+        detail = compare(good, partial, "--report-details")
+        expected = [output_gap, "producer_partial"] if confirmed else ["producer_partial"]
+        assert detail["coverage_observations"]["java"]["new"] == {
+            "state": "partial", "reason_codes": expected,
+        }
+        assert "synthetic.fixture.Blocked" not in json.dumps(detail)
+
 
 def test_saved_diff_does_not_compare_sdk_from_rejected_apk(tmp_path, monkeypatch) -> None:
     from typer.testing import CliRunner
