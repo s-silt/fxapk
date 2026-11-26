@@ -19,8 +19,10 @@ Opt in with --github-commit and a trusted full GitHub attachment inventory
 (including SHA256SUMS.txt). The same saved GitHub capture is also checked for
 the peeled tag commit and, with --downloaded, its bound local asset bytes.
 All four observations must fit within one 15-minute window. Only the GitHub
-bytes are checked; PyPI is still metadata-only. No result
-authorizes publication or retries. The default core-only mode is unchanged.
+bytes are checked; PyPI is still metadata-only. On a byte digest conflict the
+receipt records the checked asset's name and observed SHA-256, not its path.
+No result authorizes publication or retries. The default core-only mode is
+unchanged.
 """
 from __future__ import annotations
 
@@ -256,7 +258,7 @@ def main() -> int:
         )
         receipt.update({
             "expected_commit": commit,
-            "github_evidence": asdict(evidence),
+            "github_evidence": evidence.to_receipt(include_download_conflict=True),
             "metadata_comparison": {"state": state, "reason": reason},
         })
         if evidence.state == "conflict" or state == "conflict":

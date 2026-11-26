@@ -457,3 +457,22 @@ def test_offline_combined_release_diagnosis(
         key: hashlib.sha256(before[Path(f"{key}.json")]).hexdigest() for key in ("github", "pypi", "inventory")
     }
     assert snapshot() == before
+    if case == "wrong-downloaded-bytes":
+        first_observation = {
+            "asset_name": WHEEL,
+            "observed_sha256": hashlib.sha256(before[Path("downloaded") / WHEEL]).hexdigest(),
+        }
+        other_bytes = b"y" * len(artifacts[WHEEL])
+        (downloads / WHEEL).write_bytes(other_bytes)
+        second = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=10, check=False)
+        assert second.returncode == 2 and not second.stderr
+        second_receipt = json.loads(second.stdout)
+        assert second_receipt["input_sha256"] == receipt["input_sha256"]
+        assert second_receipt["state"] == receipt["state"] == "conflict"
+        assert second_receipt != receipt
+        assert receipt["github_evidence"]["download_conflict"] == first_observation
+        assert second_receipt["github_evidence"]["download_conflict"] == {
+            "asset_name": WHEEL, "observed_sha256": hashlib.sha256(other_bytes).hexdigest(),
+        }
+    else:
+        assert "download_conflict" not in receipt["github_evidence"]
