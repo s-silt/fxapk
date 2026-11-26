@@ -185,7 +185,13 @@ jobs:
           FXAPK_REQUIRE_BUILD_TOOLCHAIN: "1"
           FXAPK_MATRIX_PYTHON: ${{ matrix.python-version }}
         run: |
-          python -m pytest -q -n 0 tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
+          host_tests=(tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run)
+          isolated=(--deselect=tests/test_proctree.py::test_descendants_after_root_exit_force_killed)
+          if [ "$FXAPK_MATRIX_PYTHON" != "3.12" ]; then
+            # Do not overlap the live process-table fixture with another pytest worker.
+            host_tests+=(tests/test_proctree.py::test_descendants_after_root_exit_force_killed)
+          fi
+          python -m pytest -q -n 0 "${host_tests[@]}" \
             --cov=fxapk --cov-report= --cov-fail-under=0 \
             --junitxml=${{ runner.temp }}/fxapk-host-test.xml
           python - <<'PYTEST_XML'
@@ -193,15 +199,18 @@ jobs:
           import xml.etree.ElementTree as ET
           from pathlib import Path
           root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "fxapk-host-test.xml").getroot()
+          expected = ["test_linux_preexisting_nondumpable_process_does_not_break_owned_run"]
+          if os.environ["FXAPK_MATRIX_PYTHON"] != "3.12":
+              expected.append("test_descendants_after_root_exit_force_killed")
           cases = list(root.iter("testcase"))
-          assert len(cases) == 1 and cases[0].get("name") == "test_linux_preexisting_nondumpable_process_does_not_break_owned_run" and len(cases[0]) == 0, "host fixture missing, skipped or failed"
+          assert sorted(case.get("name", "") for case in cases) == sorted(expected) and all(
+              case.get("classname") == "tests.test_proctree" and len(case) == 0 for case in cases
+          ), "host fixture missing, duplicate, skipped or failed"
           PYTEST_XML
-          isolated=()
           if [ "$FXAPK_MATRIX_PYTHON" = "3.12" ]; then
             # This test's native process-table checks require a private process namespace.
             # Only exclude it from xdist after the required isolated JUnit and coverage receipt.
             python -IB tools/ci_descendant_fixture.py "$GITHUB_SHA"
-            isolated+=(--deselect=tests/test_proctree.py::test_descendants_after_root_exit_force_killed)
             isolated+=(--ignore=tests/test_ci_descendant_fixture.py)
           fi
           python -m pytest -q -n auto \
@@ -223,11 +232,16 @@ jobs:
               cases = [case for root in roots for case in root.iter("testcase") if case.get("name") == name]
               assert len(cases) == 1 and len(cases[0]) == 0, f"critical test missing, skipped or failed: {name}"
               print(f"PASSED: {name}")
-          if os.environ["FXAPK_MATRIX_PYTHON"] == "3.12":
-              duplicated = any(case.get("classname") == "tests.test_proctree"
-                               and case.get("name") == "test_descendants_after_root_exit_force_killed"
-                               for root in roots for case in root.iter("testcase"))
-              assert not duplicated, "isolated fixture also appeared in host JUnit"
+          descendant = "test_descendants_after_root_exit_force_killed"
+          host, parallel = [
+              [case for case in root.iter("testcase") if case.get("classname") == "tests.test_proctree"
+               and case.get("name") == descendant] for root in roots
+          ]
+          assert not parallel, "serial or isolated fixture also appeared in parallel JUnit"
+          if os.environ["FXAPK_MATRIX_PYTHON"] != "3.12":
+              assert len(host) == 1 and len(host[0]) == 0, f"serial fixture did not pass: {descendant}"
+          else:
+              assert not host, "isolated fixture also appeared in serial host JUnit"
           PY
       - name: Run tests (macOS / Windows)
         if: runner.os != 'Linux'
