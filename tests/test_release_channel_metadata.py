@@ -354,3 +354,82 @@ def test_capture_exactly_at_two_mib_is_verified(tmp_path: Path) -> None:
     receipt = json.loads(result.stdout)
     assert receipt["state"] == "metadata_agrees"
     assert receipt["input_sha256"]["pypi"] == hashlib.sha256(raw["pypi"]).hexdigest()
+
+
+@pytest.mark.parametrize(("case", "exit_code", "state", "github_reason", "metadata_state"), [
+    ("ok", 0, "evidence_checks_passed", "tag_and_downloaded_bytes_match", "metadata_agrees"),
+    ("wrong-tag", 2, "conflict", "tag_commit_mismatch", "metadata_agrees"),
+    ("no-downloads", 2, "unknown", "downloaded_bytes_unverified", "metadata_agrees"),
+    ("wrong-downloaded-bytes", 2, "conflict", "download_digest_mismatch", "metadata_agrees"),
+    ("query-forbidden", 2, "unknown", "lookup_failed", "unknown"),
+    ("query-not-found", 2, "unknown", "not_found_does_not_prove_absent", "unknown"),
+    ("missing-github-asset", 2, "incomplete", "asset_inventory_mismatch", "metadata_agrees"),
+    ("pypi-conflict", 2, "conflict", "tag_and_downloaded_bytes_match", "conflict"),
+    ("pypi-missing", 2, "incomplete", "tag_and_downloaded_bytes_match", "incomplete"),
+    ("mixed-captures", 2, "unknown", "tag_and_downloaded_bytes_match", "unknown"),
+])
+def test_offline_combined_release_diagnosis(
+    tmp_path: Path, case: str, exit_code: int, state: str, github_reason: str, metadata_state: str,
+) -> None:
+    github, pypi = _capture("github"), _capture("pypi")
+    commit = "c" * 40
+    artifacts = {WHEEL: b"synthetic wheel", SDIST: b"synthetic sdist", "SHA256SUMS.txt": b"synthetic sums"}
+    inventory = {name: hashlib.sha256(data).hexdigest() for name, data in artifacts.items()}
+    downloads = tmp_path / "downloaded"
+    downloads.mkdir()
+    assets = []
+    for asset_id, (name, data) in enumerate(artifacts.items(), 1):
+        (downloads / name).write_bytes(data)
+        assets.append({"id": asset_id, "name": name, "size": len(data), "state": "uploaded",
+                       "digest": f"sha256:{inventory[name]}"})
+    github["body"].update(id=17, assets=assets)
+    github["tag_observation"] = {
+        "repository_id": REPO_ID, "tag": f"v{VERSION}", "observed_at": github["observed_at"],
+        "capture_id": github["capture_id"], "peeled_tag_commit": "d" * 40 if case == "wrong-tag" else commit,
+    }
+    github["download_observation"] = {
+        "repository_id": REPO_ID, "release_id": 17, "asset_ids": {a["name"]: a["id"] for a in assets},
+        "observed_at": github["observed_at"], "capture_id": github["capture_id"],
+    }
+    for file in pypi["body"]["urls"]:
+        file["digests"]["sha256"] = inventory[file["filename"]]
+    if case == "query-forbidden":
+        github["http_status"] = 403
+    elif case == "query-not-found":
+        github["http_status"] = 404
+    elif case == "missing-github-asset":
+        github["body"]["assets"].pop()
+    elif case == "wrong-downloaded-bytes":
+        (downloads / WHEEL).write_bytes(b"x" * len(artifacts[WHEEL]))
+    elif case == "pypi-conflict":
+        pypi["body"]["urls"][0]["digests"]["sha256"] = "e" * 64
+    elif case == "pypi-missing":
+        pypi["body"]["urls"].pop()
+    elif case == "mixed-captures":
+        pypi["capture_id"] = "different-collection"
+
+    args = [sys.executable, "-m", "tools.release_channel_metadata", "--version", VERSION,
+            "--repository-id", str(REPO_ID), "--github-commit", commit]
+    if case != "no-downloads":
+        args.extend(("--downloaded", str(downloads)))
+    for key, value in {"github": github, "pypi": pypi, "inventory": inventory}.items():
+        path = tmp_path / f"{key}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        args.extend((f"--{key}", str(path)))
+
+    def snapshot() -> dict[Path, bytes]:
+        return {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    before = snapshot()
+    result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=10, check=False)
+    assert not result.stderr
+    assert result.returncode == exit_code
+    receipt = json.loads(result.stdout)
+    assert receipt["state"] == state
+    assert receipt["expected_commit"] == commit
+    assert receipt["github_evidence"]["reason"] == github_reason
+    assert receipt["metadata_comparison"]["state"] == metadata_state
+    assert receipt["input_sha256"] == {
+        key: hashlib.sha256(before[Path(f"{key}.json")]).hexdigest() for key in ("github", "pypi", "inventory")
+    }
+    assert snapshot() == before

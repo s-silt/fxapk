@@ -14,6 +14,12 @@ comparable evidence establishes a conflict. Matching is about metadata digests,
 not downloaded bytes, the Git tag commit, or permission to publish or retry.
 Input SHA-256 values identify exactly the input files read in full within the
 size limit, even on parse failure. They are not package hashes or validation.
+
+Opt in with --github-commit and a trusted full GitHub attachment inventory
+(including SHA256SUMS.txt). The same saved GitHub capture is also checked for
+the peeled tag commit and, with --downloaded, its bound local asset bytes.
+Only the GitHub bytes are checked; PyPI is still metadata-only. No result
+authorizes publication or retries. The default core-only mode is unchanged.
 """
 from __future__ import annotations
 
@@ -27,6 +33,7 @@ from pathlib import Path
 
 from tools.release_state_probe import (
     CAPTURE_ID,
+    COMMIT,
     MAX_CAPTURE_AGE,
     MAX_CAPTURE_SPAN,
     _inventory_valid,
@@ -35,6 +42,7 @@ from tools.release_state_probe import (
     _parse_json,
     _read_json_bytes,
     _timestamp,
+    diagnose,
 )
 
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
@@ -163,7 +171,12 @@ def main() -> int:
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--version", required=True, help="Final fxapk version (major.minor.patch)")
     parser.add_argument("--repository-id", type=int, required=True)
+    parser.add_argument("--github-commit", help="Expected peeled GitHub tag commit; enable GitHub byte evidence checks")
+    parser.add_argument("--downloaded", type=Path, help="Local directory of GitHub asset bytes (with --github-commit)")
     args = parser.parse_args()
+    commit: str | None = args.github_commit
+    if args.downloaded is not None and commit is None:
+        parser.error("--downloaded requires --github-commit")
     version = args.version
     names = {f"fxapk-{version}-py3-none-any.whl", f"fxapk-{version}.tar.gz"}
     input_sha256: dict[str, str] = {}
@@ -176,8 +189,13 @@ def main() -> int:
     try:
         if not VERSION.fullmatch(version) or args.repository_id <= 0:
             raise ValueError("expected a final version and positive repository ID")
+        if commit is not None and COMMIT.fullmatch(commit) is None:
+            raise ValueError("expected a full lowercase Git commit SHA")
         expected = load("inventory", args.inventory)
-        if not isinstance(expected, dict) or not _inventory_valid(expected) or expected.keys() != names:
+        required = names if commit is None else names | {"SHA256SUMS.txt"}
+        if not isinstance(expected, dict) or not _inventory_valid(expected) or not required <= expected.keys():
+            raise ValueError("required inventory files missing or invalid")
+        if commit is None and expected.keys() != names:
             raise ValueError("expected the two core fxapk files")
         github = load("github", args.github)
         pypi = load("pypi", args.pypi)
@@ -189,8 +207,9 @@ def main() -> int:
         }, sort_keys=True))
         return 2
     now = datetime.now(timezone.utc)
-    g = _inspect(github, github=True, version=version, repository_id=args.repository_id, expected=expected, now=now)
-    p = _inspect(pypi, github=False, version=version, repository_id=args.repository_id, expected=expected, now=now)
+    core = {name: expected[name] for name in names}
+    g = _inspect(github, github=True, version=version, repository_id=args.repository_id, expected=core, now=now)
+    p = _inspect(pypi, github=False, version=version, repository_id=args.repository_id, expected=core, now=now)
     gt, pt = _timestamp(g.observed_at), _timestamp(p.observed_at)
     comparable = (
         gt is not None and pt is not None and abs(gt - pt) <= MAX_CAPTURE_SPAN
@@ -210,12 +229,31 @@ def main() -> int:
             reason = "channel_not_observed"
         else:
             state, reason = "incomplete", "channel_not_verified"
-    print(json.dumps({
+    receipt: dict[str, object] = {
         "state": state, "reason": reason, "version": version,
-        "github": asdict(g), "pypi": asdict(p),
-        "input_sha256": input_sha256,
-    }, sort_keys=True))
-    return 0 if state == "metadata_agrees" else 2
+        "github": asdict(g), "pypi": asdict(p), "input_sha256": input_sha256,
+    }
+    if commit is not None:
+        evidence = diagnose(
+            github, repository=REPOSITORY, repository_id=args.repository_id, tag=f"v{version}",
+            commit=commit, expected=expected, downloaded=args.downloaded,
+        )
+        receipt.update({
+            "expected_commit": commit,
+            "github_evidence": asdict(evidence),
+            "metadata_comparison": {"state": state, "reason": reason},
+        })
+        if evidence.state == "conflict" or state == "conflict":
+            state, reason = "conflict", "release_evidence_conflict"
+        elif evidence.state in {"unknown", "not_observed"} or state == "unknown":
+            state, reason = "unknown", "release_evidence_unverified"
+        elif evidence.state == "evidence_matches" and state == "metadata_agrees":
+            state, reason = "evidence_checks_passed", "github_bytes_and_core_metadata_checks_passed"
+        else:
+            state, reason = "incomplete", "release_evidence_incomplete"
+        receipt.update(state=state, reason=reason)
+    print(json.dumps(receipt, sort_keys=True))
+    return 0 if state in {"metadata_agrees", "evidence_checks_passed"} else 2
 
 
 if __name__ == "__main__":
