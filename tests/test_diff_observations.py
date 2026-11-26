@@ -328,6 +328,57 @@ def test_cli_details_preserve_java_coverage_evidence(tmp_path) -> None:
         assert "synthetic.fixture.Blocked" not in json.dumps(detail)
 
 
+@pytest.mark.parametrize(("variant", "expected"), [
+    ("byte-limit", ["source_file_truncated"]),
+    ("read-failure", ["read_failed"]),
+    ("reason-only", []),
+    ("counter-only", []),
+    ("bool-counter", []),
+    ("conflicting-total", []),
+    ("future-schema", []),
+])
+def test_cli_details_distinguishes_confirmed_java_file_gaps(tmp_path, variant, expected) -> None:
+    from typer.testing import CliRunner
+
+    from fxapk.analyzers.jadx import _build_jadx_receipt
+    from fxapk.cli import app
+
+    is_read_failure = variant == "read-failure"
+    scan = {
+        "files_total": 2, "files_selected": 2, "files_scanned": 1 if is_read_failure else 2,
+        "read_failed": 1 if is_read_failure else 0, "truncated_files": 0 if is_read_failure else 1,
+    }
+    receipt = _build_jadx_receipt(
+        status="ok", runs=[{
+            "options_digest": "synthetic", "ownership_complete": True, "termination_complete": True,
+        }], scan=scan, cleanup={"complete": True}, analyzer_error=False,
+    )
+    if variant == "reason-only":
+        receipt["scan"]["truncated_files"] = 0
+    elif variant == "counter-only":
+        receipt["reason_codes"] = []
+    elif variant == "bool-counter":
+        receipt["scan"]["truncated_files"] = True
+    elif variant == "conflicting-total":
+        receipt["scan"]["files_selected"] = 1
+    elif variant == "future-schema":
+        receipt["schema"] = 2
+    receipt["reason_codes"].append("unstructured diagnostic")
+    old, new = tmp_path / "old.json", tmp_path / "new.json"
+    for path, meta in ((old, {"jadx_status": "ok"}), (new, {"jadx_receipt": receipt})):
+        report_json.dump(Report(package_name="example.synthetic", meta=meta, leads=[], endpoints=[], findings=[], analyzer_status=[]), str(path))
+
+    runner = CliRunner()
+    args = ["diff", str(old), str(new), "--offline"]
+    regular = runner.invoke(app, args)
+    detailed = runner.invoke(app, [*args, "--report-details"])
+    assert regular.exit_code == detailed.exit_code == 0, (regular.output, detailed.output)
+    assert "coverage_observations" not in json.loads(regular.stdout)
+    assert json.loads(detailed.stdout)["coverage_observations"]["java"]["new"] == {
+        "state": "partial", "reason_codes": expected,
+    }
+
+
 def test_saved_diff_does_not_compare_sdk_from_rejected_apk(tmp_path, monkeypatch) -> None:
     from typer.testing import CliRunner
 

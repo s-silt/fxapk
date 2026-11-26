@@ -378,6 +378,33 @@ def _java_producer_gap(receipt: object, reason: str) -> bool:
     )
 
 
+def _java_file_gap_codes(meta: dict, receipt: object) -> list[str]:
+    """Only project file-level causes corroborated by a current scan receipt."""
+    if not isinstance(receipt, dict) or receipt.get("complete") is not False:
+        return []
+    schema = receipt.get("schema")
+    if type(schema) is not int or schema != 1 or receipt.get("status") not in ("ok", VIS_PARTIAL):
+        return []
+    reasons, scan = receipt.get("reason_codes"), receipt.get("scan")
+    counts = java_scan_counts(meta)
+    if not isinstance(reasons, list) or not isinstance(scan, dict) or counts is None:
+        return []
+    read, total = counts["files_scanned"], counts["files_total"]
+    selected, failed, truncated = (scan.get(k) for k in ("files_selected", "read_failed", "truncated_files"))
+    if (
+        type(selected) is not int or type(failed) is not int or type(truncated) is not int
+        or not read <= selected <= total
+        or failed != selected - read
+        or not 0 <= truncated <= read
+    ):
+        return []
+    return [
+        reason
+        for count, reason in ((failed, "read_failed"), (truncated, "source_file_truncated"))
+        if count > 0 and reason in reasons
+    ]
+
+
 def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
     """Project Java coverage without emitting report-supplied diagnostic text."""
     meta = _meta(report)
@@ -389,6 +416,8 @@ def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
         sorted({code for code in raw if isinstance(code, str) and code in allowed})
         if state == VIS_PARTIAL and isinstance(raw, list) else []
     )
+    if state == VIS_PARTIAL:
+        codes = sorted([*codes, *_java_file_gap_codes(meta, receipt)])
     if state in (VIS_PARTIAL, VIS_TIMEOUT) and _java_producer_gap(receipt, _JAVA_PRODUCER_INPUT_GAP):
         codes = sorted([*codes, _JAVA_PRODUCER_INPUT_GAP])
     if state in (VIS_PARTIAL, VIS_TIMEOUT) and _java_producer_gap(receipt, _JAVA_PRODUCER_SAVE_GAP):
