@@ -462,6 +462,9 @@ def project_saved_java_visibility(meta: dict[str, Any]) -> object:
         state, _ = _java_visibility(meta)
         # Scheduler status still overrides the producer, just as for a fresh report.
         conflict_note = "JADX 本轮记录了输入读取失败，保存的 Java 可见性不能判为完整"
+    elif _java_producer_gap(receipt, _JAVA_PRODUCER_SAVE_GAP):
+        state, _ = _java_visibility(meta)
+        conflict_note = "JADX 本轮记录了源码保存失败，保存的 Java 可见性不能判为完整"
     elif (scan_note := _saved_java_scan_conflict(meta)) is not None:
         conflict_note = scan_note
     elif _java_cleanup_gap(receipt):

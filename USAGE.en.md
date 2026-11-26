@@ -78,7 +78,7 @@ Use `--report-details` to include the fields below. Without it, the top-level ke
 
 `analysis_notes` lists failures and skips recorded by each report, without free-form error messages. `not_recorded` means no analyzer status was recorded; `invalid` means the status records are unusable. These notes neither certify list coverage nor change any counts or deltas.
 
-`coverage_observations.java` shows what JADX covered in each report, separately from analyzer execution. It exposes only the known partial-output (`producer_partial`), file-count-limit (`scan_limit_hit`), and DEX input read error (`producer_dex_input_read_error`) codes, not raw diagnostics. The DEX code requires corroboration from the same run receipt and can also appear in a timeout report. An older report that only says JADX succeeded, without a coverage receipt, is `unknown`. This does not change endpoint differences or certify exhaustive coverage.
+`coverage_observations.java` shows what JADX covered in each report, separately from analyzer execution. It emits stable reason codes, such as partial output (`producer_partial`), file-count limit (`scan_limit_hit`), or incomplete cleanup (`cleanup_incomplete`), not raw diagnostics. A DEX input read error (`producer_dex_input_read_error`) or Java source save error (`producer_java_save_error`) requires corroboration from the same owned run and can appear in partial or timed-out coverage. An older report without a coverage receipt that only records JADX success is `unknown`. This does not change endpoint differences or certify exhaustive coverage.
 
 ## Privacy and output
 
@@ -181,7 +181,7 @@ In `digest.jadx_index.comparison`, missing or invalid bucket counts are `null`, 
 
 Multi-index queries read `fxapk-jadx-index-map.json` at the cache root by default (or `--index-map`). Older 1.6 indexes keep postings only for the values selected when the index was built; `coverage=complete` does not guarantee coverage of new values, and queries also report `query_coverage`. New analyses run with `--jadx-cache-root` save bounded Java snapshots under `query-sources` for later queries on new values. Snapshots and the `--out` receipt contain controlled material — do not publish them. `callpath`'s `name_unique` only means the simple name is unique; it does not prove method binding. `jadx compare` similarity does not mean the same operator.
 
-If an older run may have missed Java output, preserve its cache for review and rerun the same APK with the updated version: `fxapk analyze <APK> --offline --jadx-cache-root <new-empty-directory>`. Check that the new report has `meta.jadx_receipt.complete` set to `true` and includes an index record before querying the new directory. Upgrading does not repair or invalidate an old APK-hash mapping.
+If an older run may have missed Java output, preserve its cache for review and rerun the same APK with the updated version: `fxapk analyze <APK> --offline --jadx-cache-root <new-empty-cache-directory> --out <new-report-directory>`. Check that the new report has `meta.jadx_receipt.complete` set to `true` and includes an index record before querying the new directory. Upgrading does not repair or invalidate an old APK-hash mapping.
 
 ## Corpus
 
