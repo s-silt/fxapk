@@ -18,7 +18,8 @@ size limit, even on parse failure. They are not package hashes or validation.
 Opt in with --github-commit and a trusted full GitHub attachment inventory
 (including SHA256SUMS.txt). The same saved GitHub capture is also checked for
 the peeled tag commit and, with --downloaded, its bound local asset bytes.
-Only the GitHub bytes are checked; PyPI is still metadata-only. No result
+All four observations must fit within one 15-minute window. Only the GitHub
+bytes are checked; PyPI is still metadata-only. No result
 authorizes publication or retries. The default core-only mode is unchanged.
 """
 from __future__ import annotations
@@ -164,6 +165,21 @@ def _inspect(
     return result("metadata_matches", "expected_core_digests_match_build_manifest")
 
 
+def _combined_capture_span(
+    github: object, release_time: datetime | None, pypi_time: datetime | None,
+) -> timedelta | None:
+    if not isinstance(github, dict) or release_time is None or pypi_time is None:
+        return None
+    times = [release_time, pypi_time]
+    for key in ("tag_observation", "download_observation"):
+        observation = github.get(key)
+        stamp = _timestamp(observation.get("observed_at")) if isinstance(observation, dict) else None
+        if stamp is None:
+            return None
+        times.append(stamp)
+    return max(times) - min(times)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--github", type=Path, required=True)
@@ -248,7 +264,15 @@ def main() -> int:
         elif evidence.state in {"unknown", "not_observed"} or state == "unknown":
             state, reason = "unknown", "release_evidence_unverified"
         elif evidence.state == "evidence_matches" and state == "metadata_agrees":
-            state, reason = "evidence_checks_passed", "github_bytes_and_core_metadata_checks_passed"
+            # Both validators accepted the same saved capture; neither alone
+            # bounds the full span across GitHub and PyPI.
+            span = _combined_capture_span(github, gt, pt)
+            if span is None:
+                state, reason = "unknown", "release_evidence_unverified"
+            elif span > MAX_CAPTURE_SPAN:
+                state, reason = "unknown", "combined_capture_span_exceeded"
+            else:
+                state, reason = "evidence_checks_passed", "github_bytes_and_core_metadata_checks_passed"
         else:
             state, reason = "incomplete", "release_evidence_incomplete"
         receipt.update(state=state, reason=reason)

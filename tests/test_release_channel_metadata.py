@@ -367,6 +367,11 @@ def test_capture_exactly_at_two_mib_is_verified(tmp_path: Path) -> None:
     ("pypi-conflict", 2, "conflict", "tag_and_downloaded_bytes_match", "conflict"),
     ("pypi-missing", 2, "incomplete", "tag_and_downloaded_bytes_match", "incomplete"),
     ("mixed-captures", 2, "unknown", "tag_and_downloaded_bytes_match", "unknown"),
+    ("missing-github-digest", 2, "unknown", "tag_and_downloaded_bytes_match", "unknown"),
+    ("span-at-limit", 0, "evidence_checks_passed", "tag_and_downloaded_bytes_match", "metadata_agrees"),
+    ("span-over-limit", 2, "unknown", "tag_and_downloaded_bytes_match", "metadata_agrees"),
+    ("span-over-limit-download-earliest", 2, "unknown", "tag_and_downloaded_bytes_match", "metadata_agrees"),
+    ("span-over-limit-and-conflict", 2, "conflict", "tag_and_downloaded_bytes_match", "conflict"),
 ])
 def test_offline_combined_release_diagnosis(
     tmp_path: Path, case: str, exit_code: int, state: str, github_reason: str, metadata_state: str,
@@ -391,6 +396,17 @@ def test_offline_combined_release_diagnosis(
         "repository_id": REPO_ID, "release_id": 17, "asset_ids": {a["name"]: a["id"] for a in assets},
         "observed_at": github["observed_at"], "capture_id": github["capture_id"],
     }
+    if case.startswith("span-"):
+        midpoint = datetime.fromisoformat(github["observed_at"]) - timedelta(minutes=10)
+        github["observed_at"] = midpoint.isoformat()
+        older = (midpoint - timedelta(minutes=8)).isoformat()
+        github["tag_observation"]["observed_at"] = older
+        github["download_observation"]["observed_at"] = older
+        pypi["observed_at"] = (
+            midpoint + timedelta(minutes=7, microseconds=int(case != "span-at-limit"))
+        ).isoformat()
+        if case == "span-over-limit-download-earliest":
+            github["tag_observation"]["observed_at"] = midpoint.isoformat()
     for file in pypi["body"]["urls"]:
         file["digests"]["sha256"] = inventory[file["filename"]]
     if case == "query-forbidden":
@@ -401,7 +417,9 @@ def test_offline_combined_release_diagnosis(
         github["body"]["assets"].pop()
     elif case == "wrong-downloaded-bytes":
         (downloads / WHEEL).write_bytes(b"x" * len(artifacts[WHEEL]))
-    elif case == "pypi-conflict":
+    elif case == "missing-github-digest":
+        del assets[0]["digest"]
+    elif case in {"pypi-conflict", "span-over-limit-and-conflict"}:
         pypi["body"]["urls"][0]["digests"]["sha256"] = "e" * 64
     elif case == "pypi-missing":
         pypi["body"]["urls"].pop()
@@ -429,6 +447,10 @@ def test_offline_combined_release_diagnosis(
     assert receipt["expected_commit"] == commit
     assert receipt["github_evidence"]["reason"] == github_reason
     assert receipt["metadata_comparison"]["state"] == metadata_state
+    if case == "missing-github-digest":
+        assert receipt["github"]["reason"] == "digest_unverified"
+    if case in {"span-over-limit", "span-over-limit-download-earliest"}:
+        assert receipt["reason"] == "combined_capture_span_exceeded"
     assert receipt["input_sha256"] == {
         key: hashlib.sha256(before[Path(f"{key}.json")]).hexdigest() for key in ("github", "pypi", "inventory")
     }
