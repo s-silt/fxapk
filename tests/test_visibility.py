@@ -975,26 +975,34 @@ def test_fresh_java_visibility_checks_present_cleanup(cleanup: object, expected:
     assert ("static_endpoint_exhaustive" in view["blocked_claims"]) == (expected == V.VIS_PARTIAL)
 
 
-@pytest.mark.parametrize(("cleanup_confirmed", "expected"), [
-    pytest.param(True, V.VIS_PARTIAL, id="producer-confirmed"),
-    pytest.param(False, V.VIS_COMPLETE, id="unconfirmed"),
+@pytest.mark.parametrize(("kind", "expected"), [
+    pytest.param("producer", V.VIS_PARTIAL, id="producer-confirmed"),
+    pytest.param("unconfirmed", V.VIS_COMPLETE, id="unconfirmed"),
+    pytest.param("conflicting-complete", V.VIS_PARTIAL, id="conflicting-complete"),
+    pytest.param("cleanup-and-read-failed", V.VIS_PARTIAL, id="cleanup-and-read-failed"),
+    pytest.param("legacy-missing-cleanup", V.VIS_COMPLETE, id="legacy-missing-cleanup"),
 ])
-def test_saved_java_cleanup_gap_reconciles_report_views(cleanup_confirmed: bool, expected: str) -> None:
+def test_saved_java_cleanup_gap_reconciles_report_views(kind: str, expected: str) -> None:
     from copy import deepcopy
 
     from fxapk.core.corpus import inspect_visibility
 
     reason = "cleanup_incomplete"
+    scanned = 2 if kind == "cleanup-and-read-failed" else 3
     receipt = _build_jadx_receipt(
         status="ok",
         runs=[{"options_digest": "synthetic", "ownership_complete": True, "termination_complete": True}],
-        scan={"files_scanned": 3, "files_selected": 3, "files_total": 3},
+        scan={"files_scanned": scanned, "files_selected": 3, "files_total": 3, "read_failed": 3 - scanned},
         cleanup={"complete": False, "reason_codes": ["synthetic_cleanup_failure"]},
         analyzer_error=False,
     )
-    assert receipt["reason_codes"] == [reason]
-    if not cleanup_confirmed:
+    assert receipt["reason_codes"] == ([reason, "read_failed"] if scanned == 2 else [reason])
+    if kind == "unconfirmed":
         receipt["cleanup"]["complete"] = 0
+    elif kind in {"conflicting-complete", "legacy-missing-cleanup"}:
+        receipt.update(complete=True, reason_codes=[])
+        if kind == "legacy-missing-cleanup":
+            del receipt["cleanup"]
     meta = {
         "jadx_receipt": receipt,
         "visibility": {
@@ -1014,10 +1022,10 @@ def test_saved_java_cleanup_gap_reconciles_report_views(cleanup_confirmed: bool,
     assert not malformed and corpus is not None
     assert digest["sources"]["java"] == corpus["sources"]["java"] == expected
     assert digest["sources"]["dex"] == corpus["sources"]["dex"] == V.VIS_COMPLETE
-    assert digest["java_scan"] == {"files_scanned": 3, "files_total": 3}
+    assert digest["java_scan"] == {"files_scanned": scanned, "files_total": 3}
     assert f"<td>{expected}</td>" in html.split("<td>java</td>", 1)[1].split("</tr>", 1)[0]
-    claims = {"static_endpoint_exhaustive", "no_hardcoded_credential"} if cleanup_confirmed else set()
+    claims = {"static_endpoint_exhaustive", "no_hardcoded_credential"} if expected == V.VIS_PARTIAL else set()
     assert {item["claim"] for item in digest["blocked_claims"]} == claims
     assert set(corpus["blocked_claims"]) == claims
-    assert (reason in V.java_coverage_observation(raw)["reason_codes"]) == cleanup_confirmed
+    assert (reason in V.java_coverage_observation(raw)["reason_codes"]) == (expected == V.VIS_PARTIAL)
     assert meta == original

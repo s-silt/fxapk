@@ -334,18 +334,22 @@ _JAVA_CLEANUP_GAP = "cleanup_incomplete"
 
 
 def _java_cleanup_gap(receipt: object) -> bool:
-    """Reconcile a saved view only for a corroborated, standalone cleanup gap."""
-    if not isinstance(receipt, dict):
+    """Recognize an explicit cleanup conflict or a recorded cleanup gap."""
+    if not isinstance(receipt, dict) or receipt.get("status") != "ok":
         return False
-    schema, cleanup = receipt.get("schema"), receipt.get("cleanup")
+    cleanup = receipt.get("cleanup")
+    if not isinstance(cleanup, dict) or cleanup.get("complete") is not False:
+        return False
+    if receipt.get("complete") is True:
+        return True
+    schema, reasons = receipt.get("schema"), receipt.get("reason_codes")
     return (
         type(schema) is int
         and schema == 1
-        and receipt.get("status") == "ok"
         and receipt.get("complete") is False
-        and receipt.get("reason_codes") == [_JAVA_CLEANUP_GAP]
-        and isinstance(cleanup, dict)
-        and cleanup.get("complete") is False
+        and isinstance(reasons, list)
+        and all(isinstance(reason, str) for reason in reasons)
+        and _JAVA_CLEANUP_GAP in reasons
     )
 
 
