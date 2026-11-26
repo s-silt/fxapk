@@ -181,7 +181,9 @@ In `digest.jadx_index.comparison`, missing or invalid bucket counts are `null`, 
 
 Multi-index queries read `fxapk-jadx-index-map.json` at the cache root by default (or `--index-map`). Older 1.6 indexes keep postings only for the values selected when the index was built; `coverage=complete` does not guarantee coverage of new values, and queries also report `query_coverage`. New analyses run with `--jadx-cache-root` save bounded Java snapshots under `query-sources` for later queries on new values. Snapshots and the `--out` receipt contain controlled material — do not publish them. `callpath`'s `name_unique` only means the simple name is unique; it does not prove method binding. `jadx compare` similarity does not mean the same operator.
 
-If an older run may have missed Java output, preserve its cache for review and rerun the same APK with the updated version: `fxapk analyze <APK> --offline --jadx-cache-root <new-empty-cache-directory> --out <new-report-directory>`. Check that the new report has `meta.jadx_receipt.complete` set to `true` and includes an index record before querying the new directory. Upgrading does not repair or invalidate an old APK-hash mapping.
+If an older run may have missed Java output, preserve its cache and report for review. Rerun the same APK with the updated version: `fxapk analyze <APK> --offline --jadx-cache-root <new-empty-cache-directory> --out <new-report-directory>`. If the original run used `--extra-dex`, add `--extra-dex <original-extra-dex-list>` and pass the same DEX files in the original order.
+
+Before switching queries to the new directory, check that the new report has `meta.jadx_receipt.complete` set to `true`. Use `meta.jadx_index_key` to find `<index_key>/manifest.json` in the new cache. Verify that `dex_lineage` matches the original input record, including SHA-256 hashes and order for both APK DEX and extra DEX files. If the original inputs cannot be verified or one is missing from the rerun, the receipt describes this run only; it does not establish that the original evidence scope was recovered. Upgrading does not repair or invalidate the old index.
 
 ## Corpus
 

@@ -169,7 +169,9 @@ HTML 报告的「看到了多少」和 `digest` 的 `visibility.java_scan` 会�
 
 多索引查询默认读 cache 根的 `fxapk-jadx-index-map.json`（或 `--index-map`）。旧 1.6 索引只为建库时选定值保存 postings，`coverage=complete` 不保证新值已覆盖，查询另报 `query_coverage`。启用 `--jadx-cache-root` 的新分析会在 `query-sources` 保存有界 Java 快照供后续新值查询。快照与 `--out` 回执含受控材料，不公开提交。`callpath` 的 `name_unique` 只是简单名唯一，不证明方法绑定。`jadx compare` 的相似性不代表同一运营者。
 
-若怀疑旧版曾漏存 Java 源码，请保留旧缓存以供复核，用新版将同一 APK 以 `fxapk analyze <APK> --offline --jadx-cache-root <新空缓存目录> --out <新报告目录>` 重新分析。先核对新报告的 `meta.jadx_receipt.complete` 为 `true` 且有新索引记录，再把查询切到新目录，不要继续使用旧的 APK 哈希映射。更新程序不会自动修复或作废旧索引。
+若怀疑旧版曾漏存 Java 源码，请保留旧缓存和报告以供复核。用新版重新分析同一 APK：`fxapk analyze <APK> --offline --jadx-cache-root <新空缓存目录> --out <新报告目录>`。若原分析使用了 `--extra-dex`，重跑也要加上 `--extra-dex <原额外DEX列表>`，并按原顺序传入同一批 DEX 文件。
+
+切换查询目录前，核对新报告的 `meta.jadx_receipt.complete` 为 `true`，并用 `meta.jadx_index_key` 找到新缓存内的 `<index_key>/manifest.json`。核对其中的 `dex_lineage` 与原始输入记录一致，包括 APK 内 DEX 和额外 DEX 的 SHA-256 及顺序。如果无法核对原输入或重跑缺少其中一份，只能说明本次运行的覆盖，不能认定已恢复原证据范围。更新程序不会自动修复或作废旧索引。
 
 ## 语料库
 
