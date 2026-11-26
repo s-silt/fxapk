@@ -166,7 +166,7 @@ class _JadxRun:
     status: str  # ok|partial|timeout|failed
     options_digest: str
     process: proctree.OwnedRun | None = None
-    dex_input_read_error: bool = False
+    producer_gaps: tuple[str, ...] = ()
 
 
 @dataclass
@@ -235,10 +235,18 @@ _INDEX_REASON_BASELINE_UNAVAILABLE = "baseline_index_unavailable"
 _INDEX_REASON_BASELINE_MANIFEST_UNAVAILABLE = "baseline_manifest_unavailable"
 _INDEX_REASON_SUBJECT_UNAVAILABLE = "subject_index_unavailable"
 _PRODUCER_DEX_INPUT_READ_ERROR = "producer_dex_input_read_error"
+_PRODUCER_JAVA_SAVE_ERROR = "producer_java_save_error"
 _ZIP_ENTRY_READ_ERROR = re.compile(
     r"^ERROR - Failed to read zip entry: "
     r"(?:.+\.[dD][eE][xX]|jadx\.zip\.fallback\.FallbackZipEntry@[0-9a-f]+)$"
 )
+
+_JAVA_SAVE_ERROR = re.compile(r"^ERROR - Error saving class: \S.*$")
+_PRODUCER_GAP_PATTERNS = (
+    (_PRODUCER_DEX_INPUT_READ_ERROR, _ZIP_ENTRY_READ_ERROR),
+    (_PRODUCER_JAVA_SAVE_ERROR, _JAVA_SAVE_ERROR),
+)
+_PRODUCER_GAP_CODES = frozenset(code for code, _ in _PRODUCER_GAP_PATTERNS)
 
 
 @dataclass(frozen=True)
@@ -931,10 +939,13 @@ class JadxAnalyzer(BaseAnalyzer):
             # （jadx 输出目录与物化 root 都还活着）。任何异常只改索引 status/receipt，
             # 绝不污染 result.error 与既有产出。
             # --------------------------------------------------------------
-            if cache_root and any(_PRODUCER_DEX_INPUT_READ_ERROR in run["reason_codes"] for run in runs):
-                # The readable sources cannot attest the entire input lineage. Do not publish,
-                # reuse, or attach a key, even if a prior run cached this same input.
-                _append_index_reason(index_receipt, _PRODUCER_DEX_INPUT_READ_ERROR)
+            producer_gaps = _PRODUCER_GAP_CODES.intersection(
+                code for run in runs for code in run["reason_codes"]
+            )
+            if cache_root and producer_gaps:
+                # An observed input or output gap invalidates reuse and publication for this run.
+                for reason in sorted(producer_gaps):
+                    _append_index_reason(index_receipt, reason)
             elif cache_root and materialized is not None and jadx_version is not None:
                 lineage = _lineage_after_exclusions(
                     materialized.lineage, extra_dex_paths, excluded_paths
@@ -1194,13 +1205,15 @@ class JadxAnalyzer(BaseAnalyzer):
                 ", ".join(owned.reason_codes),
             )
             return _JadxRun(status="failed", options_digest=digest, process=owned)
-        # Input loss and process termination are independent. Preserve the
-        # producer diagnostic for every outcome after ownership is established.
-        dex_input_read_error = any(
-            _ZIP_ENTRY_READ_ERROR.fullmatch(line.rstrip())
+        # Keep confirmed producer gaps independent of the exit and termination status.
+        # Persist only stable codes, never the diagnostic line or class name.
+        diagnostics = {
+            code
             for stream in (owned.stdout, owned.stderr)
             for line in (stream or "").splitlines()
-        )
+            for code, pattern in _PRODUCER_GAP_PATTERNS
+            if pattern.fullmatch(line.rstrip())
+        }
         if owned.timed_out:
             logger.warning("[jadx] 反编译超时（%ss），进程树已终止：%s", timeout, apk_path)
             status = "timeout"
@@ -1215,12 +1228,12 @@ class JadxAnalyzer(BaseAnalyzer):
             # Sources may still have been in flight when the root exited.
             logger.warning("[jadx] 退出码 0 但进程树未干净收尾（%s），按 partial 计", ", ".join(owned.reason_codes))
             status = "partial"
-        elif dex_input_read_error:
-            logger.warning("[jadx] 有输入条目未能载入，保留其余产物，覆盖按 partial 计")
+        elif diagnostics:
+            logger.warning("[jadx] 生产者记录覆盖缺口，保留其余产物，覆盖按 partial 计")
             status = "partial"
         else:
             status = "ok"
-        return _JadxRun(status, digest, owned, dex_input_read_error=dex_input_read_error)
+        return _JadxRun(status, digest, owned, producer_gaps=tuple(sorted(diagnostics)))
 
     @staticmethod
     def _jadx_timeout(n_extra_dex: int) -> float:
@@ -1522,9 +1535,7 @@ def _run_receipt(run: _JadxRun) -> dict:
         "termination_complete": bool(p.termination_complete),
         "forced_tree_kill": bool(p.forced_tree_kill),
         "returncode": p.returncode,
-        "reason_codes": sorted(
-            set(p.reason_codes) | ({_PRODUCER_DEX_INPUT_READ_ERROR} if run.dex_input_read_error else set())
-        ),
+        "reason_codes": sorted(set(p.reason_codes).union(run.producer_gaps)),
     }
 
 
@@ -1565,8 +1576,7 @@ def _build_jadx_receipt(
         if run.get("forced_tree_kill"):
             reasons.add("descendants_after_root_exit")
         run_reasons = run.get("reason_codes") or ()
-        if _PRODUCER_DEX_INPUT_READ_ERROR in run_reasons:
-            reasons.add(_PRODUCER_DEX_INPUT_READ_ERROR)
+        reasons.update(_PRODUCER_GAP_CODES.intersection(run_reasons))
         if "tree_state_unverified" in run_reasons:
             # 根退出后的即时树状态查询失败过：最终 quiesce 即便成功，中间窗口无从复核，
             # 按覆盖不完整计（fail closed）。
