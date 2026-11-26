@@ -78,7 +78,7 @@
 
 `analysis_notes` 列出两份报告各自记录的失败和跳过项，不包含原始错误说明。`not_recorded` 表示报告没记录分析项状态，`invalid` 表示状态记录不可用。这些提示不判断每组列表是否扫全，也不改变原有增删或计数。
 
-`coverage_observations.java` 分别展示两份报告的 JADX 覆盖，而不是分析器是否运行成功。它只输出稳定原因码，例如产出不全（`producer_partial`）、文件数上限（`scan_limit_hit`）或清理未完成（`cleanup_incomplete`）。DEX 输入读取失败（`producer_dex_input_read_error`）和 Java 源码保存失败（`producer_java_save_error`）都须由同次受控运行回执佐证，均可出现在部分覆盖或超时报告中，不输出原始错误文本。旧报告只有 JADX 成功、没有覆盖回执时是 `unknown`。这不会改变端点差异，也不能证明任何清单已查全。
+`coverage_observations.java` 分别展示两份报告的 JADX 覆盖，而不是分析器是否运行成功。它只输出稳定原因码，例如产出不全（`producer_partial`）、文件数上限（`scan_limit_hit`）、单文件被截断（`source_file_truncated`）、Java 文件读取失败（`read_failed`）或清理未完成（`cleanup_incomplete`）。DEX 输入读取失败（`producer_dex_input_read_error`）和 Java 源码保存失败（`producer_java_save_error`）都须由同次受控运行回执佐证，均可出现在部分覆盖或超时报告中，不输出原始错误文本。这两个文件级原因码只会在部分覆盖且扫描计数与回执相符时出现。旧报告只有 JADX 成功、没有覆盖回执时是 `unknown`。这不会改变端点差异，也不能证明任何清单已查全。
 
 ## 隐私与输出
 
