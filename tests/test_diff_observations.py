@@ -337,7 +337,9 @@ def test_cli_details_preserve_java_coverage_evidence(tmp_path) -> None:
     ("conflicting-total", []),
     ("future-schema", []),
 ])
-def test_cli_details_distinguishes_confirmed_java_file_gaps(tmp_path, variant, expected) -> None:
+def test_cli_details_distinguishes_confirmed_java_file_gaps(
+    tmp_path: Path, variant: str, expected: list[str],
+) -> None:
     from typer.testing import CliRunner
 
     from fxapk.analyzers.jadx import _build_jadx_receipt
