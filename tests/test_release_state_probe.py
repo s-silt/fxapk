@@ -386,3 +386,23 @@ def test_digest_mismatch_stays_visible_with_duplicate_names(probe: Probe, revers
         assets.reverse()
     code, receipt = probe(release={"assets": assets}, use_bytes=False)
     assert (code, receipt["state"], receipt["reason"]) == (2, "conflict", "metadata_digest_mismatch")
+
+
+@pytest.mark.parametrize(("case", "reason"), [
+    ("altered", "download_digest_mismatch"),
+    ("matching", "metadata_digest_unverified"),
+    ("unbound", "metadata_digest_unverified"),
+])
+def test_unverified_metadata_digest_does_not_hide_bound_download_mismatch(
+    probe: Probe, case: str, reason: str,
+) -> None:
+    assets = [{**ASSET, "digest": "sha256:truncated"}]
+    evidence = {"download_observation": {"release_id": RELEASE_ID + 1}} if case == "unbound" else None
+
+    def alter(directory: Path) -> None:
+        (directory / NAME).write_bytes(b"x" * len(GOOD))
+
+    code, receipt = probe(release={"assets": assets}, evidence=evidence, extra=alter if case != "matching" else None)
+    assert (code, receipt["state"], receipt["reason"]) == (
+        2, "conflict" if case == "altered" else "unknown", reason,
+    )

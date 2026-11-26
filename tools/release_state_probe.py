@@ -232,6 +232,7 @@ def _diagnose_capture(
             issues.add("invalid_asset_metadata")
             continue
         sizes[name], ids[name] = size, asset_id
+    digest_unverified = "metadata_digest_unverified" in issues
     # Contradictory evidence outranks uncertainty; use a fixed reason order.
     for state, reason in (
         ("conflict", "metadata_digest_mismatch"),
@@ -239,16 +240,33 @@ def _diagnose_capture(
         ("conflict", "duplicate_asset_id"),
         ("unknown", "invalid_asset_list"),
         ("unknown", "invalid_asset_metadata"),
-        ("unknown", "metadata_digest_unverified"),
         ("incomplete", "asset_not_uploaded"),
     ):
         if reason in issues:
+            if state == "incomplete" and digest_unverified:
+                return Diagnosis("unknown", "metadata_digest_unverified")
             return Diagnosis(state, reason)
-    if names != expected.keys():
-        return Diagnosis("incomplete", "asset_inventory_mismatch")
-    if downloaded is None:
+    if names != expected.keys() or downloaded is None:
+        if digest_unverified:
+            return Diagnosis("unknown", "metadata_digest_unverified")
+        if names != expected.keys():
+            return Diagnosis("incomplete", "asset_inventory_mismatch")
         return Diagnosis("unknown", "downloaded_bytes_unverified")
-    download_evidence = captured.get("download_observation")
+    result = _diagnose_downloads(
+        captured.get("download_observation"), repository_id=repository_id, release_id=release_id,
+        expected=expected, sizes=sizes, ids=ids, observed=observed, now=now,
+        capture_id=capture_id, downloaded=downloaded,
+    )
+    if digest_unverified and result.state != "conflict":
+        return Diagnosis("unknown", "metadata_digest_unverified")
+    return result
+
+
+def _diagnose_downloads(
+    download_evidence: object, *, repository_id: int, release_id: int,
+    expected: dict[str, str], sizes: dict[str, int], ids: dict[str, int], observed: datetime,
+    now: datetime, capture_id: str, downloaded: Path,
+) -> Diagnosis:
     if not (
         isinstance(download_evidence, dict)
         and _matches_id(download_evidence.get("repository_id"), repository_id)
