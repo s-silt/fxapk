@@ -397,7 +397,13 @@ def test_unverified_metadata_digest_does_not_hide_bound_download_mismatch(
     probe: Probe, case: str, reason: str,
 ) -> None:
     assets = [{**ASSET, "digest": "sha256:truncated"}]
-    evidence = {"download_observation": {"release_id": RELEASE_ID + 1}} if case == "unbound" else None
+    evidence = None
+    if case == "unbound":
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat()
+        evidence = {"download_observation": {
+            "repository_id": REPO_ID, "release_id": RELEASE_ID + 1, "asset_ids": {NAME: ASSET_ID},
+            "observed_at": stamp, "capture_id": CAPTURE_ID,
+        }}
 
     def alter(directory: Path) -> None:
         (directory / NAME).write_bytes(b"x" * len(GOOD))
