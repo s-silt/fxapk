@@ -20,9 +20,11 @@ Opt in with --github-commit and a trusted full GitHub attachment inventory
 the peeled tag commit and, with --downloaded, its bound local asset bytes.
 All four observations must fit within one 15-minute window. Only the GitHub
 bytes are checked; PyPI is still metadata-only. On a byte digest conflict the
-receipt records the checked asset's name and observed SHA-256, not its path.
-No result authorizes publication or retries. The default core-only mode is
-unchanged.
+receipt records the asset name and observed SHA-256, not its path. A size
+conflict detected on opening the file records the asset name and sizes
+without reading the body. A length change detected during reading does not
+claim an exact size or a digest. No result authorizes publication or retries.
+The default core-only mode is unchanged.
 """
 from __future__ import annotations
 

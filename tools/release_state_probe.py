@@ -62,12 +62,19 @@ class DownloadConflict:
 
 
 @dataclass(frozen=True)
+class DownloadSizeConflict:
+    asset_name: str
+    expected_size: int
+    observed_size: int
+
+
+@dataclass(frozen=True)
 class Diagnosis:
     state: str
     reason: str
     observed_at: str | None = None
     http_status: int | None = None
-    download_conflict: DownloadConflict | None = None
+    download_conflict: DownloadConflict | DownloadSizeConflict | None = None
 
     def to_receipt(self, *, include_download_conflict: bool = False) -> dict[str, object]:
         receipt = asdict(self)
@@ -316,7 +323,10 @@ def _diagnose_downloads(
                     return Diagnosis("unknown", "asset_read_budget")
                 remaining = sizes[name]
                 if info.st_size != remaining:
-                    return Diagnosis("conflict", "download_size_mismatch")
+                    return Diagnosis(
+                        "conflict", "download_size_mismatch",
+                        download_conflict=DownloadSizeConflict(name, remaining, info.st_size),
+                    )
                 hasher = hashlib.sha256()
                 while remaining:
                     chunk = stream.read(min(remaining, 1024 * 1024))

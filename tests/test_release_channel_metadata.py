@@ -3,11 +3,15 @@ import hashlib
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Iterator
 
 import pytest
+
+from tools.release_state_probe import diagnose
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION, REPO_ID = "2.0.6", 1234
@@ -360,6 +364,7 @@ def test_capture_exactly_at_two_mib_is_verified(tmp_path: Path) -> None:
     ("ok", 0, "evidence_checks_passed", "tag_and_downloaded_bytes_match", "metadata_agrees"),
     ("wrong-tag", 2, "conflict", "tag_commit_mismatch", "metadata_agrees"),
     ("no-downloads", 2, "unknown", "downloaded_bytes_unverified", "metadata_agrees"),
+    ("wrong-download-size", 2, "conflict", "download_size_mismatch", "metadata_agrees"),
     ("wrong-downloaded-bytes", 2, "conflict", "download_digest_mismatch", "metadata_agrees"),
     ("query-forbidden", 2, "unknown", "lookup_failed", "unknown"),
     ("query-not-found", 2, "unknown", "not_found_does_not_prove_absent", "unknown"),
@@ -375,6 +380,7 @@ def test_capture_exactly_at_two_mib_is_verified(tmp_path: Path) -> None:
 ])
 def test_offline_combined_release_diagnosis(
     tmp_path: Path, case: str, exit_code: int, state: str, github_reason: str, metadata_state: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     github, pypi = _capture("github"), _capture("pypi")
     commit = "c" * 40
@@ -417,6 +423,8 @@ def test_offline_combined_release_diagnosis(
         github["http_status"] = 404
     elif case == "missing-github-asset":
         github["body"]["assets"].pop()
+    elif case == "wrong-download-size":
+        (downloads / WHEEL).write_bytes(b"x")
     elif case == "wrong-downloaded-bytes":
         (downloads / WHEEL).write_bytes(b"x" * len(artifacts[WHEEL]))
     elif case == "missing-github-digest":
@@ -474,5 +482,57 @@ def test_offline_combined_release_diagnosis(
         assert second_receipt["github_evidence"]["download_conflict"] == {
             "asset_name": WHEEL, "observed_sha256": hashlib.sha256(other_bytes).hexdigest(),
         }
+    elif case == "wrong-download-size":
+        (downloads / WHEEL).write_bytes(b"yy")
+        second = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=10, check=False)
+        assert second.returncode == 2 and not second.stderr
+        second_receipt = json.loads(second.stdout)
+        assert second_receipt["input_sha256"] == receipt["input_sha256"]
+        assert second_receipt["state"] == receipt["state"] == "conflict"
+        assert second_receipt != receipt
+        for observed_size, item in enumerate((receipt, second_receipt), start=1):
+            assert item["github_evidence"]["reason"] == "download_size_mismatch"
+            assert item["github_evidence"]["download_conflict"] == {
+                "asset_name": WHEEL,
+                "expected_size": len(artifacts[WHEEL]),
+                "observed_size": observed_size,
+            }
+
+        standalone = subprocess.run(
+            [sys.executable, "-m", "tools.release_state_probe",
+             "--capture", str(tmp_path / "github.json"), "--inventory", str(tmp_path / "inventory.json"),
+             "--downloaded", str(downloads), "--repository", "s-silt/fxapk",
+             "--repository-id", str(REPO_ID), "--tag", f"v{VERSION}", "--commit", commit],
+            cwd=ROOT, capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert standalone.returncode == 2 and not standalone.stderr
+        assert json.loads(standalone.stdout) == {
+            "state": "conflict", "reason": "download_size_mismatch",
+            "observed_at": github["observed_at"], "http_status": 200,
+        }
+
+        real_open = Path.open
+        guarded_paths: list[Path] = []
+
+        def unexpected_read(_size: int) -> bytes:
+            pytest.fail("file body was read after a measured size mismatch")
+
+        @contextmanager
+        def guarded_open(path: Path, *args: Any, **kwargs: Any) -> Iterator[object]:
+            with real_open(path, *args, **kwargs) as stream:
+                if path == downloads / WHEEL:
+                    guarded_paths.append(path)
+                    yield SimpleNamespace(fileno=stream.fileno, read=unexpected_read)
+                else:
+                    yield stream
+
+        with monkeypatch.context() as guard:
+            guard.setattr(Path, "open", guarded_open)
+            diagnostic = diagnose(
+                github, repository="s-silt/fxapk", repository_id=REPO_ID, tag=f"v{VERSION}",
+                commit=commit, expected=inventory, downloaded=downloads,
+            )
+        assert guarded_paths == [downloads / WHEEL]
+        assert diagnostic.to_receipt(include_download_conflict=True) == second_receipt["github_evidence"]
     else:
         assert "download_conflict" not in receipt["github_evidence"]
