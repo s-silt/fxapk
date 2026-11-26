@@ -200,6 +200,7 @@ def _diagnose_capture(
     if not isinstance(assets, list):
         return Diagnosis("unknown", "invalid_asset_list")
     names: set[str] = set()
+    seen_ids: set[int] = set()
     sizes: dict[str, int] = {}
     ids: dict[str, int] = {}
     issues: set[str] = set()
@@ -209,25 +210,36 @@ def _diagnose_capture(
             continue
         if name in names:
             issues.add("duplicate_asset")
-            continue
         names.add(name)
         if asset.get("state") != "uploaded":
             issues.add("asset_not_uploaded")
             continue
         recorded = asset.get("digest")
-        if recorded is not None and name in expected and recorded != f"sha256:{expected[name]}":
-            issues.add("metadata_digest_mismatch")
+        if recorded is not None and name in expected:
+            digest = recorded[7:].lower() if isinstance(recorded, str) and recorded.startswith("sha256:") else ""
+            if not DIGEST.fullmatch(digest):
+                issues.add("metadata_digest_unverified")
+            elif digest != expected[name]:
+                issues.add("metadata_digest_mismatch")
         size, asset_id = asset.get("size"), asset.get("id")
-        if type(size) is not int or size < 0 or type(asset_id) is not int or asset_id <= 0:
+        if type(asset_id) is not int or asset_id <= 0:
+            issues.add("invalid_asset_metadata")
+            continue
+        if asset_id in seen_ids:
+            issues.add("duplicate_asset_id")
+        seen_ids.add(asset_id)
+        if type(size) is not int or size < 0:
             issues.add("invalid_asset_metadata")
             continue
         sizes[name], ids[name] = size, asset_id
-    # Keep the same receipt shape, but surface known conflicts before uncertainty.
+    # Contradictory evidence outranks uncertainty; use a fixed reason order.
     for state, reason in (
-        ("conflict", "duplicate_asset"),
         ("conflict", "metadata_digest_mismatch"),
+        ("conflict", "duplicate_asset"),
+        ("conflict", "duplicate_asset_id"),
         ("unknown", "invalid_asset_list"),
         ("unknown", "invalid_asset_metadata"),
+        ("unknown", "metadata_digest_unverified"),
         ("incomplete", "asset_not_uploaded"),
     ):
         if reason in issues:
@@ -236,8 +248,6 @@ def _diagnose_capture(
         return Diagnosis("incomplete", "asset_inventory_mismatch")
     if downloaded is None:
         return Diagnosis("unknown", "downloaded_bytes_unverified")
-    if len(set(ids.values())) != len(ids):
-        return Diagnosis("conflict", "duplicate_asset_id")
     download_evidence = captured.get("download_observation")
     if not (
         isinstance(download_evidence, dict)

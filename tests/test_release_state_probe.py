@@ -101,6 +101,7 @@ def probe(tmp_path: Path) -> Probe:
     ({"release": {"assets": [{"name": NAME, "state": "uploaded", "digest": "sha256:" + "f" * 64}]}},
      "metadata_digest_mismatch"),
     ({"release": {"assets": [ASSET] * 2}}, "duplicate_asset"),
+    ({"release": {"assets": [{**ASSET, "digest": f"sha256:{SHA256.upper()}"}]}}, "tag_and_downloaded_bytes_match"),
     ({"release": {"assets": [{**ASSET, "digest": None}]}},
      "tag_and_downloaded_bytes_match"),
     ({"observed": None}, "tag_commit_unverified"),
@@ -345,3 +346,43 @@ def test_release_metadata_conflict_is_not_hidden_by_other_assets(
     assert code == 2
     assert receipt["state"] == "conflict"
     assert receipt["reason"] == "metadata_digest_mismatch"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("digest", ["sha256:truncated", "sha256:" + "G" * 64, "a" * 64, False])
+def test_malformed_release_digest_does_not_claim_conflict(
+    probe: Probe, reverse: bool, digest: object,
+) -> None:
+    assets = [{"name": "pending.whl", "state": "open"}, {**ASSET, "digest": digest}]
+    if reverse:
+        assets.reverse()
+    code, receipt = probe(release={"assets": assets}, use_bytes=False)
+    assert (code, receipt["state"], receipt["reason"]) == (2, "unknown", "metadata_digest_unverified")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("extra_pending", [False, True])
+def test_duplicate_release_asset_ids_are_visible_without_downloads(
+    probe: Probe, reverse: bool, extra_pending: bool,
+) -> None:
+    other = "other.whl"
+    assets = [ASSET, {**ASSET, "name": other}]
+    if extra_pending:
+        assets.append({"name": "pending.whl", "state": "open"})
+    if reverse:
+        assets.reverse()
+    code, receipt = probe(release={"assets": assets}, use_bytes=False, inventory={NAME: SHA256, other: SHA256})
+    assert (code, receipt["state"], receipt["reason"]) == (2, "conflict", "duplicate_asset_id")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("same_name", [False, True])
+def test_digest_mismatch_stays_visible_with_duplicate_names(probe: Probe, reverse: bool, same_name: bool) -> None:
+    duplicate = ASSET if same_name else {**ASSET, "name": "extra.whl", "id": ASSET_ID + 1}
+    assets = [duplicate, {**ASSET, "digest": "sha256:" + "f" * 64}]
+    if not same_name:
+        assets.append(duplicate)
+    if reverse:
+        assets.reverse()
+    code, receipt = probe(release={"assets": assets}, use_bytes=False)
+    assert (code, receipt["state"], receipt["reason"]) == (2, "conflict", "metadata_digest_mismatch")
