@@ -629,14 +629,18 @@ def test_posix_scan_logs_only_first_decisive_probe(
         assert pgid not in proctree._POSIX_UNVERIFIED
         assert not caplog.records
 
-    process_table.extend(
-        (denied_environ, denied_getpgid) if first_probe == "environ"
-        else (denied_getpgid, denied_environ),
-    )
-    assert list(proctree._posix_owned_processes(pgid)) == []
-    assert pgid in proctree._POSIX_UNVERIFIED
-    process_table.reverse()
-    assert list(proctree._posix_owned_processes(pgid)) == []
+    details: dict[str, str] = {}
+    with observe_posix_verification_stage(details=details) as observed:
+        process_table.extend(
+            (denied_environ, denied_getpgid) if first_probe == "environ"
+            else (denied_getpgid, denied_environ),
+        )
+        assert list(proctree._posix_owned_processes(pgid)) == []
+        assert pgid in proctree._POSIX_UNVERIFIED
+        process_table.reverse()
+        assert list(proctree._posix_owned_processes(pgid)) == []
+        assert observed() == "ownership_scan"
+    assert details == {"posix_probe": first_probe, "posix_error": first_error}
 
     record, = caplog.records
     assert record.name == proctree.logger.name and record.levelno == logging.WARNING
