@@ -170,6 +170,27 @@ def test_unobserved_github_preserves_independent_pypi_evidence(
     if other == "missing":
         assert receipt["pypi"]["reason"] == "core_file_missing"
 
+@pytest.mark.parametrize("unobserved_channel", ["github", "pypi"])
+def test_cross_batch_404_preserves_conflict_without_comparing_snapshots(
+    tmp_path: Path, unobserved_channel: str,
+) -> None:
+    github, pypi = _capture("github"), _capture("pypi")
+    pypi["capture_id"] = "other-collection"
+    if unobserved_channel == "github":
+        github.update(http_status=404, body=None)
+        pypi["body"]["urls"][0]["digests"]["sha256"] = "c" * 64
+        conflicting_channel = "pypi"
+    else:
+        pypi.update(http_status=404, body=None)
+        github["body"]["assets"][0]["digest"] = f"sha256:{'c' * 64}"
+        conflicting_channel = "github"
+    code, receipt = _run(tmp_path, github, pypi)
+    assert (code, receipt["state"], receipt["reason"]) == (2, "unknown", "snapshots_not_comparable")
+    assert receipt[unobserved_channel]["state"] == "not_observed"
+    assert receipt[conflicting_channel]["state"] == "conflict"
+    assert receipt[conflicting_channel]["reason"] == "build_digest_mismatch"
+
+
 def test_matching_pypi_cannot_compensate_for_github_digest_conflict(tmp_path: Path) -> None:
     github = _capture("github")
     github["body"]["assets"][0]["digest"] = f"sha256:{'f' * 64}"
