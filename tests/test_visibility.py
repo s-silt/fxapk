@@ -910,12 +910,14 @@ def test_budget_note_saved_projection_preserves_count_until_snapshot_refresh(
 
 @pytest.mark.parametrize("status", ["partial", "timeout"])
 @pytest.mark.parametrize("run_confirmed", [True, False])
-def test_saved_producer_input_gap_agrees_across_report_views(status: str, run_confirmed: bool) -> None:
+@pytest.mark.parametrize("reason", ["producer_dex_input_read_error", "producer_java_save_error"])
+def test_saved_producer_gap_agrees_across_report_views(
+    status: str, run_confirmed: bool, reason: str,
+) -> None:
     from copy import deepcopy
 
     from fxapk.core.corpus import inspect_visibility
 
-    reason = "producer_dex_input_read_error"
     scan = {"files_scanned": 2, "files_total": 2, "truncated_files": 0}
     receipt = _build_jadx_receipt(
         status=status, runs=[{

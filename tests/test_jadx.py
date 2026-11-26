@@ -166,6 +166,29 @@ def test_zero_exit_dex_read_error_preserves_finding_without_complete_coverage(
     assert "https://clean.example.com/x" in {item.value for item in result.endpoints}
 
 
+@pytest.mark.parametrize(("stdout", "stderr", "gap"), [
+    ("INFO  - processing ...\rERROR - Error saving class: synthetic.fixture.Blocked\r", "", True),
+    ("INFO  - done", "ERROR - Error saving class: synthetic.fixture.Blocked", True),
+    ("WARN  - Error saving class: synthetic.fixture.Blocked", "", False),
+    ("INFO  - literal ERROR - Error saving class: synthetic.fixture.Blocked", "", False),
+    ("ERROR - Error saving class: ", "", False),
+])
+def test_java_save_diagnostic_changes_coverage_not_findings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout: str, stderr: str, gap: bool,
+) -> None:
+    body = 'class Q { String u = "https://synthetic.invalid/retained"; }'
+    _patch_run_owned(monkeypatch, _writes(body, stdout=stdout, stderr=stderr))
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+    receipt = result.meta["jadx_receipt"]
+    assert receipt["runs"][0]["returncode"] == 0
+    assert receipt["scan"]["files_scanned"] == 1
+    assert receipt["complete"] is not gap
+    assert _java_vis(result.meta) == ("partial" if gap else "complete")
+    assert receipt["reason_codes"] == (["producer_java_save_error", "producer_partial"] if gap else [])
+    assert "synthetic.fixture.Blocked" not in repr(receipt)
+    assert "https://synthetic.invalid/retained" in {item.value for item in result.endpoints}
+
+
 def test_timeout_records_status_not_crash(monkeypatch, tmp_path) -> None:
     def _handler(cmd):  # noqa: ANN001 — 超时被终止：无任何产物
         Path(cmd[cmd.index("-d") + 1]).mkdir(parents=True, exist_ok=True)

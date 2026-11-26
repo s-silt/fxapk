@@ -78,7 +78,7 @@
 
 `analysis_notes` 列出两份报告各自记录的失败和跳过项，不包含原始错误说明。`not_recorded` 表示报告没记录分析项状态，`invalid` 表示状态记录不可用。这些提示不判断每组列表是否扫全，也不改变原有增删或计数。
 
-`coverage_observations.java` 分别展示两份报告的 JADX 覆盖，而不是分析器是否运行成功。仅带出已知的产出不全（`producer_partial`）、文件数上限（`scan_limit_hit`）和经同次运行回执佐证的 DEX 输入读取失败（`producer_dex_input_read_error`，也可能出现在超时报告中），不输出原始错误文本。旧报告只有 JADX 成功、没有覆盖回执时是 `unknown`。这不会改变端点差异，也不能证明任何清单已查全。
+`coverage_observations.java` 分别展示两份报告的 JADX 覆盖，而不是分析器是否运行成功。它只输出稳定原因码，例如产出不全（`producer_partial`）、文件数上限（`scan_limit_hit`）或清理未完成（`cleanup_incomplete`）。DEX 输入读取失败（`producer_dex_input_read_error`）和 Java 源码保存失败（`producer_java_save_error`）都须由同次受控运行回执佐证，均可出现在部分覆盖或超时报告中，不输出原始错误文本。旧报告只有 JADX 成功、没有覆盖回执时是 `unknown`。这不会改变端点差异，也不能证明任何清单已查全。
 
 ## 隐私与输出
 
@@ -168,6 +168,12 @@ HTML 报告的「看到了多少」和 `digest` 的 `visibility.java_scan` 会�
 在 `digest.jadx_index.comparison` 中，缺失或无效的分项计数为 `null`（不是零）；仅当四项都有已记录的非负整数时才计算 `total_regions`。
 
 多索引查询默认读 cache 根的 `fxapk-jadx-index-map.json`（或 `--index-map`）。旧 1.6 索引只为建库时选定值保存 postings，`coverage=complete` 不保证新值已覆盖，查询另报 `query_coverage`。启用 `--jadx-cache-root` 的新分析会在 `query-sources` 保存有界 Java 快照供后续新值查询。快照与 `--out` 回执含受控材料，不公开提交。`callpath` 的 `name_unique` 只是简单名唯一，不证明方法绑定。`jadx compare` 的相似性不代表同一运营者。
+
+若怀疑旧版曾漏存 Java 源码，请保留旧缓存和报告以供复核。用新版重新分析同一 APK：`fxapk analyze <APK> --offline --jadx-cache-root <新空缓存目录> --out <新报告目录>`。若原分析使用了 `--extra-dex`，重跑也要加上 `--extra-dex <原额外DEX列表>`，并按原顺序传入同一批 DEX 文件。
+
+切换查询目录前，核对新报告的 `meta.jadx_receipt.complete` 为 `true`，并用 `meta.jadx_index_key` 找到新缓存内的 `<index_key>/manifest.json`。核对其中的 `dex_lineage` 与原始输入记录一致，包括 APK 内 DEX 和额外 DEX 的 SHA-256 及顺序。如果无法核对原输入或重跑缺少其中一份，只能说明本次运行的覆盖，不能认定已恢复原证据范围。更新程序不会自动修复或作废旧索引。
+
+Java 主扫描、持久索引和查询源快照的覆盖各自独立：分别看报告的 `meta.jadx_receipt.complete`、索引 manifest 的 `coverage`、报告的 `meta.jadx_query_sources.coverage`。只有原输入一致，且相应覆盖明确为完整，才把新目录用于对应范围的完整查询。使用 `jadx usage` 时还要核对本次回执的 `coverage` 和 `query_coverage`，两者分别反映持久索引和源快照查询，不能互相替代。主扫描为 `false`、相关覆盖为 `partial` 或所需字段缺失时，只使用已找到的结果，不认定已恢复原范围。即使覆盖完整，空结果也只表示本次实际观察的内容中未找到匹配项，不证明它不存在。
 
 ## 语料库
 

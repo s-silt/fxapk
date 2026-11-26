@@ -152,8 +152,13 @@ def test_reuse_on_second_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
 @pytest.mark.parametrize(("returncode", "timed_out"), [
     (0, False), (3, False), (None, True), (3, True),
 ])
-def test_unread_input_never_publishes_or_reuses_an_index_key(
+@pytest.mark.parametrize(("diagnostic", "reason"), [
+    ("ERROR - Failed to read zip entry: fixture.apk:classes2.dex", "producer_dex_input_read_error"),
+    ("ERROR - Error saving class: synthetic.fixture.Blocked", "producer_java_save_error"),
+])
+def test_producer_gap_never_publishes_or_reuses_an_index_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, preexisting: bool, returncode: int | None, timed_out: bool,
+    diagnostic: str, reason: str,
 ) -> None:
     ctx = _ctx(tmp_path, dex_names=("classes.dex", "classes2.dex"))
     old_key = None
@@ -162,7 +167,7 @@ def test_unread_input_never_publishes_or_reuses_an_index_key(
         old_key = JadxAnalyzer().analyze(ctx).meta["jadx_index_key"]
         assert _load(ctx, old_key).coverage == "complete"
     _patch(
-        monkeypatch, diagnostic="ERROR - Failed to read zip entry: fixture.apk:classes2.dex",
+        monkeypatch, diagnostic=diagnostic,
         returncode=returncode, timed_out=timed_out,
     )
     for _ in range(2):
@@ -171,9 +176,9 @@ def test_unread_input_never_publishes_or_reuses_an_index_key(
         assert not receipt["complete"] and result.meta["jadx_endpoint_count"] >= 1
         assert receipt["status"] == ("timeout" if timed_out else "partial")
         assert receipt["runs"][0]["returncode"] == returncode
-        assert "producer_dex_input_read_error" in receipt["reason_codes"]
+        assert reason in receipt["reason_codes"]
         assert result.meta["jadx_index_status"] == receipt["index"]["status"] == "disabled"
-        assert "producer_dex_input_read_error" in receipt["index"]["reason_codes"]
+        assert reason in receipt["index"]["reason_codes"]
         assert "jadx_index_key" not in result.meta and "key" not in receipt["index"]
         assert "jadx_query_sources" not in result.meta
     if old_key is not None:
