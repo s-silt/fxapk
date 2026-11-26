@@ -629,18 +629,20 @@ def test_posix_scan_logs_only_first_decisive_probe(
         assert pgid not in proctree._POSIX_UNVERIFIED
         assert not caplog.records
 
-        process_table.extend(
-            (denied_environ, denied_getpgid) if first_probe == "environ"
-            else (denied_getpgid, denied_environ),
-        )
-        assert list(proctree._posix_owned_processes(pgid)) == []
-        assert pgid in proctree._POSIX_UNVERIFIED
-        process_table.reverse()
-        assert list(proctree._posix_owned_processes(pgid)) == []
+    process_table.extend(
+        (denied_environ, denied_getpgid) if first_probe == "environ"
+        else (denied_getpgid, denied_environ),
+    )
+    assert list(proctree._posix_owned_processes(pgid)) == []
+    assert pgid in proctree._POSIX_UNVERIFIED
+    process_table.reverse()
+    assert list(proctree._posix_owned_processes(pgid)) == []
 
     record, = caplog.records
-    assert record.name == proctree.logger.name and record.levelno == logging.DEBUG
-    assert record.getMessage() == "POSIX tree verification unavailable: stage=ownership_scan"
+    assert record.name == proctree.logger.name and record.levelno == logging.WARNING
+    assert record.getMessage() == (
+        f"POSIX tree verification unavailable: stage=ownership_scan probe={first_probe} error={first_error}"
+    )
     default_keys = vars(logging.makeLogRecord({})).keys()
     extras = {
         key: value for key, value in vars(record).items()

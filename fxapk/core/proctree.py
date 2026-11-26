@@ -728,10 +728,22 @@ else:
     _POSIX_STARTED: dict[int, float] = {}
     _POSIX_UNVERIFIED: set[int] = set()
 
-    def _posix_mark_unverified(pgid: int, stage: str, *, extra: dict[str, str] | None = None) -> None:
-        if pgid not in _POSIX_UNVERIFIED:
-            logger.debug("POSIX tree verification unavailable: stage=%s", stage, extra=extra)
+    def _posix_mark_unverified(
+        pgid: int, stage: str, *, diagnostic: tuple[str, str] | None = None,
+    ) -> None:
+        if pgid in _POSIX_UNVERIFIED:
+            return
         _POSIX_UNVERIFIED.add(pgid)
+        # CI captures warnings with a plain formatter. The caller supplies only
+        # fixed categories, never process identities or exception text.
+        if diagnostic is None:
+            logger.warning("POSIX tree verification unavailable: stage=%s", stage)
+        else:
+            probe, error = diagnostic
+            logger.warning(
+                "POSIX tree verification unavailable: stage=%s probe=%s error=%s",
+                stage, probe, error, extra={"posix_probe": probe, "posix_error": error},
+            )
 
     def _posix_owned_processes(pgid: int):
         """Keep Process identities when signaling; never expose environment contents."""
@@ -775,7 +787,7 @@ else:
                 if not confirmed_terminal:
                     error = "PermissionError" if issubclass(type(denied), PermissionError) else "AccessDenied"
                     _posix_mark_unverified(
-                        pgid, "ownership_scan", extra={"posix_probe": probe, "posix_error": error},
+                        pgid, "ownership_scan", diagnostic=(probe, error),
                     )
 
     def _posix_group_pids(pgid: int) -> list[int]:
