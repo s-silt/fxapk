@@ -70,7 +70,7 @@ def test_both_channels_match_core_build_metadata_despite_github_extras(tmp_path:
     ("missing_digest", "unknown", "digest_unverified"),
     ("duplicate", "conflict", "unexpected_or_duplicate_core_file"),
     ("extra", "conflict", "unexpected_or_duplicate_core_file"),
-    ("404", "incomplete", "not_found_does_not_prove_absent"),
+    ("404", "unknown", "not_found_does_not_prove_absent"),
     ("503", "unknown", "lookup_failed"),
     ("wrong_project", "unknown", "response_identity_mismatch"),
     ("wrong_version", "unknown", "response_identity_mismatch"),
@@ -117,6 +117,58 @@ def test_pypi_uncertainties_do_not_pass(tmp_path: Path, problem: str, state: str
     assert receipt["pypi"]["reason"] == reason
     assert receipt["github"]["state"] == "metadata_matches"
 
+
+
+@pytest.mark.parametrize("channel", ["github", "pypi"])
+@pytest.mark.parametrize(
+    ("observation", "state", "reason", "detail"),
+    [
+        ("missing", "incomplete", "channel_not_verified", "core_file_missing"),
+        (404, "unknown", "channel_not_observed", "not_found_does_not_prove_absent"),
+        (403, "unknown", "channel_unverified", "lookup_failed"),
+        (503, "unknown", "channel_unverified", "lookup_failed"),
+    ],
+)
+def test_aggregate_separates_missing_file_from_inconclusive_lookup(
+    tmp_path: Path, channel: str, observation: str | int, state: str, reason: str, detail: str,
+) -> None:
+    github, pypi = _capture("github"), _capture("pypi")
+    capture = github if channel == "github" else pypi
+    if observation == "missing":
+        capture["body"]["assets" if channel == "github" else "urls"].pop(0)
+    else:
+        capture["http_status"] = observation
+        capture["body"] = None
+    code, receipt = _run(tmp_path, github, pypi)
+    assert (code, receipt["state"], receipt["reason"]) == (2, state, reason)
+    assert receipt[channel]["reason"] == detail
+
+
+@pytest.mark.parametrize(
+    ("other", "state", "reason"),
+    [
+        ("missing", "unknown", "channel_not_observed"),
+        (403, "unknown", "channel_unverified"),
+        ("conflict", "conflict", "channel_metadata_conflict"),
+        (404, "unknown", "channel_not_observed"),
+    ],
+)
+def test_unobserved_github_preserves_independent_pypi_evidence(
+    tmp_path: Path, other: str | int, state: str, reason: str,
+) -> None:
+    github, pypi = _capture("github"), _capture("pypi")
+    github.update(http_status=404, body=None)
+    if other == "missing":
+        pypi["body"]["urls"].pop(0)
+    elif other == "conflict":
+        pypi["body"]["urls"][0]["digests"]["sha256"] = "c" * 64
+    else:
+        pypi.update(http_status=other, body=None)
+    code, receipt = _run(tmp_path, github, pypi)
+    assert (code, receipt["state"], receipt["reason"]) == (2, state, reason)
+    assert receipt["github"]["state"] == "not_observed"
+    if other == "missing":
+        assert receipt["pypi"]["reason"] == "core_file_missing"
 
 def test_matching_pypi_cannot_compensate_for_github_digest_conflict(tmp_path: Path) -> None:
     github = _capture("github")

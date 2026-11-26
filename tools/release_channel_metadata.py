@@ -8,7 +8,9 @@ PyPI requires release_request with method, path, request_origin,
 response_origin and response_path, bound to its exact release JSON endpoint.
 The build manifest maps this version's core wheel and sdist names to SHA-256
 digests. Comparisons cover the two named files, not the complete GitHub
-release or its other attached packages. Matching is about metadata digests,
+release or its other attached packages. A bound 404 is not an observation of
+missing files; the combined diagnosis stays unknown unless independent
+comparable evidence establishes a conflict. Matching is about metadata digests,
 not downloaded bytes, the Git tag commit, or permission to publish or retry.
 Input SHA-256 values identify exactly the input files read in full within the
 size limit, even on parse failure. They are not package hashes or validation.
@@ -204,6 +206,8 @@ def main() -> int:
             state, reason = "conflict", "channel_metadata_conflict"
         elif "unknown" in {g.state, p.state}:
             reason = "channel_unverified"
+        elif "not_observed" in {g.state, p.state}:
+            reason = "channel_not_observed"
         else:
             state, reason = "incomplete", "channel_not_verified"
     print(json.dumps({
