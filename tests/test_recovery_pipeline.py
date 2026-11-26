@@ -602,32 +602,35 @@ def _run_public_cli_review(tmp_path: Path) -> Path:
     return output
 
 
-@pytest.mark.parametrize(("exit_code", "write_receipt", "setup_reason"), [
-    (5, True, None),
-    (6, True, None),
-    (2, False, "review_manifest_schema_invalid"),
-    (2, False, "unknown"),
+@pytest.mark.parametrize(("exit_code", "receipt_states", "setup_reason"), [
+    (5, ("failed", "failed"), None),
+    (6, ("failed", "failed"), None),
+    (6, ("ok", "partial"), None),
+    (2, None, "review_manifest_schema_invalid"),
+    (2, None, "unknown"),
 ])
 def test_public_cli_review_failure_wires_only_safe_diagnostics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int, write_receipt: bool, setup_reason: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int,
+    receipt_states: tuple[str, str] | None, setup_reason: str | None,
 ) -> None:
     private = "/synthetic/private/value"
+    first_state, second_state = receipt_states or ("unknown", "unknown")
     expected_tasks = [
-        {"state": "failed", "reasons": ["tree_state_unverified", "unknown"]},
-        {"state": "failed", "reasons": ["review_worker_exit"]},
+        {"state": first_state, "reasons": ["tree_state_unverified", "unknown"]},
+        {"state": second_state, "reasons": ["review_worker_exit"]},
         {"state": "not_run", "reasons": ["dependency_not_verified"]},
     ]
 
     def fake_run(command: list[str], *, capture_output: bool, timeout: int) -> subprocess.CompletedProcess[bytes]:
         assert command[1:4] == ["-m", "fxapk.cli", "evidence-review"]
         assert capture_output and timeout == 90
-        if write_receipt:
+        if receipt_states is not None:
             output = Path(command[-1])
             output.mkdir()
             (output / "review.json").write_text(json.dumps({
                 "tasks": [
-                    {"id": private, "state": "failed", "reason_codes": ["tree_state_unverified", private]},
-                    {"state": "failed", "reason_codes": ["review_worker_exit"]},
+                    {"id": private, "state": first_state, "reason_codes": ["tree_state_unverified", private]},
+                    {"state": second_state, "reason_codes": ["review_worker_exit"]},
                     {"state": "not_run", "reason_codes": ["dependency_not_verified"]},
                 ],
             }), encoding="utf-8")
@@ -641,7 +644,7 @@ def test_public_cli_review_failure_wires_only_safe_diagnostics(
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(pytest.fail.Exception) as error:
         _run_public_cli_review(tmp_path)
-    expected: dict[str, object] = {"exit": exit_code, "tasks": expected_tasks if write_receipt else []}
+    expected: dict[str, object] = {"exit": exit_code, "tasks": expected_tasks if receipt_states is not None else []}
     if setup_reason is not None:
         expected["setup_reason"] = setup_reason
     assert str(error.value) == "evidence-review diagnostic: " + json.dumps(expected, sort_keys=True)
