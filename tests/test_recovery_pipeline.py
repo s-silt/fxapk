@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import struct
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Literal, NoReturn
@@ -500,13 +501,89 @@ def test_reanalysis_status_reaches_recovery_and_report(monkeypatch, tmp_path, an
                 assert reason in (output / "reviewed" / name).read_text(encoding="utf-8")
 
 
-@pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")
-def test_public_cli_runs_real_review_workers_and_publishes_states(tmp_path):
-    import base64
-    import subprocess
-    import sys
+_CLI_TASK_STATES = frozenset({"ok", "partial", "failed", "not_run", "unsupported"})
+_CLI_TASK_REASONS = frozenset({
+    "jadx_not_requested", "dependency_not_verified", "tree_state_unverified",
+    "survivors_after_kill", "descendants_after_root_exit", "process_exit_unverified",
+    "review_worker_timeout", "review_worker_exit", "review_worker_process_tree_incomplete",
+    "review_worker_receipt_missing", "review_worker_receipt_invalid",
+    "platform_memory_limit_unavailable", "output_limit",
+})
 
-    pytest.importorskip("unicorn")
+
+def _cli_review_task_summary(tasks: object) -> list[dict[str, object]]:
+    if type(tasks) is not list:
+        return []
+    summary = []
+    for row in tasks[:3]:
+        state = row.get("state") if type(row) is dict else None
+        reasons = row.get("reason_codes") if type(row) is dict else None
+        summary.append({
+            "state": state if type(state) is str and state in _CLI_TASK_STATES else "unknown",
+            "reasons": sorted({
+                reason if type(reason) is str and reason in _CLI_TASK_REASONS else "unknown"
+                for reason in reasons[:8]
+            }) if type(reasons) is list else [],
+        })
+    return summary
+
+
+def test_cli_review_task_summary_reports_only_fixed_fields() -> None:
+    tasks = [
+        {"state": "ok", "id": "/synthetic/private/task", "reason_codes": []},
+        {"state": "failed", "reason_codes": [
+            "tree_state_unverified", "/synthetic/private/message", "review_worker_process_tree_incomplete",
+        ]},
+        {"state": "/synthetic/private/state"},
+    ]
+    assert _cli_review_task_summary([*tasks, {"state": "ok"}]) == [
+        {"state": "ok", "reasons": []},
+        {"state": "failed", "reasons": ["review_worker_process_tree_incomplete", "tree_state_unverified", "unknown"]},
+        {"state": "unknown", "reasons": []},
+    ]
+
+
+_CLI_SETUP_REASONS = frozenset({
+    "evidence_review_failed", "review_manifest_schema_invalid", "review_task_budget_or_shape",
+    "sample_sha256_required", "task_identifier_invalid", "reserved_task_identifier",
+    "duplicate_task_identifier", "dependencies_must_reference_prior_tasks", "task_kind_invalid",
+    "review_report_sample_mismatch", "review_output_exists", "review_input_required",
+    "review_input_inside_output", "review_input_hash_mismatch", "review_publication_failed",
+})
+
+
+def _cli_review_setup_reason(stderr: bytes) -> str:
+    for line in reversed(stderr[-8192:].splitlines()):
+        try:
+            item = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if type(item) is dict and item.get("state") == "failed" and "exception_type" in item:
+            reason = item.get("reason_code")
+            return reason if type(reason) is str and reason in _CLI_SETUP_REASONS else "unknown"
+    return "unknown"
+
+
+def _assert_public_cli_review(run: subprocess.CompletedProcess[bytes], output: Path) -> None:
+    try:
+        receipt = json.loads((output / "review.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        receipt = None
+    tasks = receipt.get("tasks") if type(receipt) is dict else None
+    summary = _cli_review_task_summary(tasks)
+    expected = ["ok", "partial", "not_run"]
+    if run.returncode != 5 or type(tasks) is not list or len(tasks) != len(expected) or [
+        row["state"] for row in summary
+    ] != expected:
+        diagnostic: dict[str, object] = {"exit": run.returncode, "tasks": summary}
+        if type(tasks) is not list:
+            diagnostic["setup_reason"] = _cli_review_setup_reason(run.stderr)
+        pytest.fail("evidence-review diagnostic: " + json.dumps(diagnostic, sort_keys=True), pytrace=False)
+
+
+def _run_public_cli_review(tmp_path: Path) -> Path:
+    import base64
+
     code = tmp_path / "add.bin"
     code.write_bytes(bytes.fromhex("0000018bc0035fd6"))
     recovered = tmp_path / "synthetic.dex"
@@ -521,9 +598,63 @@ def test_public_cli_runs_real_review_workers_and_publishes_states(tmp_path):
     output = tmp_path / "review"
     run = subprocess.run([sys.executable, "-m", "fxapk.cli", "evidence-review", str(plan),
                           "--out", str(output)], capture_output=True, timeout=90)
-    assert run.returncode == 5, run.stderr.decode("utf-8", errors="replace")
-    receipt = json.loads((output / "review.json").read_text(encoding="utf-8"))
-    assert [row["state"] for row in receipt["tasks"]] == ["ok", "partial", "not_run"]
+    _assert_public_cli_review(run, output)
+    return output
+
+
+@pytest.mark.parametrize(("exit_code", "receipt_states", "setup_reason"), [
+    (5, ("failed", "failed"), None),
+    (6, ("failed", "failed"), None),
+    (6, ("ok", "partial"), None),
+    (2, None, "review_manifest_schema_invalid"),
+    (2, None, "unknown"),
+])
+def test_public_cli_review_failure_wires_only_safe_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int,
+    receipt_states: tuple[str, str] | None, setup_reason: str | None,
+) -> None:
+    private = "/synthetic/private/value"
+    first_state, second_state = receipt_states or ("unknown", "unknown")
+    expected_tasks = [
+        {"state": first_state, "reasons": ["tree_state_unverified", "unknown"]},
+        {"state": second_state, "reasons": ["review_worker_exit"]},
+        {"state": "not_run", "reasons": ["dependency_not_verified"]},
+    ]
+
+    def fake_run(command: list[str], *, capture_output: bool, timeout: int) -> subprocess.CompletedProcess[bytes]:
+        assert command[1:4] == ["-m", "fxapk.cli", "evidence-review"]
+        assert capture_output and timeout == 90
+        if receipt_states is not None:
+            output = Path(command[-1])
+            output.mkdir()
+            (output / "review.json").write_text(json.dumps({
+                "tasks": [
+                    {"id": private, "state": first_state, "reason_codes": ["tree_state_unverified", private]},
+                    {"state": second_state, "reason_codes": ["review_worker_exit"]},
+                    {"state": "not_run", "reason_codes": ["dependency_not_verified"]},
+                ],
+            }), encoding="utf-8")
+        stderr = private.encode() + b"\n" + json.dumps({
+            "state": "failed",
+            "reason_code": private if setup_reason == "unknown" else setup_reason,
+            "exception_type": private,
+        }).encode()
+        return subprocess.CompletedProcess(command, exit_code, private.encode(), stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(pytest.fail.Exception) as error:
+        _run_public_cli_review(tmp_path)
+    expected: dict[str, object] = {"exit": exit_code, "tasks": expected_tasks if receipt_states is not None else []}
+    if setup_reason is not None:
+        expected["setup_reason"] = setup_reason
+    assert str(error.value) == "evidence-review diagnostic: " + json.dumps(expected, sort_keys=True)
+    assert private not in str(error.value)
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")
+def test_public_cli_runs_real_review_workers_and_publishes_states(tmp_path: Path) -> None:
+    pytest.importorskip("unicorn")
+    output = _run_public_cli_review(tmp_path)
     function = json.loads((output / "function.json").read_text(encoding="utf-8"))
     assert function["process_isolation"]["termination_complete"] is True
     dex_result = json.loads((output / "dex.json").read_text(encoding="utf-8"))
