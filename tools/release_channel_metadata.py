@@ -129,7 +129,7 @@ def _inspect(
                 issues.add("file_yanked")
             elif item.get("yanked") is not False:
                 issues.add("file_yank_state_unverified")
-                continue
+                # Check the independent digest even if the yank state is unknown.
             digests = item.get("digests")
             digest = digests.get("sha256") if isinstance(digests, dict) else None
         if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
