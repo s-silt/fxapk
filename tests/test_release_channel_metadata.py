@@ -246,6 +246,32 @@ def test_yanked_file_cannot_hide_its_own_recorded_digest_conflict(tmp_path: Path
     assert receipt["pypi"]["reason"] == "build_digest_mismatch"
 
 
+@pytest.mark.parametrize("yank_flag", ["missing", "string"])
+@pytest.mark.parametrize(
+    ("digest", "state", "reason", "channel_reason"),
+    [
+        ("c" * 64, "conflict", "channel_metadata_conflict", "build_digest_mismatch"),
+        (INVENTORY[WHEEL], "unknown", "channel_unverified", "file_yank_state_unverified"),
+        ("invalid", "unknown", "channel_unverified", "file_yank_state_unverified"),
+    ],
+)
+def test_unverified_pypi_yank_state_does_not_mask_valid_digest_conflict(
+    tmp_path: Path, yank_flag: str, digest: str, state: str, reason: str, channel_reason: str,
+) -> None:
+    pypi = _capture("pypi")
+    wheel = pypi["body"]["urls"][0]
+    assert wheel["filename"] == WHEEL
+    if yank_flag == "missing":
+        del wheel["yanked"]
+    else:
+        wheel["yanked"] = "false"
+    wheel["digests"]["sha256"] = digest
+    code, receipt = _run(tmp_path, _capture("github"), pypi)
+    assert (code, receipt["state"], receipt["reason"]) == (2, state, reason)
+    assert receipt["github"]["state"] == "metadata_matches"
+    assert (receipt["pypi"]["state"], receipt["pypi"]["reason"]) == (state, channel_reason)
+
+
 @pytest.mark.parametrize("extra_seconds", [0, 1])
 def test_same_batch_capture_span_boundary(tmp_path: Path, extra_seconds: int) -> None:
     github, pypi = _capture("github"), _capture("pypi")
