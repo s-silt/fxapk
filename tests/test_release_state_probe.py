@@ -101,6 +101,7 @@ def probe(tmp_path: Path) -> Probe:
     ({"release": {"assets": [{"name": NAME, "state": "uploaded", "digest": "sha256:" + "f" * 64}]}},
      "metadata_digest_mismatch"),
     ({"release": {"assets": [ASSET] * 2}}, "duplicate_asset"),
+    ({"release": {"assets": [{**ASSET, "digest": f"sha256:{SHA256.upper()}"}]}}, "tag_and_downloaded_bytes_match"),
     ({"release": {"assets": [{**ASSET, "digest": None}]}},
      "tag_and_downloaded_bytes_match"),
     ({"observed": None}, "tag_commit_unverified"),
@@ -329,3 +330,95 @@ def test_cli_help_describes_capture_id_format() -> None:
         [sys.executable, "-I", str(TOOL), "--help"], capture_output=True, text=True, check=True, timeout=10,
     )
     assert "1 to 128 ASCII letters, digits, underscores or hyphens" in " ".join(result.stdout.split())
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("neighbor", [{"name": "pending.whl", "state": "open"}, {"name": "malformed.whl", "state": "uploaded"}, None])
+def test_release_metadata_conflict_is_not_hidden_by_other_assets(
+    probe: Probe, neighbor: dict[str, Any] | None, reverse: bool,
+) -> None:
+    assets = [neighbor, {**ASSET, "digest": "sha256:" + "f" * 64}]
+    if reverse:
+        assets.reverse()
+
+    code, receipt = probe(release={"assets": assets}, use_bytes=False)
+
+    assert code == 2
+    assert receipt["state"] == "conflict"
+    assert receipt["reason"] == "metadata_digest_mismatch"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("digest", ["sha256:truncated", "sha256:" + "G" * 64, "a" * 64, False])
+def test_malformed_release_digest_does_not_claim_conflict(
+    probe: Probe, reverse: bool, digest: object,
+) -> None:
+    assets = [{"name": "pending.whl", "state": "open"}, {**ASSET, "digest": digest}]
+    if reverse:
+        assets.reverse()
+    code, receipt = probe(release={"assets": assets}, use_bytes=False)
+    assert (code, receipt["state"], receipt["reason"]) == (2, "unknown", "metadata_digest_unverified")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("extra_pending", [False, True])
+def test_duplicate_release_asset_ids_are_visible_without_downloads(
+    probe: Probe, reverse: bool, extra_pending: bool,
+) -> None:
+    other = "other.whl"
+    assets = [ASSET, {**ASSET, "name": other}]
+    if extra_pending:
+        assets.append({"name": "pending.whl", "state": "open"})
+    if reverse:
+        assets.reverse()
+    code, receipt = probe(release={"assets": assets}, use_bytes=False, inventory={NAME: SHA256, other: SHA256})
+    assert (code, receipt["state"], receipt["reason"]) == (2, "conflict", "duplicate_asset_id")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("same_name", [False, True])
+def test_digest_mismatch_stays_visible_with_duplicate_names(probe: Probe, reverse: bool, same_name: bool) -> None:
+    duplicate = ASSET if same_name else {**ASSET, "name": "extra.whl", "id": ASSET_ID + 1}
+    assets = [duplicate, {**ASSET, "digest": "sha256:" + "f" * 64}]
+    if not same_name:
+        assets.append(duplicate)
+    if reverse:
+        assets.reverse()
+    code, receipt = probe(release={"assets": assets}, use_bytes=False)
+    assert (code, receipt["state"], receipt["reason"]) == (2, "conflict", "metadata_digest_mismatch")
+
+
+@pytest.mark.parametrize(("case", "reason"), [
+    ("altered", "download_digest_mismatch"),
+    ("matching", "metadata_digest_unverified"),
+    ("unbound", "metadata_digest_unverified"),
+])
+def test_unverified_metadata_digest_does_not_hide_bound_download_mismatch(
+    probe: Probe, case: str, reason: str,
+) -> None:
+    assets = [{**ASSET, "digest": "sha256:truncated"}]
+    evidence = None
+    if case == "unbound":
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat()
+        evidence = {"download_observation": {
+            "repository_id": REPO_ID, "release_id": RELEASE_ID + 1, "asset_ids": {NAME: ASSET_ID},
+            "observed_at": stamp, "capture_id": CAPTURE_ID,
+        }}
+
+    def alter(directory: Path) -> None:
+        (directory / NAME).write_bytes(b"x" * len(GOOD))
+
+    code, receipt = probe(release={"assets": assets}, evidence=evidence, extra=alter if case != "matching" else None)
+    assert (code, receipt["state"], receipt["reason"]) == (
+        2, "conflict" if case == "altered" else "unknown", reason,
+    )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_expected_unuploaded_asset_is_reported_despite_bad_neighbor_digest(probe: Probe, reverse: bool) -> None:
+    pending = "pending.whl"
+    assets = [{**ASSET, "name": pending, "state": "open"}, {**ASSET, "digest": "sha256:truncated"}]
+    if reverse:
+        assets.reverse()
+    code, receipt = probe(release={"assets": assets}, use_bytes=False, inventory={NAME: SHA256, pending: SHA256})
+    assert (code, receipt["state"], receipt["reason"]) == (2, "incomplete", "asset_not_uploaded")

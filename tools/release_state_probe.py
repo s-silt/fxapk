@@ -200,30 +200,76 @@ def _diagnose_capture(
     if not isinstance(assets, list):
         return Diagnosis("unknown", "invalid_asset_list")
     names: set[str] = set()
+    seen_ids: set[int] = set()
     sizes: dict[str, int] = {}
     ids: dict[str, int] = {}
+    issues: set[str] = set()
     for asset in assets:
         if not isinstance(asset, dict) or not isinstance(name := asset.get("name"), str):
-            return Diagnosis("unknown", "invalid_asset_list")
+            issues.add("invalid_asset_list")
+            continue
         if name in names:
-            return Diagnosis("conflict", "duplicate_asset")
+            issues.add("duplicate_asset")
         names.add(name)
         if asset.get("state") != "uploaded":
-            return Diagnosis("incomplete", "asset_not_uploaded")
+            issues.add("expected_asset_not_uploaded" if name in expected else "asset_not_uploaded")
+            continue
         recorded = asset.get("digest")
-        if recorded is not None and name in expected and recorded != f"sha256:{expected[name]}":
-            return Diagnosis("conflict", "metadata_digest_mismatch")
+        if recorded is not None and name in expected:
+            digest = recorded[7:].lower() if isinstance(recorded, str) and recorded.startswith("sha256:") else ""
+            if not DIGEST.fullmatch(digest):
+                issues.add("metadata_digest_unverified")
+            elif digest != expected[name]:
+                issues.add("metadata_digest_mismatch")
         size, asset_id = asset.get("size"), asset.get("id")
-        if type(size) is not int or size < 0 or type(asset_id) is not int or asset_id <= 0:
-            return Diagnosis("unknown", "invalid_asset_metadata")
+        if type(asset_id) is not int or asset_id <= 0:
+            issues.add("invalid_asset_metadata")
+            continue
+        if asset_id in seen_ids:
+            issues.add("duplicate_asset_id")
+        seen_ids.add(asset_id)
+        if type(size) is not int or size < 0:
+            issues.add("invalid_asset_metadata")
+            continue
         sizes[name], ids[name] = size, asset_id
-    if names != expected.keys():
-        return Diagnosis("incomplete", "asset_inventory_mismatch")
-    if downloaded is None:
+    digest_unverified = "metadata_digest_unverified" in issues
+    # Contradictory evidence outranks uncertainty; use a fixed reason order.
+    for state, reason in (
+        ("conflict", "metadata_digest_mismatch"),
+        ("conflict", "duplicate_asset"),
+        ("conflict", "duplicate_asset_id"),
+        ("unknown", "invalid_asset_list"),
+        ("unknown", "invalid_asset_metadata"),
+        ("incomplete", "expected_asset_not_uploaded"),
+        ("incomplete", "asset_not_uploaded"),
+    ):
+        if reason in issues:
+            if reason == "expected_asset_not_uploaded":
+                return Diagnosis("incomplete", "asset_not_uploaded")
+            if state == "incomplete" and digest_unverified:
+                return Diagnosis("unknown", "metadata_digest_unverified")
+            return Diagnosis(state, reason)
+    if names != expected.keys() or downloaded is None:
+        if digest_unverified:
+            return Diagnosis("unknown", "metadata_digest_unverified")
+        if names != expected.keys():
+            return Diagnosis("incomplete", "asset_inventory_mismatch")
         return Diagnosis("unknown", "downloaded_bytes_unverified")
-    if len(set(ids.values())) != len(ids):
-        return Diagnosis("conflict", "duplicate_asset_id")
-    download_evidence = captured.get("download_observation")
+    result = _diagnose_downloads(
+        captured.get("download_observation"), repository_id=repository_id, release_id=release_id,
+        expected=expected, sizes=sizes, ids=ids, observed=observed, now=now,
+        capture_id=capture_id, downloaded=downloaded,
+    )
+    if digest_unverified and result.state != "conflict":
+        return Diagnosis("unknown", "metadata_digest_unverified")
+    return result
+
+
+def _diagnose_downloads(
+    download_evidence: object, *, repository_id: int, release_id: int,
+    expected: dict[str, str], sizes: dict[str, int], ids: dict[str, int], observed: datetime,
+    now: datetime, capture_id: str, downloaded: Path,
+) -> Diagnosis:
     if not (
         isinstance(download_evidence, dict)
         and _matches_id(download_evidence.get("repository_id"), repository_id)
