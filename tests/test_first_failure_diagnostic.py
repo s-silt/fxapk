@@ -333,6 +333,7 @@ def test_posix_stage_observer_preserves_warning_receipt(
             logger.warning(
                 "POSIX tree verification unavailable: stage=%s probe=%s error=%s", stage, probe, error,
             )
-        logger.warning("POSIX tree verification unavailable: stage=%s", "individual_signal")
+        later = "ownership_scan" if stage == "individual_signal" else "individual_signal"
+        logger.warning("POSIX tree verification unavailable: stage=%s", later)
         assert observed() == stage
     assert details == expected
