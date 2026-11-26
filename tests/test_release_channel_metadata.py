@@ -369,7 +369,7 @@ def test_capture_exactly_at_two_mib_is_verified(tmp_path: Path) -> None:
     ("mixed-captures", 2, "unknown", "tag_and_downloaded_bytes_match", "unknown"),
     ("missing-github-digest", 2, "unknown", "tag_and_downloaded_bytes_match", "unknown"),
     ("span-at-limit", 0, "evidence_checks_passed", "tag_and_downloaded_bytes_match", "metadata_agrees"),
-    ("span-over-limit", 2, "unknown", "tag_and_downloaded_bytes_match", "metadata_agrees"),
+    ("span-over-limit-tag-earliest", 2, "unknown", "tag_and_downloaded_bytes_match", "metadata_agrees"),
     ("span-over-limit-download-earliest", 2, "unknown", "tag_and_downloaded_bytes_match", "metadata_agrees"),
     ("span-over-limit-and-conflict", 2, "conflict", "tag_and_downloaded_bytes_match", "conflict"),
 ])
@@ -407,6 +407,8 @@ def test_offline_combined_release_diagnosis(
         ).isoformat()
         if case == "span-over-limit-download-earliest":
             github["tag_observation"]["observed_at"] = midpoint.isoformat()
+        elif case == "span-over-limit-tag-earliest":
+            github["download_observation"]["observed_at"] = midpoint.isoformat()
     for file in pypi["body"]["urls"]:
         file["digests"]["sha256"] = inventory[file["filename"]]
     if case == "query-forbidden":
@@ -449,7 +451,7 @@ def test_offline_combined_release_diagnosis(
     assert receipt["metadata_comparison"]["state"] == metadata_state
     if case == "missing-github-digest":
         assert receipt["github"]["reason"] == "digest_unverified"
-    if case in {"span-over-limit", "span-over-limit-download-earliest"}:
+    if case in {"span-over-limit-tag-earliest", "span-over-limit-download-earliest"}:
         assert receipt["reason"] == "combined_capture_span_exceeded"
     assert receipt["input_sha256"] == {
         key: hashlib.sha256(before[Path(f"{key}.json")]).hexdigest() for key in ("github", "pypi", "inventory")
