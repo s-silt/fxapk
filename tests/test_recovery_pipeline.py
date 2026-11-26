@@ -500,6 +500,48 @@ def test_reanalysis_status_reaches_recovery_and_report(monkeypatch, tmp_path, an
                 assert reason in (output / "reviewed" / name).read_text(encoding="utf-8")
 
 
+_CLI_TASK_STATES = frozenset({"ok", "partial", "failed", "not_run", "unsupported"})
+_CLI_TASK_REASONS = frozenset({
+    "jadx_not_requested", "dependency_not_verified", "tree_state_unverified",
+    "survivors_after_kill", "descendants_after_root_exit", "process_exit_unverified",
+    "review_worker_timeout", "review_worker_exit", "review_worker_process_tree_incomplete",
+    "review_worker_receipt_missing", "review_worker_receipt_invalid",
+    "platform_memory_limit_unavailable", "output_limit",
+})
+
+
+def _cli_review_task_summary(tasks: object) -> list[dict[str, object]]:
+    if type(tasks) is not list:
+        return []
+    summary = []
+    for row in tasks[:3]:
+        state = row.get("state") if type(row) is dict else None
+        reasons = row.get("reason_codes") if type(row) is dict else None
+        summary.append({
+            "state": state if type(state) is str and state in _CLI_TASK_STATES else "unknown",
+            "reasons": sorted({
+                reason if type(reason) is str and reason in _CLI_TASK_REASONS else "unknown"
+                for reason in reasons[:8]
+            }) if type(reasons) is list else [],
+        })
+    return summary
+
+
+def test_cli_review_task_summary_reports_only_fixed_fields() -> None:
+    tasks = [
+        {"state": "ok", "id": "/synthetic/private/task", "reason_codes": []},
+        {"state": "failed", "reason_codes": [
+            "tree_state_unverified", "/synthetic/private/message", "review_worker_process_tree_incomplete",
+        ]},
+        {"state": "/synthetic/private/state"},
+    ]
+    assert _cli_review_task_summary([*tasks, {"state": "ok"}]) == [
+        {"state": "ok", "reasons": []},
+        {"state": "failed", "reasons": ["review_worker_process_tree_incomplete", "tree_state_unverified", "unknown"]},
+        {"state": "unknown", "reasons": []},
+    ]
+
+
 @pytest.mark.skipif(sys.platform == "darwin", reason="bounded workers require enforceable memory limits")
 def test_public_cli_runs_real_review_workers_and_publishes_states(tmp_path):
     import base64
@@ -521,9 +563,13 @@ def test_public_cli_runs_real_review_workers_and_publishes_states(tmp_path):
     output = tmp_path / "review"
     run = subprocess.run([sys.executable, "-m", "fxapk.cli", "evidence-review", str(plan),
                           "--out", str(output)], capture_output=True, timeout=90)
-    assert run.returncode == 5, run.stderr.decode("utf-8", errors="replace")
+    assert run.returncode == 5, f"evidence-review exit={run.returncode}"
     receipt = json.loads((output / "review.json").read_text(encoding="utf-8"))
-    assert [row["state"] for row in receipt["tasks"]] == ["ok", "partial", "not_run"]
+    tasks = receipt["tasks"]
+    summary = _cli_review_task_summary(tasks)
+    expected = ["ok", "partial", "not_run"]
+    if type(tasks) is not list or len(tasks) != len(expected) or [row["state"] for row in summary] != expected:
+        pytest.fail("evidence-review task diagnostic: " + json.dumps(summary, sort_keys=True), pytrace=False)
     function = json.loads((output / "function.json").read_text(encoding="utf-8"))
     assert function["process_isolation"]["termination_complete"] is True
     dex_result = json.loads((output / "dex.json").read_text(encoding="utf-8"))
