@@ -312,3 +312,28 @@ def test_posix_stage_observer_restores_inherited_level_and_filters_on_error(
                 assert tuple(logger.filters) == original_filters
             finally:
                 logger.removeFilter(existing)
+
+
+@pytest.mark.parametrize(("stage", "probe", "error", "expected"), [
+    ("ownership_scan", "environ", "AccessDenied", {"posix_probe": "environ", "posix_error": "AccessDenied"}),
+    ("ownership_scan", "synthetic-private-path", "AccessDenied", {}),
+    ("individual_signal", None, None, {}),
+])
+def test_posix_stage_observer_preserves_warning_receipt(
+    stage: str, probe: str | None, error: str | None, expected: dict[str, str],
+) -> None:
+    logger = logging.getLogger("fxapk.core.proctree")
+    details: dict[str, str] = {}
+    with observe_posix_verification_stage(details=details) as observed:
+        logger.warning("POSIX tree verification unavailable: stage=unreviewed")
+        assert observed() == "unknown"
+        if probe is None:
+            logger.warning("POSIX tree verification unavailable: stage=%s", stage)
+        else:
+            logger.warning(
+                "POSIX tree verification unavailable: stage=%s probe=%s error=%s", stage, probe, error,
+            )
+        later = "ownership_scan" if stage == "individual_signal" else "individual_signal"
+        logger.warning("POSIX tree verification unavailable: stage=%s", later)
+        assert observed() == stage
+    assert details == expected

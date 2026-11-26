@@ -53,15 +53,26 @@ def observe_posix_verification_stage(*, details: dict[str, str] | None = None) -
         nonlocal observed
         if (
             observed == "unknown" and record.thread == caller and record.name == logger.name
-            and record.levelno == logging.DEBUG and type(record.msg) is str
-            and record.msg == "POSIX tree verification unavailable: stage=%s"
-            and type(record.args) is tuple and len(record.args) == 1
+            and type(record.msg) is str and type(record.args) is tuple
         ):
-            observed = _label(record.args[0], _POSIX_VERIFICATION_STAGES)
-            if observed == "ownership_scan" and details is not None:
-                details.update(_posix_probe_details(
-                    getattr(record, "posix_probe", None), getattr(record, "posix_error", None),
-                ))
+            legacy = record.levelno == logging.DEBUG
+            warning = record.levelno == logging.WARNING
+            plain = (legacy or warning) and (
+                record.msg == "POSIX tree verification unavailable: stage=%s" and len(record.args) == 1
+            )
+            detailed_warning = warning and (
+                record.msg == "POSIX tree verification unavailable: stage=%s probe=%s error=%s"
+                and len(record.args) == 3
+            )
+            if plain or detailed_warning:
+                observed = _label(record.args[0], _POSIX_VERIFICATION_STAGES)
+                if observed == "ownership_scan" and details is not None:
+                    if detailed_warning:
+                        details.update(_posix_probe_details(record.args[1], record.args[2]))
+                    elif legacy:
+                        details.update(_posix_probe_details(
+                            getattr(record, "posix_probe", None), getattr(record, "posix_error", None),
+                        ))
         # Newly enabled DEBUG records remain invisible to existing handlers.
         return record.levelno >= effective_level
 
