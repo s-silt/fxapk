@@ -249,6 +249,10 @@ def _java_complete_conflicts(receipt: Mapping[str, object]) -> bool:
     """Reject explicit contradictions without requiring fields omitted by old receipts."""
     if receipt.get("status") != "ok" or receipt.get("reason_codes", []) != []:
         return True
+    if "cleanup" in receipt:
+        cleanup = receipt["cleanup"]
+        if not isinstance(cleanup, Mapping) or cleanup.get("complete") is not True:
+            return True
     if "scan" not in receipt:
         return False
     scan = receipt["scan"]
@@ -326,6 +330,23 @@ def _java_visibility(meta: dict) -> tuple[str, list[str]]:
 
 
 _JAVA_PRODUCER_INPUT_GAP = "producer_dex_input_read_error"
+_JAVA_CLEANUP_GAP = "cleanup_incomplete"
+
+
+def _java_cleanup_gap(receipt: object) -> bool:
+    """Reconcile a saved view only for a corroborated, standalone cleanup gap."""
+    if not isinstance(receipt, dict):
+        return False
+    schema, cleanup = receipt.get("schema"), receipt.get("cleanup")
+    return (
+        type(schema) is int
+        and schema == 1
+        and receipt.get("status") == "ok"
+        and receipt.get("complete") is False
+        and receipt.get("reason_codes") == [_JAVA_CLEANUP_GAP]
+        and isinstance(cleanup, dict)
+        and cleanup.get("complete") is False
+    )
 
 
 def _java_producer_input_gap(receipt: object) -> bool:
@@ -365,6 +386,8 @@ def java_coverage_observation(report: object) -> dict[str, str | list[str]]:
     )
     if state in (VIS_PARTIAL, VIS_TIMEOUT) and _java_producer_input_gap(receipt):
         codes = sorted([*codes, _JAVA_PRODUCER_INPUT_GAP])
+    if state in (VIS_PARTIAL, VIS_TIMEOUT) and _java_cleanup_gap(receipt):
+        codes = sorted([*codes, _JAVA_CLEANUP_GAP])
     return {"state": state, "reason_codes": codes}
 
 
@@ -434,6 +457,9 @@ def project_saved_java_visibility(meta: dict[str, Any]) -> object:
         conflict_note = "JADX 本轮记录了输入读取失败，保存的 Java 可见性不能判为完整"
     elif (scan_note := _saved_java_scan_conflict(meta)) is not None:
         conflict_note = scan_note
+    elif _java_cleanup_gap(receipt):
+        state, _ = _java_visibility(meta)
+        conflict_note = "JADX 清理未完成（cleanup_incomplete），保存的 Java 可见性不能判为完整"
     else:
         return saved
 

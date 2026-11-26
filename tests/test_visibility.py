@@ -956,3 +956,68 @@ def test_saved_producer_input_gap_agrees_across_report_views(status: str, run_co
         assert view["blocked_claims"] == [] and corrected["blocked_claims"] == []
         assert reason not in V.java_coverage_observation(raw)["reason_codes"]
     assert meta == original
+
+
+@pytest.mark.parametrize(("cleanup", "expected"), [
+    pytest.param({"complete": False}, V.VIS_PARTIAL, id="cleanup-failed"),
+    pytest.param({"complete": True}, V.VIS_COMPLETE, id="cleanup-complete"),
+    pytest.param({"complete": 1}, V.VIS_PARTIAL, id="invalid-complete"),
+    pytest.param(None, V.VIS_PARTIAL, id="null-cleanup"),
+])
+def test_fresh_java_visibility_checks_present_cleanup(cleanup: object, expected: str) -> None:
+    report = _report(dex_available=True, resource_files_scanned=1, jadx_receipt={
+        **_JADX_OK, "cleanup": cleanup,
+    })
+    view = V.assess(report)
+    assert view["sources"]["java"]["visibility"] == expected
+    assert V.java_coverage_observation(report)["state"] == expected
+    assert view["sources"]["dex"]["visibility"] == V.VIS_COMPLETE
+    assert ("static_endpoint_exhaustive" in view["blocked_claims"]) == (expected == V.VIS_PARTIAL)
+
+
+@pytest.mark.parametrize(("cleanup_confirmed", "expected"), [
+    pytest.param(True, V.VIS_PARTIAL, id="producer-confirmed"),
+    pytest.param(False, V.VIS_COMPLETE, id="unconfirmed"),
+])
+def test_saved_java_cleanup_gap_reconciles_report_views(cleanup_confirmed: bool, expected: str) -> None:
+    from copy import deepcopy
+
+    from fxapk.core.corpus import inspect_visibility
+
+    reason = "cleanup_incomplete"
+    receipt = _build_jadx_receipt(
+        status="ok",
+        runs=[{"options_digest": "synthetic", "ownership_complete": True, "termination_complete": True}],
+        scan={"files_scanned": 3, "files_selected": 3, "files_total": 3},
+        cleanup={"complete": False, "reason_codes": ["synthetic_cleanup_failure"]},
+        analyzer_error=False,
+    )
+    assert receipt["reason_codes"] == [reason]
+    if not cleanup_confirmed:
+        receipt["cleanup"]["complete"] = 0
+    meta = {
+        "jadx_receipt": receipt,
+        "visibility": {
+            "sources": {"java": {"visibility": V.VIS_COMPLETE}, "dex": {"visibility": V.VIS_COMPLETE}},
+            "blocked_claims": [], "claims": {}, "notes": [], "next_actions": [],
+        },
+    }
+    original = deepcopy(meta)
+    raw = _report(**meta)
+    report = Report(package_name="com.synthetic.coverage", meta=meta, leads=[], endpoints=[], findings=[], analyzer_status=[])
+    html = render_to_string(report)
+    digest = build_digest(raw)["visibility"]
+    corpus, malformed = inspect_visibility(raw, reconcile_java=True)
+    stored, _ = inspect_visibility(raw)
+
+    assert stored is not None and stored["sources"]["java"] == V.VIS_COMPLETE
+    assert not malformed and corpus is not None
+    assert digest["sources"]["java"] == corpus["sources"]["java"] == expected
+    assert digest["sources"]["dex"] == corpus["sources"]["dex"] == V.VIS_COMPLETE
+    assert digest["java_scan"] == {"files_scanned": 3, "files_total": 3}
+    assert f"<td>{expected}</td>" in html.split("<td>java</td>", 1)[1].split("</tr>", 1)[0]
+    claims = {"static_endpoint_exhaustive", "no_hardcoded_credential"} if cleanup_confirmed else set()
+    assert {item["claim"] for item in digest["blocked_claims"]} == claims
+    assert set(corpus["blocked_claims"]) == claims
+    assert (reason in V.java_coverage_observation(raw)["reason_codes"]) == cleanup_confirmed
+    assert meta == original
