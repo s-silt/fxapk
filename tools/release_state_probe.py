@@ -202,21 +202,36 @@ def _diagnose_capture(
     names: set[str] = set()
     sizes: dict[str, int] = {}
     ids: dict[str, int] = {}
+    issues: set[str] = set()
     for asset in assets:
         if not isinstance(asset, dict) or not isinstance(name := asset.get("name"), str):
-            return Diagnosis("unknown", "invalid_asset_list")
+            issues.add("invalid_asset_list")
+            continue
         if name in names:
-            return Diagnosis("conflict", "duplicate_asset")
+            issues.add("duplicate_asset")
+            continue
         names.add(name)
         if asset.get("state") != "uploaded":
-            return Diagnosis("incomplete", "asset_not_uploaded")
+            issues.add("asset_not_uploaded")
+            continue
         recorded = asset.get("digest")
         if recorded is not None and name in expected and recorded != f"sha256:{expected[name]}":
-            return Diagnosis("conflict", "metadata_digest_mismatch")
+            issues.add("metadata_digest_mismatch")
         size, asset_id = asset.get("size"), asset.get("id")
         if type(size) is not int or size < 0 or type(asset_id) is not int or asset_id <= 0:
-            return Diagnosis("unknown", "invalid_asset_metadata")
+            issues.add("invalid_asset_metadata")
+            continue
         sizes[name], ids[name] = size, asset_id
+    # Keep the same receipt shape, but surface known conflicts before uncertainty.
+    for state, reason in (
+        ("conflict", "duplicate_asset"),
+        ("conflict", "metadata_digest_mismatch"),
+        ("unknown", "invalid_asset_list"),
+        ("unknown", "invalid_asset_metadata"),
+        ("incomplete", "asset_not_uploaded"),
+    ):
+        if reason in issues:
+            return Diagnosis(state, reason)
     if names != expected.keys():
         return Diagnosis("incomplete", "asset_inventory_mismatch")
     if downloaded is None:

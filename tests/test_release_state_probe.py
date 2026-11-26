@@ -329,3 +329,19 @@ def test_cli_help_describes_capture_id_format() -> None:
         [sys.executable, "-I", str(TOOL), "--help"], capture_output=True, text=True, check=True, timeout=10,
     )
     assert "1 to 128 ASCII letters, digits, underscores or hyphens" in " ".join(result.stdout.split())
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("neighbor", [{"name": "pending.whl", "state": "open"}, {"name": "malformed.whl", "state": "uploaded"}, None])
+def test_release_metadata_conflict_is_not_hidden_by_other_assets(
+    probe: Probe, neighbor: dict[str, Any] | None, reverse: bool,
+) -> None:
+    assets = [neighbor, {**ASSET, "digest": "sha256:" + "f" * 64}]
+    if reverse:
+        assets.reverse()
+
+    code, receipt = probe(release={"assets": assets}, use_bytes=False)
+
+    assert code == 2
+    assert receipt["state"] == "conflict"
+    assert receipt["reason"] == "metadata_digest_mismatch"
