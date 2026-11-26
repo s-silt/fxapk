@@ -56,11 +56,24 @@ ASSET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 
 
 @dataclass(frozen=True)
+class DownloadConflict:
+    asset_name: str
+    observed_sha256: str
+
+
+@dataclass(frozen=True)
 class Diagnosis:
     state: str
     reason: str
     observed_at: str | None = None
     http_status: int | None = None
+    download_conflict: DownloadConflict | None = None
+
+    def to_receipt(self, *, include_download_conflict: bool = False) -> dict[str, object]:
+        receipt = asdict(self)
+        if not include_download_conflict or self.download_conflict is None:
+            del receipt["download_conflict"]
+        return receipt
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -313,8 +326,12 @@ def _diagnose_downloads(
                     remaining -= len(chunk)
                 if stream.read(1):
                     return Diagnosis("conflict", "download_size_mismatch")
-                if hasher.hexdigest() != digest:
-                    return Diagnosis("conflict", "download_digest_mismatch")
+                observed_sha256 = hasher.hexdigest()
+                if observed_sha256 != digest:
+                    return Diagnosis(
+                        "conflict", "download_digest_mismatch",
+                        download_conflict=DownloadConflict(name, observed_sha256),
+                    )
     except OSError:
         return Diagnosis("unknown", "download_read_failed")
     return Diagnosis("evidence_matches", "tag_and_downloaded_bytes_match")
@@ -335,7 +352,7 @@ def main() -> int:
                           expected=_read_json(args.inventory), downloaded=args.downloaded)
     except (OSError, ValueError, RecursionError):
         result = Diagnosis("unknown", "input_unreadable_or_invalid")
-    print(json.dumps(asdict(result), sort_keys=True))
+    print(json.dumps(result.to_receipt(), sort_keys=True))
     return 0 if result.state == "evidence_matches" else 2
 
 
