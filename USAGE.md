@@ -78,7 +78,7 @@
 
 `analysis_notes` 列出两份报告各自记录的失败和跳过项，不包含原始错误说明。`not_recorded` 表示报告没记录分析项状态，`invalid` 表示状态记录不可用。这些提示不判断每组列表是否扫全，也不改变原有增删或计数。
 
-`coverage_observations.java` 分别展示两份报告的 JADX 覆盖，而不是分析器是否运行成功。仅带出已知的产出不全（`producer_partial`）与文件数上限（`scan_limit_hit`）原因码，不输出原始错误文本。旧报告只有 JADX 成功、没有覆盖回执时是 `unknown`。这不会改变端点差异，也不能证明任何清单已查全。
+`coverage_observations.java` 分别展示两份报告的 JADX 覆盖，而不是分析器是否运行成功。仅带出已知的产出不全（`producer_partial`）、文件数上限（`scan_limit_hit`）和经同次运行回执佐证的 DEX 输入读取失败（`producer_dex_input_read_error`，也可能出现在超时报告中），不输出原始错误文本。旧报告只有 JADX 成功、没有覆盖回执时是 `unknown`。这不会改变端点差异，也不能证明任何清单已查全。
 
 ## 隐私与输出
 
@@ -163,7 +163,7 @@ Hunter 默认在搜索前读取账户免费余额并在本机账本（`~/.fxapk/
 
 ## JADX 索引
 
-HTML 报告的「看到了多少」和 `digest` 的 `visibility.java_scan` 会显示 JADX 已读取和已枚举的 Java 文件数。例如 2/3 只描述本次枚举出的 Java 文件，不是整个 APK 的覆盖率。即使显示 N/N，单个 Java 文件的内容也可能因字节上限而截断。结合 Java 可见性状态和缺口说明阅读；旧报告没有可靠计数时不显示比例。
+HTML 报告的「看到了多少」和 `digest` 的 `visibility.java_scan` 会显示 JADX 已读取和已枚举的 Java 文件数。例如 2/3 只描述本次枚举出的 Java 文件，不是整个 APK 的覆盖率。即使显示 N/N，单个 Java 文件的内容也可能因字节上限而截断。结合 Java 可见性状态和缺口说明阅读；旧报告没有可靠计数时不显示比例。若执行回执明确记录 JADX 漏载输入，即使已枚举的 Java 文件全都读完，报告也不会标为完整覆盖。
 
 在 `digest.jadx_index.comparison` 中，缺失或无效的分项计数为 `null`（不是零）；仅当四项都有已记录的非负整数时才计算 `total_regions`。
 

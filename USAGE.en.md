@@ -78,7 +78,7 @@ Use `--report-details` to include the fields below. Without it, the top-level ke
 
 `analysis_notes` lists failures and skips recorded by each report, without free-form error messages. `not_recorded` means no analyzer status was recorded; `invalid` means the status records are unusable. These notes neither certify list coverage nor change any counts or deltas.
 
-`coverage_observations.java` shows what JADX covered in each report, separately from analyzer execution. It exposes only the known partial-output (`producer_partial`) and file-count-limit (`scan_limit_hit`) codes, not raw diagnostics. An older report that only says JADX succeeded, without a coverage receipt, is `unknown`. This does not change endpoint differences or certify exhaustive coverage.
+`coverage_observations.java` shows what JADX covered in each report, separately from analyzer execution. It exposes only the known partial-output (`producer_partial`), file-count-limit (`scan_limit_hit`), and DEX input read error (`producer_dex_input_read_error`) codes, not raw diagnostics. The DEX code requires corroboration from the same run receipt and can also appear in a timeout report. An older report that only says JADX succeeded, without a coverage receipt, is `unknown`. This does not change endpoint differences or certify exhaustive coverage.
 
 ## Privacy and output
 
@@ -175,7 +175,7 @@ Hunter reads the account's free balance before searching and reserves credits in
 
 ## JADX index
 
-The HTML visibility section and `visibility.java_scan` in `digest` show how many Java files JADX analysis read and enumerated. A count such as 2/3 refers to the enumerated Java files, not coverage of the whole APK. Even at N/N, the byte limit can truncate an individual Java file. Read it alongside the Java visibility status and gap notes. Older reports without reliable counts omit this value.
+The HTML visibility section and `visibility.java_scan` in `digest` show how many Java files JADX analysis read and enumerated. A count such as 2/3 refers to the enumerated Java files, not coverage of the whole APK. Even at N/N, the byte limit can truncate an individual Java file. Read it alongside the Java visibility status and gap notes. Older reports without reliable counts omit this value. If the run records that JADX could not read an input, the view does not claim complete coverage even if every enumerated Java file was read.
 
 In `digest.jadx_index.comparison`, missing or invalid bucket counts are `null`, not zero; `total_regions` is calculated only when all four counts are recorded nonnegative integers.
 
