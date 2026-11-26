@@ -185,6 +185,8 @@ If an older run may have missed Java output, preserve its cache and report for r
 
 Before switching queries to the new directory, check that the new report has `meta.jadx_receipt.complete` set to `true`. Use `meta.jadx_index_key` to find `<index_key>/manifest.json` in the new cache. Verify that `dex_lineage` matches the original input record, including SHA-256 hashes and order for both APK DEX and extra DEX files. If the original inputs cannot be verified or one is missing from the rerun, the receipt describes this run only; it does not establish that the original evidence scope was recovered. Upgrading does not repair or invalidate the old index.
 
+The Java scan, persisted index, and query source snapshots have separate coverage indicators: `meta.jadx_receipt.complete` in the report, `coverage` in the index manifest, and `meta.jadx_query_sources.coverage` in the report. Rely on the new directory for complete results within the relevant scope only after confirming that the original inputs match and the relevant coverage is explicitly complete. For `jadx usage`, also check the query receipt's `coverage` for the persisted index and `query_coverage` for the snapshot search; neither substitutes for the other. If the Java scan is marked `false`, any relevant coverage is `partial`, or a required indicator is missing, use the results you have without claiming to have recovered the original scope. Even when coverage is complete, no matches means only that none were found in the material actually observed; it does not establish absence.
+
 ## Corpus
 
 Every `corpus` subcommand needs `--corpus <dir>` or `FXAPK_CORPUS` pointing at a library directory **outside the git worktree**.

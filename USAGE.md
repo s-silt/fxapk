@@ -173,6 +173,8 @@ HTML 报告的「看到了多少」和 `digest` 的 `visibility.java_scan` 会�
 
 切换查询目录前，核对新报告的 `meta.jadx_receipt.complete` 为 `true`，并用 `meta.jadx_index_key` 找到新缓存内的 `<index_key>/manifest.json`。核对其中的 `dex_lineage` 与原始输入记录一致，包括 APK 内 DEX 和额外 DEX 的 SHA-256 及顺序。如果无法核对原输入或重跑缺少其中一份，只能说明本次运行的覆盖，不能认定已恢复原证据范围。更新程序不会自动修复或作废旧索引。
 
+Java 主扫描、持久索引和查询源快照的覆盖各自独立：分别看报告的 `meta.jadx_receipt.complete`、索引 manifest 的 `coverage`、报告的 `meta.jadx_query_sources.coverage`。只有原输入一致，且相应覆盖明确为完整，才把新目录用于对应范围的完整查询。使用 `jadx usage` 时还要核对本次回执的 `coverage` 和 `query_coverage`，两者分别反映持久索引和源快照查询，不能互相替代。主扫描为 `false`、相关覆盖为 `partial` 或所需字段缺失时，只使用已找到的结果，不认定已恢复原范围。即使覆盖完整，空结果也只表示本次实际观察的内容中未找到匹配项，不证明它不存在。
+
 ## 语料库
 
 所有 `corpus` 子命令须 `--corpus <库>` 或 `FXAPK_CORPUS` 指向 **git 工作树外** 的库目录。
