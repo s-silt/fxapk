@@ -212,7 +212,7 @@ def _diagnose_capture(
             issues.add("duplicate_asset")
         names.add(name)
         if asset.get("state") != "uploaded":
-            issues.add("asset_not_uploaded")
+            issues.add("expected_asset_not_uploaded" if name in expected else "asset_not_uploaded")
             continue
         recorded = asset.get("digest")
         if recorded is not None and name in expected:
@@ -240,9 +240,12 @@ def _diagnose_capture(
         ("conflict", "duplicate_asset_id"),
         ("unknown", "invalid_asset_list"),
         ("unknown", "invalid_asset_metadata"),
+        ("incomplete", "expected_asset_not_uploaded"),
         ("incomplete", "asset_not_uploaded"),
     ):
         if reason in issues:
+            if reason == "expected_asset_not_uploaded":
+                return Diagnosis("incomplete", "asset_not_uploaded")
             if state == "incomplete" and digest_unverified:
                 return Diagnosis("unknown", "metadata_digest_unverified")
             return Diagnosis(state, reason)

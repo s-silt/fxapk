@@ -412,3 +412,13 @@ def test_unverified_metadata_digest_does_not_hide_bound_download_mismatch(
     assert (code, receipt["state"], receipt["reason"]) == (
         2, "conflict" if case == "altered" else "unknown", reason,
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_expected_unuploaded_asset_is_reported_despite_bad_neighbor_digest(probe: Probe, reverse: bool) -> None:
+    pending = "pending.whl"
+    assets = [{**ASSET, "name": pending, "state": "open"}, {**ASSET, "digest": "sha256:truncated"}]
+    if reverse:
+        assets.reverse()
+    code, receipt = probe(release={"assets": assets}, use_bytes=False, inventory={NAME: SHA256, pending: SHA256})
+    assert (code, receipt["state"], receipt["reason"]) == (2, "incomplete", "asset_not_uploaded")
