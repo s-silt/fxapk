@@ -326,7 +326,7 @@ def test_analyzer_passes_specific_upstream_coverage_reasons(tmp_path, monkeypatc
     from fxapk.analyzers.jadx import JadxAnalyzer
     wiring._patch(monkeypatch)
     monkeypatch.setattr(wiring.jadx.tools, 'resolve_jadx', lambda: (['jadx'], {}))
-    def run(cmd, *, timeout, env=None):
+    def run(cmd, *, timeout, env=None, **limits):
         if '--version' in cmd:
             return wiring._owned(0, stdout='1.5.2\n')
         if exclude and any(str(arg).endswith('dump0.dex') for arg in cmd):

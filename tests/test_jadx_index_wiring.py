@@ -7,7 +7,9 @@ docs/superpowers/specs/2026-08-16-p2-wiring-design.md（v2，不入 git）。
 
 from __future__ import annotations
 
+import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -51,8 +53,8 @@ def _patch(
     """
     calls: list[dict] = []
 
-    def _run(cmd, *, timeout, env=None):  # noqa: ANN001
-        calls.append({"cmd": list(cmd), "timeout": timeout, "env": env})
+    def _run(cmd, *, timeout, env=None, **limits):  # noqa: ANN001
+        calls.append({"cmd": list(cmd), "timeout": timeout, "env": env, **limits})
         if "--version" in cmd:
             if version is None:
                 return _owned(returncode=1, stdout="")
@@ -289,6 +291,62 @@ def test_version_probe_uses_resolved_command(
     assert version_calls and version_calls[0]["cmd"][0] == "jadx"
 
 
+@pytest.mark.parametrize(
+    ("stream", "extra", "expected_status"),
+    [("stdout", 0, "built"), ("stdout", 1, "disabled"), ("stderr", 1, "disabled")],
+)
+def test_version_probe_real_output_boundary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    stream: str, extra: int, expected_status: str,
+) -> None:
+    # Exactly 64 KiB in the selected pipe, or one byte beyond. The first
+    # line already looks valid, and the harmless producer exits normally.
+    version = b"1.5.2\n"
+    payload = (
+        "import sys; "
+        f"sys.stdout.buffer.write({version!r}); "
+        f"sys.{stream}.buffer.write(b' ' * {65536 + extra - (len(version) if stream == 'stdout' else 0)})"
+    )
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: ([sys.executable, "-c", payload], {}))
+    real_run = proctree.run_owned
+    calls = _patch(monkeypatch)
+    decompile = proctree.run_owned
+    probes: list[proctree.OwnedRun] = []
+
+    def run(
+        cmd: list[str], *, timeout: float, env: dict[str, str] | None = None,
+        **limits: int,
+    ) -> proctree.OwnedRun:
+        if "--version" not in cmd:
+            return decompile(cmd, timeout=timeout, env=env, **limits)
+        observed = real_run(cmd, timeout=timeout, env=env, **limits)
+        probes.append(observed)
+        return observed
+
+    monkeypatch.setattr(proctree, "run_owned", run)
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+    index = result.meta["jadx_receipt"]["index"]
+    assert result.meta["jadx_index_status"] == expected_status
+    assert len(probes) == len(calls) == 1
+    assert ("output_limit" in probes[0].reason_codes) is bool(extra)
+    assert result.meta["jadx_receipt"]["complete"] is True
+    assert result.meta["jadx_endpoint_count"] >= 1
+    assert "max_stdout_bytes" not in calls[0] and "max_stderr_bytes" not in calls[0]
+    manifests = list((tmp_path / "jadx-cache").rglob("manifest.json"))
+    if extra:
+        assert "jadx_version_unavailable" in index["reason_codes"]
+        assert not manifests
+    else:
+        assert len(manifests) == 1
+
+
+def test_version_probe_rejects_truncated_zero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Fast exit can race the kill: the receipt, not returncode, proves truncation.
+    run = replace(_owned(stdout="1.5.2\n"), reason_codes=("output_limit",))
+    monkeypatch.setattr(proctree, "run_owned", lambda *args, **kwargs: run)
+    assert jadx._probe_jadx_version((["jadx"], {})) is None
+
+
 def test_cache_unavailable_is_terminal_not_miss(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -313,7 +371,7 @@ def test_jadx_zero_output_produces_no_index(
 ) -> None:
     """jadx 0 产出（失败态）→ 不建索引（failed），绝不发布空索引冒充观察面。"""
 
-    def _run(cmd, *, timeout, env=None):  # noqa: ANN001
+    def _run(cmd, *, timeout, env=None, **limits):  # noqa: ANN001
         if "--version" in cmd:
             return _owned(0, stdout="1.5.2\n")
         return _owned(1)  # 不写任何 java
@@ -400,7 +458,7 @@ def test_degraded_rerun_uses_final_run_and_prunes_lineage(
     ordinal 不重排、coverage=partial、excluded_dex 留痕）。"""
     calls: list[dict] = []
 
-    def _run(cmd, *, timeout, env=None):  # noqa: ANN001
+    def _run(cmd, *, timeout, env=None, **limits):  # noqa: ANN001
         calls.append({"cmd": list(cmd)})
         if "--version" in cmd:
             return _owned(0, stdout="1.5.2\n")
