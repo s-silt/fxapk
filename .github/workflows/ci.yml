@@ -156,7 +156,7 @@ jobs:
           # `python -m build --no-isolation`，三者缺一测试就地 skip。矩阵关必须
           # 显式装上让它们真跑——守门测试静默 skip 等于没有门（#363 红叉根因）。
           # pytest-xdist：全量并行（-n auto），计费按 job 时长、并行直接省分钟。
-          python -m pip install pytest pytest-cov pytest-xdist build "setuptools>=68" wheel
+          python -m pip install pytest pytest-cov pytest-xdist build "setuptools>=77.0.3" wheel
       # 覆盖率门禁只在 Linux 跑（基线 83%，阈值 80 留 3% 余量）。macOS/Windows 覆盖到的行不同
       # （平台分支），共用一个阈值会假红；那两个 job 只验跨平台正确性，不做覆盖率门禁。
       - name: Verify isolated descendant fixture controls (Linux 3.12)

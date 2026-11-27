@@ -105,7 +105,7 @@ def _make_venv(tmp_path: Path) -> str:
 
 def _pip_install(venv_python: str, *args: str) -> None:
     subprocess.run(
-        [venv_python, "-m", "pip", "install", "--quiet", "--no-deps", *args],
+        [venv_python, "-I", "-m", "pip", "install", "--quiet", "--no-deps", *args],
         check=True,
         capture_output=True,
     )
@@ -155,7 +155,7 @@ def _build_sdist(dist_dir: Path) -> Path:
 
 
 @pytest.mark.slow
-def test_wheel_version_consistent(tmp_path: Any) -> None:
+def test_wheel_version_consistent(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """wheel 安装后 importlib.metadata 版本 == fxapk.__version__。
 
     ★故意改坏：
@@ -172,6 +172,9 @@ def test_wheel_version_consistent(tmp_path: Any) -> None:
     wheel_path = _build_wheel(dist_dir)
 
     venv_python = _make_venv(tmp_path)
+    # The build can leave source metadata behind. A caller's PYTHONPATH must
+    # not let pip mistake that metadata for an installation in the fresh venv.
+    monkeypatch.setenv("PYTHONPATH", str(_REPO_ROOT))
     _pip_install(venv_python, str(wheel_path))
 
     # importlib.metadata.version("fxapk") 读已安装包元数据

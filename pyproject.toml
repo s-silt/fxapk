@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,7 +9,8 @@ version = "2.0.6"
 description = "涉诈 APK 调证分析 CLI — 静态分析 + 配置键值/服务归属提取，产出调证线索清单"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "s-silt" }]
 keywords = [
     "android", "apk", "forensics", "fraud", "reverse-engineering",
@@ -18,7 +19,6 @@ keywords = [
 classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Environment :: Console",
     "Topic :: Security",
@@ -47,7 +47,7 @@ Issues = "https://github.com/s-silt/fxapk/issues"
 # 它虽是 pytest 的传递依赖，但依赖别人的传递关系来保证自己的护栏能跑，是隐含且易碎的约定。
 # build/setuptools：产物级版本一致性测试要真构建 wheel/sdist，且用 --no-isolation
 # 跑（否则 build 会自建隔离环境联网装 build-system.requires，CI 里既慢又不稳）。
-dev = ["pytest", "ruff", "pyright", "packaging>=22", "build>=1.2", "setuptools>=68", "wheel"]
+dev = ["pytest", "ruff", "pyright", "packaging>=22", "build>=1.2", "setuptools>=77.0.3", "wheel"]
 # PCAP-first 动态解析的深度能力：QUIC Initial 解密 / TLS 密钥派生需 cryptography（androguard 已传递引入，
 # 但正常安装不保证；显式声明使 `pip install fxapk[pcap]` 明确锁定该能力）。惰性引入，缺失则优雅降级为仅元数据。
 pcap = ["cryptography>=42.0"]

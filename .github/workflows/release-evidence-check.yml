@@ -9,6 +9,9 @@ on:
       - '.github/workflows/release.yml'
       - '.github/release-notes-template.md'
       - 'tools/release_preflight.py'
+      - 'tools/verify_release_license.py'
+      - 'LICENSE'
+      - 'plugins/*/LICENSE'
       - 'CHANGELOG.md'
       - 'pyproject.toml'
       - 'plugins/fxapk-android-ui/pyproject.toml'
@@ -36,12 +39,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.11'
       - name: Build and verify disposable release inputs
         id: preflight
         run: |
-          python -m pip install build
-          python -m build
+          # Exercise the lower supported Python and setuptools bounds, not a floating backend.
+          python -m pip install build wheel 'setuptools==77.0.3'
+          python -m build --no-isolation
           python - <<'PY'
           import subprocess
           import sys
@@ -50,12 +54,13 @@ jobs:
 
           for project in PROJECTS[1:]:
               subprocess.run(
-                  [sys.executable, "-m", "build", str(Path(project).parent), "--outdir", "plugin-dist"],
+                  [sys.executable, "-m", "build", "--no-isolation", str(Path(project).parent), "--outdir", "plugin-dist"],
                   check=True,
               )
           PY
           mkdir release-assets
           cp dist/*.whl dist/*.tar.gz plugin-dist/*.whl plugin-dist/*.tar.gz release-assets/
+          python -m tools.verify_release_license
           (cd release-assets && sha256sum *.whl *.tar.gz > SHA256SUMS.txt)
           commit=$(git rev-parse --verify HEAD^{commit})
           tag=$(python -c 'import tomllib; from pathlib import Path; print("v" + tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"])')
