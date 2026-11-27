@@ -147,7 +147,18 @@ def _communicate_capped(
         if exceeded.is_set() or time.monotonic() >= deadline:
             break
         time.sleep(_QUIESCE_INTERVAL)
-    timed_out = time.monotonic() >= deadline and not exceeded.is_set()
+    timed_out = False
+    if not exceeded.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+        else:
+            # Both pipes can reach EOF while the command is still finishing.
+            # Preserve communicate's single deadline for both I/O and process exit.
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                timed_out = True
     for thread in threads:
         thread.join(timeout=1.0)
     stdout = bytes(chunks["out"]).decode("utf-8", errors="replace")
@@ -668,7 +679,7 @@ if sys.platform == "win32":
                 _kernel32.TerminateJobObject(job, 1)
                 stdout, stderr = _drain(proc)
             if not timed_out:
-                # 限额读取只等到管道 EOF，不会像 communicate 那样回收 returncode。
+                # 截断强杀后可能尚未回收根进程；清理仍走原有短宽限。
                 if proc.poll() is None:
                     try:
                         proc.wait(timeout=_ROOT_EXIT_GRACE)

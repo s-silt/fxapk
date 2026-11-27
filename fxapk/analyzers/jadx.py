@@ -188,6 +188,7 @@ class _ScanOutcome:
 
 #: jadx 版本参与持久索引身份。探测只占很短时间，不继承反编译的 300-1200s deadline。
 _VERSION_PROBE_TIMEOUT = 30.0
+_VERSION_PROBE_STREAM_BYTES = 64 * 1024
 
 #: 单个物化 DEX 的硬上限（解压前按 zip 声明大小挡一层，流式写入时再按实际字节复核）。
 #: 必须在运行时经模块属性读取，部署策略与测试才能安全收紧。
@@ -327,7 +328,8 @@ def _probe_jadx_version(
     """探测本次解析出的 jadx 命令版本。
 
     不缓存成功或失败结果：每次启用持久索引的 analyze 都探测一次（相对反编译本体
-    成本可忽略，且免去跨运行的缓存失效问题）。只有进程树受控、正常退出且 stdout
+    成本可忽略，且免去跨运行的缓存失效问题）。两个输出流各限 64 KiB；即使退出码为 0，
+    触发输出上限也不能信任已读到的版本首行。只有进程树受控、正常退出且 stdout
     首行经 NFC 规范化后非空，才允许版本进入 key material——版本参与索引身份，
     假版本会让不兼容索引共享身份。
     """
@@ -340,6 +342,8 @@ def _probe_jadx_version(
         [*jadx_cmd, "--version"],
         timeout=_VERSION_PROBE_TIMEOUT,
         env=_resolved_jadx_env(extra_env),
+        max_stdout_bytes=_VERSION_PROBE_STREAM_BYTES,
+        max_stderr_bytes=_VERSION_PROBE_STREAM_BYTES,
     )
     if (
         owned.returncode != 0
@@ -347,6 +351,7 @@ def _probe_jadx_version(
         or not owned.ownership_complete
         or not owned.termination_complete
         or owned.forced_tree_kill
+        or "output_limit" in owned.reason_codes
     ):
         return None
     lines = (owned.stdout or "").splitlines()

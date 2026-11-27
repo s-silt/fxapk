@@ -40,7 +40,7 @@ _JAVA_WITH_METHODS = (
 def _patch_with_methods(monkeypatch: pytest.MonkeyPatch) -> None:
     """run_owned 替身：--version 分流 + 写带方法的合成 java 树。"""
 
-    def _run(cmd, *, timeout, env=None):  # noqa: ANN001
+    def _run(cmd, *, timeout, env=None, **limits):  # noqa: ANN001
         if "--version" in cmd:
             return _owned(0, stdout="1.5.2\n")
         out_dir = Path(cmd[cmd.index("-d") + 1])

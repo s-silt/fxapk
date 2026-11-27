@@ -85,6 +85,53 @@ def test_outer_timeout_kills_nested_owned_session_but_not_unrelated_process(tmp_
             _kill_if_alive(int(pid_file.read_text(encoding="utf-8")))
 
 
+@pytest.mark.parametrize("timed_out", [False, True], ids=["exits", "times-out"])
+def test_capped_run_waits_for_process_after_output_eof(
+    monkeypatch: pytest.MonkeyPatch, timed_out: bool,
+) -> None:
+    import io
+    import itertools
+    import subprocess
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    proc = Mock(spec=subprocess.Popen)
+    proc.stdout = SimpleNamespace(buffer=io.BytesIO(b"version\n"))
+    proc.stderr = SimpleNamespace(buffer=io.BytesIO())
+    proc.wait.return_value = 0
+    remaining = 1.0 if timed_out else 4.0
+    if timed_out:
+        proc.wait.side_effect = subprocess.TimeoutExpired("fixture", remaining)
+    clock = Mock(side_effect=itertools.chain([100.0], itertools.repeat(105.0 - remaining)))
+    monkeypatch.setattr(proctree, "time", SimpleNamespace(monotonic=clock, sleep=lambda _: None))
+
+    result = proctree._communicate_capped(proc, None, 5.0, 64, 64)
+
+    assert result == ("version\n", "", False, timed_out)
+    proc.wait.assert_called_once_with(timeout=remaining)
+
+
+def test_capped_run_terminates_process_after_output_eof(tmp_path: Path) -> None:
+    closed = tmp_path / "closed"
+    script = (
+        "import os, sys, time; from pathlib import Path;"
+        "os.close(1); os.close(2);"
+        "Path(sys.argv[1]).touch(); time.sleep(30)"
+    )
+    result = proctree.run_owned(
+        [sys._base_executable, "-c", script, str(closed)],
+        timeout=4.0,
+        max_stdout_bytes=64,
+        max_stderr_bytes=64,
+    )
+
+    assert closed.is_file(), "the fixture did not reach EOF before the deadline"
+    assert result.timed_out and "timeout" in result.reason_codes, result
+    assert result.ownership_complete and result.termination_complete, result
+    assert result.returncode is not None and result.returncode != 0
+    assert "output_limit" not in result.reason_codes
+
+
 def test_timeout_kills_whole_tree_including_grandchild() -> None:
     """★B1 核心（真实进程）：超时不只杀直接子进程——.bat/cmd→java→后代 的等价形态
     （python→python 孙进程）整树终止并验证无存活，结局如实进 OwnedRun。"""
