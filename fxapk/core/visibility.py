@@ -111,8 +111,8 @@ INSUFFICIENT = _INSUFFICIENT
 _INPUT_KEYS_BY_SOURCE: dict[str, tuple[str, ...]] = {
     "manifest": ("apk_validation_ok", "manifest_analysis_failed", "manifest_parse_reason"),
     "dex": (
-        "dex_available", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
-        "is_hardened", "hardening_structural", "extra_dex_visibility", "artifact_lineage",
+        "dex_available", "dex_parse_failed", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
+        "is_hardened", "hardening_structural", "extra_dex_visibility", "artifact_lineage", "unpacked",
         "main_dex_visibility", "dex_decode_visibility", "parser_execution",
     ),
     "java": ("analyzer_receipts", "jadx_receipt", "jadx_scan_truncated", "jadx_status"),
@@ -174,6 +174,8 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
     ``is_hardened`` 为 True——以 ``packed`` 是否有值来判加固会漏掉全部未识别厂商的壳。
     """
     why: list[str] = []
+    if meta.get("dex_parse_failed") is True:
+        return VIS_UNAVAILABLE, ["未取得可解析的 DEX（dex_parse_failed=True）"]
     if meta.get("dex_available") is False:
         why.append("DEX 解析失败（dex_available=False）")
         return VIS_UNAVAILABLE, why
@@ -198,7 +200,7 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
     structural = meta.get("hardening_structural")
     structural_reason = structural.get("reason") if isinstance(structural, dict) else None
     hardened = bool(structural_reason) or bool(meta.get("is_hardened"))
-    if hardened and extra_loaded <= 0:
+    if hardened and extra_loaded <= 0 and _remediation(meta)[0] != REM_REANALYZED:
         if structural_reason:
             why.append(f"结构判据命中加固：{structural_reason}")
         else:
@@ -208,6 +210,9 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
         why.append(
             f"原包加固，但已并入 {extra_loaded} 个脱壳回灌 DEX——按并入完整度评估 DEX 可见性，不再按壳桩论"
         )
+    elif hardened:
+        # 回灌只撤销原包的壳桩判定；当前输入仍须逐项检查，不是完整扫描的凭据。
+        why.append("原包加固；当前输入为脱壳回灌产物，按本次实际扫描评估")
 
     pool = meta.get("dex_string_pool")
     if isinstance(pool, dict) and pool.get("suspicious"):
@@ -240,7 +245,7 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
         why.append(f"DEX 字符串数超上限被截断，后段未扫（分析器成功但未扫全）{who}")
         return VIS_PARTIAL, why
     if meta.get("dex_scanned") is False:
-        why.append("DEX 未被扫描（dex_scanned=False）")
+        why.append("有分析器未完成 DEX 扫描（dex_scanned=False）")
         return VIS_UNAVAILABLE, why
     return VIS_COMPLETE, why
 
@@ -1010,11 +1015,6 @@ def assess(report: Any) -> dict[str, Any]:
         dex_vis, dex_why = _dex_visibility(meta)
         nat_vis, nat_why = _native_visibility(meta)
         rem, rem_why = _remediation(meta)
-
-        # 脱壳回灌已生效 → DEX 重新可见（此时的 is_hardened 描述的是**原包**，不是当前输入）
-        if rem == REM_REANALYZED and dex_vis == VIS_STUB_ONLY:
-            dex_vis = VIS_COMPLETE
-            dex_why.append("★上述加固结论属被取代的原包；当前输入为脱壳回灌产物")
 
         rt_vis, rt_why = _runtime_visibility(meta)
         res_vis, res_why = _resource_visibility(meta)

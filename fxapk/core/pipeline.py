@@ -37,6 +37,7 @@ from fxapk.core.models import (
     seal_base_advice,
 )
 from fxapk.core.meta_contract import (
+    MERGE_BOOLEAN_AND,
     MERGE_BOOLEAN_OR,
     MISSING_ANALYZERS_KEY,
     META_KEY_REGISTRY,
@@ -439,6 +440,10 @@ def _stage_run_analyzers(state: _PipelineState) -> None:
             for k, v in result.meta.items():
                 if k == _DEX_TRUNCATED_KEY:
                     continue                      # 已按或运算处理，不参与覆盖式合并
+                if META_KEY_REGISTRY[k].merge == MERGE_BOOLEAN_AND:
+                    # 只归并实际上报的布尔值：所有报告者都成功，才算扫过。
+                    meta[k] = meta.get(k, True) is True and v is True
+                    continue
                 if k in meta and meta[k] != v:
                     logger.warning(
                         "meta key 冲突，分析器 %s 覆盖了 %r：%r → %r", name, k, meta[k], v

@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 MERGE_REPLACE = "replace"
 MERGE_BOOLEAN_OR = "boolean_or"
+MERGE_BOOLEAN_AND = "boolean_and"
 PIPELINE_OWNER = "pipeline"
 MISSING_ANALYZERS_KEY = "missing_analyzers"
 META_CATEGORY_SIGNAL = "signal"
@@ -74,14 +75,9 @@ def _build_registry() -> dict[str, MetaKeyContract]:
         )
         for key, owners in owners_by_key.items()
     }
-    truncation = registry.get("dex_strings_truncated")
-    if truncation is not None:
-        registry["dex_strings_truncated"] = MetaKeyContract(
-            owners=truncation.owners,
-            category=truncation.category,
-            pending_review=truncation.pending_review,
-            merge=MERGE_BOOLEAN_OR,
-        )
+    for key, merge in (("dex_strings_truncated", MERGE_BOOLEAN_OR), ("dex_scanned", MERGE_BOOLEAN_AND)):
+        if key in registry:
+            registry[key] = replace(registry[key], merge=merge)
     # pipeline 派生键也走普通注册。保留键若被分析器声明，必须在启动期直接报错；
     # 不能覆盖掉分析器 owner 后再让运行期把它的整块 meta 静默拒绝。
     for key in (

@@ -598,6 +598,41 @@ def test_dex_not_scanned_is_unavailable():
     assert a["blocked_claims"]
 
 
+def test_pipeline_dex_parse_failure_is_authoritative_and_tracked():
+    report = _report(dex_available=True, dex_scanned=True, jadx_receipt=_JADX_OK)
+    old = V.assess(report)
+    report["meta"]["dex_parse_failed"] = True
+    current = V.assess(report)
+    dex = current["sources"]["dex"]
+    assert dex["visibility"] == V.VIS_UNAVAILABLE
+    assert "dex_parse_failed" in dex["inputs_seen"]
+    assert any("dex_parse_failed" in why for why in dex["why"])
+    assert current["claims"]["no_contact_harvesting"]["missing_sources"] == ["dex"]
+    assert {k: v for k, v in current["sources"].items() if k != "dex"} == {
+        k: v for k, v in old["sources"].items() if k != "dex"
+    }
+    assert old["sources"]["dex"]["visibility"] == V.VIS_COMPLETE
+    assert V.assess(_report(dex_parse_failed=False))["sources"]["dex"]["visibility"] == V.VIS_COMPLETE
+
+
+@pytest.mark.parametrize("lineage", [
+    {"artifact_lineage": {"active_input": "unpacked", "unpacked_dex_count": 3}},
+    {"unpacked": True},
+])
+@pytest.mark.parametrize(("gap", "expected"), [
+    ({"dex_strings_truncated": True}, V.VIS_PARTIAL),
+    ({"dex_string_pool": {"suspicious": True}}, V.VIS_OPAQUE),
+    ({"dex_scanned": False}, V.VIS_UNAVAILABLE),
+    ({"dex_parse_failed": True}, V.VIS_UNAVAILABLE),
+    ({"extra_dex_visibility": {"requested": 1, "loaded": 0, "failed": 1}}, V.VIS_PARTIAL),
+])
+def test_reanalysis_does_not_erase_current_dex_gaps(lineage, gap, expected):
+    result = V.assess(_report(is_hardened=True, **lineage, **gap))
+    assert result["remediation"] == V.REM_REANALYZED
+    assert result["sources"]["dex"]["visibility"] == expected
+    assert "no_contact_harvesting" in result["blocked_claims"]
+
+
 def test_repack_suspected_raises_attribution_caveat():
     """★重打包件的接口/域名归**被仿冒的正版厂商**，照单列进清单会向无关企业发函。
 
