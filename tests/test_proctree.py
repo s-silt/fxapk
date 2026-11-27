@@ -85,6 +85,30 @@ def test_outer_timeout_kills_nested_owned_session_but_not_unrelated_process(tmp_
             _kill_if_alive(int(pid_file.read_text(encoding="utf-8")))
 
 
+@pytest.mark.parametrize("timed_out", [False, True], ids=["exits", "times-out"])
+def test_capped_run_waits_for_process_after_output_eof(monkeypatch, timed_out: bool) -> None:
+    import io
+    import itertools
+    import subprocess
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    proc = Mock(spec=subprocess.Popen)
+    proc.stdout = SimpleNamespace(buffer=io.BytesIO(b"version\n"))
+    proc.stderr = SimpleNamespace(buffer=io.BytesIO())
+    proc.wait.return_value = 0
+    remaining = 1.0 if timed_out else 4.0
+    if timed_out:
+        proc.wait.side_effect = subprocess.TimeoutExpired("fixture", remaining)
+    clock = Mock(side_effect=itertools.chain([100.0], itertools.repeat(105.0 - remaining)))
+    monkeypatch.setattr(proctree, "time", SimpleNamespace(monotonic=clock, sleep=lambda _: None))
+
+    result = proctree._communicate_capped(proc, None, 5.0, 64, 64)
+
+    assert result == ("version\n", "", False, timed_out)
+    proc.wait.assert_called_once_with(timeout=remaining)
+
+
 def test_timeout_kills_whole_tree_including_grandchild() -> None:
     """★B1 核心（真实进程）：超时不只杀直接子进程——.bat/cmd→java→后代 的等价形态
     （python→python 孙进程）整树终止并验证无存活，结局如实进 OwnedRun。"""
