@@ -1,0 +1,77 @@
+name: Release evidence rehearsal
+
+# No release events or publishing permissions. Only builds and moves an Actions artifact.
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/release-evidence-check.yml'
+      - '.github/workflows/release.yml'
+      - '.github/release-notes-template.md'
+      - 'tools/release_preflight.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  manifest-roundtrip:
+    name: Upload and read back build manifest (no publish)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Build and verify disposable release inputs
+        id: preflight
+        run: |
+          python -m pip install build
+          python -m build
+          python - <<'PY'
+          import subprocess
+          import sys
+          from pathlib import Path
+          from tools.release_preflight import PROJECTS
+
+          for project in PROJECTS[1:]:
+              subprocess.run(
+                  [sys.executable, "-m", "build", str(Path(project).parent), "--outdir", "plugin-dist"],
+                  check=True,
+              )
+          PY
+          mkdir release-assets
+          cp dist/*.whl dist/*.tar.gz plugin-dist/*.whl plugin-dist/*.tar.gz release-assets/
+          (cd release-assets && sha256sum *.whl *.tar.gz > SHA256SUMS.txt)
+          commit=$(git rev-parse --verify HEAD^{commit})
+          tag=$(python -c 'import tomllib; from pathlib import Path; print("v" + tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"])')
+          python tools/release_preflight.py --tag "$tag" --repository "$GITHUB_REPOSITORY" \
+            --commit "$commit" --build-manifest release-build-manifest.json
+          sha256sum release-build-manifest.json
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+          printf 'destination=%s\n' "$(mktemp -d "$RUNNER_TEMP/fxapk-manifest.XXXXXX")" >> "$GITHUB_OUTPUT"
+      - name: Upload rehearsal manifest only
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rehearsal-release-build-manifest-${{ steps.preflight.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-build-manifest.json
+          if-no-files-found: error
+      - name: Download that exact artifact ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.upload.outputs.artifact-id }}
+          path: ${{ steps.preflight.outputs.destination }}
+          digest-mismatch: error
+      - name: Verify original and returned bytes
+        env:
+          DESTINATION: ${{ steps.preflight.outputs.destination }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          cmp -- release-build-manifest.json "$DESTINATION/release-build-manifest.json"
+          printf 'artifact_id=%s\n' "$ARTIFACT_ID"
+          sha256sum "$DESTINATION/release-build-manifest.json"
