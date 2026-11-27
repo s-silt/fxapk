@@ -265,3 +265,15 @@ def test_dotenv_loose_permissions_warn_without_exposing_value(tmp_path, monkeypa
     assert "permissions" in caplog.text and "fixture-only" not in caplog.text
     path.chmod(0o644)
     assert load_dotenv(path) == 1
+
+
+def test_dotenv_works_without_windows_reparse_stat_constant(tmp_path, monkeypatch):
+    import stat
+
+    path = tmp_path / ".env"
+    path.write_text("FXAPK_VT_KEY=fixture-only\n", encoding="utf-8")
+    path.chmod(0o600)
+    monkeypatch.delenv("FXAPK_VT_KEY", raising=False)
+    monkeypatch.delattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", raising=False)
+    assert load_dotenv(path) == 1
+    assert os.environ["FXAPK_VT_KEY"] == "fixture-only"

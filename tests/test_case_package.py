@@ -1112,3 +1112,30 @@ def test_manifest_canonical_encoding_failure_is_public_and_stable(tmp_path, monk
         "issues": ["package manifest cannot be encoded as canonical UTF-8"],
         "package_id": "",
     }
+
+
+def test_bare_report_status_distinguishes_omitted_explicit_null_and_invalid(tmp_path):
+    omitted_dir = tmp_path / "omitted"
+    omitted_dir.mkdir()
+    omitted = _write_report(omitted_dir)
+    payload = json.loads(omitted.read_text(encoding="utf-8"))
+    del payload["analysis_status"]
+    omitted.write_text(json.dumps(payload), encoding="utf-8")
+
+    null_dir = tmp_path / "explicit-null"
+    null_dir.mkdir()
+    explicit_null = _write_report(null_dir)
+    payload_null = json.loads(explicit_null.read_text(encoding="utf-8"))
+    payload_null["analysis_status"] = None
+    explicit_null.write_text(json.dumps(payload_null), encoding="utf-8")
+
+    invalid_dir = tmp_path / "invalid"
+    invalid_dir.mkdir()
+    invalid = _write_report(invalid_dir)
+    payload_bad = json.loads(invalid.read_text(encoding="utf-8"))
+    payload_bad["analysis_status"] = "bogus"
+    invalid.write_text(json.dumps(payload_bad), encoding="utf-8")
+
+    assert project_case_status(omitted)["analysis"] == "complete"
+    assert project_case_status(explicit_null)["analysis"] == "unknown"
+    assert project_case_status(invalid)["analysis"] == "failed"

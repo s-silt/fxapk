@@ -117,7 +117,10 @@ def test_only_selected_member_is_materialized_and_cleaned(tmp_path):
     assert not folder.exists()
 
 
-@pytest.mark.parametrize("member", ["../escape", "/absolute", "C:/drive", "a\\b", "a/../b", "a//b", "NUL.txt", "a:stream", "a."])
+@pytest.mark.parametrize(
+    "member",
+    ["../escape", "/absolute", "C:/drive", "a\\b", "a/../b", "a//b", "NUL.txt", "con .txt", "com¹.txt", "a\x7fb", "a:stream", "a."],
+)
 def test_unsafe_names_rejected_before_any_output(tmp_path, member):
     archive = forged(tmp_path / "bad.zip", [(member, b"synthetic")])
     with pytest.raises(ArchiveError, match="archive_member_path_invalid"):
@@ -843,3 +846,35 @@ def test_windows_cleanup_does_not_retry_if_staging_identity_changed(tmp_path, mo
         evidence_archive.remove_owned_staging(stage, tmp_path)
     assert attempts == [stage]
     assert note.read_text(encoding="utf-8") == "ok"
+
+
+def test_pack_rejects_directory_colliding_with_archive_index(tmp_path):
+    root = tmp_path / "source"
+    (root / INDEX).mkdir(parents=True)
+    with pytest.raises(ArchiveError, match="archive_duplicate_member"):
+        pack(root, tmp_path / "out.zip", compression="deflate")
+
+
+def test_archive_rejects_unregistered_prefix_bytes(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "note.txt").write_bytes(b"ok")
+    archive = tmp_path / "prefixed.zip"
+    pack(root, archive, compression="deflate")
+    raw = archive.read_bytes()
+    prefix = b"XXXX"
+    with zipfile.ZipFile(archive) as z:
+        cd_start = z.start_dir
+    shifted = bytearray(prefix + raw)
+    pos = len(prefix) + cd_start
+    while shifted[pos:pos + 4] == b"PK\x01\x02":
+        namesize, extrasize, commentsize = struct.unpack_from("<3H", shifted, pos + 28)
+        old_off = struct.unpack_from("<L", shifted, pos + 42)[0]
+        struct.pack_into("<L", shifted, pos + 42, old_off + len(prefix))
+        pos += 46 + namesize + extrasize + commentsize
+    eocd = shifted.rfind(b"PK\x05\x06")
+    old_cd = struct.unpack_from("<L", shifted, eocd + 16)[0]
+    struct.pack_into("<L", shifted, eocd + 16, old_cd + len(prefix))
+    archive.write_bytes(shifted)
+    with pytest.raises(ArchiveError, match="archive_member_gap"):
+        EvidenceArchive(archive)

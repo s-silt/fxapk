@@ -78,9 +78,11 @@ def catalog_write_lock(corpus_dir: str | Path) -> Iterator[None]:
     _ensure_private_directory(root)
     lock_path = root / CATALOG_LOCK_NAME
 
+    reparse_attr = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+
     def regular(info: os.stat_result) -> bool:
         return (stat.S_ISREG(info.st_mode)
-                and not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                and not getattr(info, "st_file_attributes", 0) & reparse_attr
                 and info.st_nlink == 1)
 
     try:

@@ -135,7 +135,8 @@ def _read_trusted_env(path: Path) -> str | None:
         info = path.lstat()
     except FileNotFoundError:
         return None
-    if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+    reparse_attr = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & reparse_attr:
         logger.warning("Skipping non-regular or linked .env: %s", path)
         return None
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)

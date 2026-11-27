@@ -819,7 +819,15 @@ def project_case_status(
     # 裸 report：能读分析/闭环，但没有外部 hash manifest，绝不能称 package verified。
     try:
         report = load_report(target)
-        analysis = report.analysis_status if report.analysis_status is not None else "unknown"
+        raw_analysis = payload.get("analysis_status")
+        if "analysis_status" in payload and raw_analysis is None:
+            analysis = "unknown"
+        elif report.analysis_status is None:
+            analysis = "unknown"
+        elif report.analysis_status in _ANALYSIS_STATUSES:
+            analysis = report.analysis_status
+        else:
+            analysis = "failed"
         closure = _closure_status(report.meta)
     except (OSError, ValueError, UnicodeError):
         analysis, closure = "failed", "not_run"

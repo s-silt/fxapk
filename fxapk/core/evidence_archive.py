@@ -87,8 +87,8 @@ def _name(value: object) -> str:
         raise ArchiveError("archive_member_path_invalid")
     parts = value.split("/")
     if any(not p or p in {".", ".."} or p.endswith((".", " ")) or
-           re.search(r'[\\:\x00-\x1f<>"|?*]', p) or
-           re.fullmatch(r"(?i)(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\..*)?", p)
+           re.search(r'[\\:\x00-\x1f\x7f<>"|?*]', p) or
+           re.fullmatch(r"(?i)(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:\s*\..*)?", p)
            for p in parts):
         raise ArchiveError("archive_member_path_invalid")
     return value
@@ -249,6 +249,8 @@ class EvidenceArchive:
                     raise ArchiveError("archive_total_budget")
                 self.infos[name] = item
             ordered = sorted(infos, key=lambda item: item.header_offset)
+            if ordered and ordered[0].header_offset != 0:
+                raise ArchiveError("archive_member_gap")
             self.member_ends = {item.filename: (ordered[i + 1].header_offset if i + 1 < len(ordered)
                                                 else self.zip.start_dir) for i, item in enumerate(ordered)}
             if INDEX not in self.infos:
@@ -280,7 +282,7 @@ class EvidenceArchive:
             if len({_key(d) for d in self.directories}) != len(self.directories):
                 raise ArchiveError("archive_member_path_collision")
             # A file cannot also be the parent directory of another member.
-            folded_files = {_key(n) for n in self.files}
+            folded_files = {_key(n) for n in self.files} | {_key(INDEX)}
             if (any(_key(d) in folded_files for d in self.directories) or
                     any(_key(p.as_posix()) in folded_files for n in [*self.files, *self.directories]
                         for p in PurePosixPath(n).parents if p.as_posix() != ".")):
@@ -528,7 +530,9 @@ def _inventory(root: Path, limits: Limits, deadline: float) -> list[tuple[str, o
         _deadline(deadline)
         for name in dirs:
             _regular(Path(directory) / name, directory=True)
-            _name((Path(directory) / name).relative_to(root).as_posix())
+            rel_dir = _name((Path(directory) / name).relative_to(root).as_posix())
+            if _key(rel_dir) == _key(INDEX):
+                raise ArchiveError("archive_duplicate_member")
             directories += 1
             if directories > limits.members:
                 raise ArchiveError("archive_source_budget")

@@ -1428,3 +1428,12 @@ def test_catalog_lock_creates_private_state_and_checks_links(tmp_path, monkeypat
     with pytest.raises(OSError, match="not a regular private file"):
         with catalog.catalog_write_lock(root):
             pytest.fail("must not hold a linked lock")
+
+
+def test_catalog_lock_works_without_windows_reparse_stat_constant(tmp_path, monkeypatch):
+    import stat
+
+    root = tmp_path / "catalog-posix"
+    monkeypatch.delattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", raising=False)
+    with catalog.catalog_write_lock(root):
+        assert (root / catalog.CATALOG_LOCK_NAME).is_file()
