@@ -32,8 +32,9 @@ mkdir -- "$destination" &&
 
 ## 不发版的托管回读演练
 
-「Release evidence rehearsal」用一次性构建运行真实预检，只把构建清单上传到
-Actions。下一作业用正式取证的 `gh run download` 入口下载到新目录，核对 run、
+「Release evidence rehearsal」用 Python 3.11 和 setuptools 77.0.3 构建一次性产物，
+逐个检查五个项目的 wheel 和 sdist 是否包含 MIT 声明及与源码一致的 LICENSE，
+再运行真实预检。只把构建清单上传到 Actions。下一作业用正式取证的 `gh run download` 入口下载到新目录，核对 run、
 artifact ID 和原件的 SHA-256。可在同仓的相关 PR 上触发，也可从 Actions 手动运行；不会写入 PyPI、
 GitHub Release 或标签。演练只证明 Actions 留存与回读可用，不证明某次正式发布
 成功，也不能代替正式发布原始尝试的清单。
