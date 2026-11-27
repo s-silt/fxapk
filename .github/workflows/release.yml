@@ -75,9 +75,20 @@ jobs:
           cd release-assets
           sha256sum *.whl *.tar.gz > SHA256SUMS.txt
       - name: Verify complete release and render notes before any upload
+        id: release-preflight
         run: |
+          commit=$(git rev-parse --verify HEAD^{commit})
           python tools/release_preflight.py \
-            --tag "$GITHUB_REF_NAME" --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA"
+            --tag "$GITHUB_REF_NAME" --repository "$GITHUB_REPOSITORY" --commit "$commit" \
+            --build-manifest release-build-manifest.json
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+      # Keep the verified inventory independently of both publication channels.
+      - name: Retain verified release build manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-build-manifest-${{ steps.release-preflight.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-build-manifest.json
+          if-no-files-found: error
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
