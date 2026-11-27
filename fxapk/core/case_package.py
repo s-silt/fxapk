@@ -10,7 +10,7 @@ import json
 import unicodedata
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Iterable, Mapping, cast
 
 from fxapk.core.redact import PublicDiagnosticError, register_public_diagnostic
@@ -430,7 +430,7 @@ class ArtifactPathVerdict(str, Enum):
 
 def resolve_package_artifact_path(
     package_dir: Path,
-    relative_path: str,
+    relative_path: object,
     *,
     strict: bool = False,
     reject_absolute: bool = True,
@@ -440,26 +440,23 @@ def resolve_package_artifact_path(
     返回 ``(INSIDE, resolved)`` 时路径落在 ``package_dir.resolve()`` 之内。
     ``UNSAFE`` 是空路径；``reject_absolute=True`` 时绝对路径也是 ``UNSAFE``。
     ``ESCAPES`` 是解析后不再位于包根之内，包括 ``..`` 和指向包外的符号链接。
-    ``UNRESOLVED`` 只在 ``strict=True`` 且目标不存在或解析失败时出现。
-    ``strict=False`` 与校验器原来的 ``Path.resolve()`` 一样，解析过程中的
-    ``OSError`` 原样抛出。
+    路径值无效返回 UNSAFE；路径解析失败返回 UNRESOLVED，不回显原值。
 
     ``reject_absolute`` 默认 True，这是 :func:`verify_case_package` 的口径。
     Phase2 清单沿用原先的查找：绝对路径若 ``resolve(strict=True)`` 之后仍是包内
     已存在文件，则接受，因此那里传 ``reject_absolute=False``。两套策略各自保持
     原来的接受范围。
     """
-    candidate = Path(relative_path)
-    if not relative_path or (reject_absolute and candidate.is_absolute()):
+    if not isinstance(relative_path, str) or not relative_path or any(ord(ch) < 32 for ch in relative_path):
         return ArtifactPathVerdict.UNSAFE, None
-    root = package_dir.resolve()
-    if strict:
-        try:
-            resolved = (package_dir / candidate).resolve(strict=True)
-        except OSError:
-            return ArtifactPathVerdict.UNRESOLVED, None
-    else:
-        resolved = (root / candidate).resolve()
+    candidate = Path(relative_path)
+    if reject_absolute and (candidate.is_absolute() or PureWindowsPath(relative_path).anchor):
+        return ArtifactPathVerdict.UNSAFE, None
+    try:
+        root = package_dir.resolve()
+        resolved = (root / candidate).resolve(strict=strict)
+    except (OSError, ValueError, RuntimeError):
+        return ArtifactPathVerdict.UNRESOLVED, None
     if not resolved.is_relative_to(root):
         return ArtifactPathVerdict.ESCAPES, None
     return ArtifactPathVerdict.INSIDE, resolved
@@ -506,7 +503,11 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
     if not _is_offset_timestamp(payload.get("created_at")):
         issues.append("created_at must be a parseable timestamp with an explicit UTC offset")
     body = {key: value for key, value in payload.items() if key != "package_id"}
-    expected_id = _canonical_sha256(body)
+    try:
+        expected_id = _canonical_sha256(body)
+    except UnicodeError:
+        issues.append("package manifest cannot be encoded as canonical UTF-8")
+        return {"status": "failed", "issues": issues, "package_id": ""}
     package_id = str(payload.get("package_id", ""))
     if package_id != expected_id:
         issues.append("package_id mismatch")
@@ -523,10 +524,16 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
         if not isinstance(item, Mapping):
             issues.append(f"artifact[{index}] is not an object")
             continue
-        rel = str(item.get("path", ""))
+        rel = item.get("path")
+        if not isinstance(rel, str):
+            issues.append(f"artifact[{index}] has unsafe path")
+            continue
         verdict, resolved = resolve_package_artifact_path(manifest.parent, rel)
         if verdict is ArtifactPathVerdict.UNSAFE:
             issues.append(f"artifact[{index}] has unsafe path")
+            continue
+        if verdict is ArtifactPathVerdict.UNRESOLVED:
+            issues.append(f"artifact[{index}] is unreadable")
             continue
         if verdict is not ArtifactPathVerdict.INSIDE or resolved is None:
             issues.append(f"artifact[{index}] escapes package root")
@@ -539,7 +546,6 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
         scope = str(item.get("scope", ""))
         if kind == "report":
             report_count += 1
-            report_artifact = resolved
         if scope not in {
             EvidenceScope.CASE_EVIDENCE.value,
             EvidenceScope.BATCH_REFERENCE.value,
@@ -577,7 +583,7 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
                         }
             actual_hash = _sha256(resolved)
             actual_size = resolved.stat().st_size
-        except OSError:
+        except (OSError, ValueError):
             # ``is_file`` is only a point-in-time observation.  Evidence can
             # disappear, become an offline OneDrive placeholder, or lose read
             # permission before hashing/stat.  Verification is a status
@@ -587,6 +593,8 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
             # （可能带绝对路径、挂载点、账户名）；用本地序号定位即可。
             issues.append(f"artifact[{index}] is unreadable")
             continue
+        if kind == "report":
+            report_artifact = resolved
         if actual_hash != str(item.get("sha256", "")):
             issues.append(f"artifact[{index}] hash mismatch")
         size = item.get("size")
@@ -594,7 +602,7 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
             issues.append(f"artifact[{index}] size mismatch")
     if report_count != 1:
         issues.append(f"package must contain exactly one report artifact (found {report_count})")
-    elif report_artifact is not None and report_artifact.is_file():
+    elif report_artifact is not None:
         try:
             raw_report = _load_object(report_artifact)
             try:
@@ -811,7 +819,7 @@ def project_case_status(
     # 裸 report：能读分析/闭环，但没有外部 hash manifest，绝不能称 package verified。
     try:
         report = load_report(target)
-        analysis = report.analysis_status
+        analysis = report.analysis_status if report.analysis_status is not None else "unknown"
         closure = _closure_status(report.meta)
     except (OSError, ValueError, UnicodeError):
         analysis, closure = "failed", "not_run"

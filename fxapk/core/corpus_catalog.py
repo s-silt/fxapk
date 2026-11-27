@@ -13,12 +13,13 @@ import hashlib
 import json
 import logging
 import os
+import stat
 from pathlib import Path
 import time
 from typing import Iterable, Iterator, Mapping, Sequence
 
 from fxapk.core.redact import safe_exception_text
-from fxapk.core.atomic import atomic_write_text
+from fxapk.core.atomic import _ensure_private_directory, atomic_write_text
 from fxapk.core.case_identity import normalize_case_id
 from fxapk.core.json_contract import (
     parse_finite_json_float as _parse_finite_float,
@@ -74,9 +75,31 @@ def catalog_path(corpus_dir: str | Path) -> Path:
 def catalog_write_lock(corpus_dir: str | Path) -> Iterator[None]:
     """Serialize catalog + derived-manifest mutations across processes."""
     root = Path(corpus_dir)
-    root.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(root)
     lock_path = root / CATALOG_LOCK_NAME
-    with lock_path.open("a+b") as handle:
+
+    def regular(info: os.stat_result) -> bool:
+        return (stat.S_ISREG(info.st_mode)
+                and not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                and info.st_nlink == 1)
+
+    try:
+        prior = lock_path.lstat()
+    except FileNotFoundError:
+        prior = None
+    if prior is not None and not regular(prior):
+        raise OSError("catalog lock is not a regular private file")
+    flags = (os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    fd = os.open(lock_path, flags, 0o600)
+    with os.fdopen(fd, "a+b") as handle:
+        opened = os.fstat(fd)
+        current = lock_path.lstat()
+        if (not regular(opened) or not regular(current) or not os.path.samestat(opened, current)
+                or (prior is not None and not os.path.samestat(prior, opened))):
+            raise OSError("catalog lock changed or is not a regular private file")
+        if os.name != "nt" and opened.st_mode & 0o077:
+            os.fchmod(fd, 0o600)
         handle.seek(0, os.SEEK_END)
         if handle.tell() == 0:
             handle.write(b"\0")

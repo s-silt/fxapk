@@ -16,6 +16,9 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+import stat
+
+from fxapk.core.bounded_io import read_limited
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,34 @@ def _parse_line(raw: str) -> "tuple[str, str] | None":
     return key, _strip_inline_comment(val)
 
 
+_ENV_MAX_BYTES = 1024 * 1024
+
+
+def _read_trusted_env(path: Path) -> str | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        logger.warning("Skipping non-regular or linked .env: %s", path)
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not os.path.samestat(info, opened) or not stat.S_ISREG(opened.st_mode):
+            logger.warning("Skipping changed .env: %s", path)
+            return None
+        if os.name != "nt" and opened.st_mode & 0o077:
+            logger.warning(".env permissions permit group/other access; use mode 0600: %s", path)
+        if os.name != "nt" and opened.st_mode & 0o022:
+            return None
+        raw = read_limited(stream, _ENV_MAX_BYTES)
+        if len(raw) > _ENV_MAX_BYTES:
+            logger.warning("Skipping oversized .env: %s", path)
+            return None
+    return raw.decode("utf-8-sig")
+
+
 def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
     """把 .env 白名单内的键兜底注入 ``os.environ``（已存在的真实环境变量不覆盖；其余键拒绝并告警）。
 
@@ -132,11 +163,9 @@ def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
     injected = 0
     for p in _candidate_paths(path):
         try:
-            if not p.is_file():
+            text = _read_trusted_env(p)
+            if text is None:
                 continue
-            # utf-8-sig：编辑器存的 .env 常带 BOM，用 utf-8 读会让**首个键名**变成 "﻿FXAPK_..."，
-            # 于是"注入成功 1 条"但真实键查不到，且毫无告警——最难查的那种静默损坏。
-            text = p.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
             # 非 UTF-8（如 GBK）会让**整个文件**被丢弃、所有密钥凭空消失。这必须让用户看见，
             # 不能只留 debug 级日志：症状是"所有源都说没配密钥"，离病根极远。
@@ -153,7 +182,7 @@ def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
             if parsed is None:
                 continue
             key, val = parsed
-            if not val:
+            if not val or "\0" in val:
                 # ★空占位（``KEY=``，常见于从 .env.example 抄来的模板行）不注入：一旦注入，
                 # 高优先 .env 的空占位会**静默掩蔽**低优先 .env 里配好的真实值——症状是
                 # "明明配了 key 却说没配"，离病根极远。想显式置空请用真实环境变量。

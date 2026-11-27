@@ -1059,3 +1059,56 @@ def test_old_review_without_gate_binding_still_projects_accepted(tmp_path) -> No
     review.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     assert project_case_status(manifest, review)["review"] == "accepted"
+
+
+@pytest.mark.parametrize("value", [None, [], "note\0.txt"])
+def test_invalid_artifact_path_is_an_indexed_issue(tmp_path, value):
+    manifest = tmp_path / "case-package.json"
+    create_case_package(_write_report(tmp_path), manifest, case_id="case-001", producer="analyst-a")
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["artifacts"][0]["path"] = value
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    check = verify_case_package(manifest)
+    assert check["status"] == "failed"
+    assert "artifact[0] has unsafe path" in check["issues"]
+
+
+@pytest.mark.parametrize("error", [OSError("synthetic"), ValueError("synthetic")])
+def test_resolution_error_reports_unreadable_not_escape(tmp_path, monkeypatch, error):
+    manifest = tmp_path / "case-package.json"
+    report = _write_report(tmp_path)
+    create_case_package(report, manifest, case_id="case-001", producer="analyst-a")
+    original = Path.resolve
+    def resolve(path, **kwargs):
+        if path == report:
+            raise error
+        return original(path, **kwargs)
+    monkeypatch.setattr(Path, "resolve", resolve)
+    result = verify_case_package(manifest)
+    assert "artifact[0] is unreadable" in result["issues"]
+    assert "synthetic" not in str(result["issues"])
+
+
+def test_bare_report_projects_unknown_if_reader_has_no_analysis_evidence(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    path = _write_report(tmp_path)
+    monkeypatch.setattr(case_package, "load_report", lambda _: SimpleNamespace(analysis_status=None, meta={}))
+    status = project_case_status(path)
+    assert status["analysis"] == "unknown"
+    assert status["package_integrity"] == "unverified"
+
+
+def test_manifest_canonical_encoding_failure_is_public_and_stable(tmp_path, monkeypatch):
+    manifest = tmp_path / "case-package.json"
+    create_case_package(_write_report(tmp_path), manifest, case_id="case-001", producer="analyst-a")
+
+    def cannot_encode(_body):
+        raise UnicodeEncodeError("utf-8", "internal detail", 0, 1, "mock encoder")
+
+    monkeypatch.setattr(case_package, "_canonical_sha256", cannot_encode)
+    assert verify_case_package(manifest) == {
+        "status": "failed",
+        "issues": ["package manifest cannot be encoded as canonical UTF-8"],
+        "package_id": "",
+    }

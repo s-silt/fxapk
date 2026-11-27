@@ -9,7 +9,7 @@
 - dex_strings（tuple，4.1MB）+ manifest/components/permissions/certs/native_libs/config/list_files（小）；
 - **文本资源 dict**（.js/.json/.xml/… 共 ~8MB；59.5MB 的大头是图片/字体/.so 等分析器不读的二进制，不收）。
 
-read_file 正确性保证：命中文本 dict 直接返回；未命中（罕见二进制读）按模式惰性读取。遗留模式在
+read_file 正确性保证：预读与惰性读取同用逐分析器预算；未命中（罕见二进制读）按模式惰性读取。遗留模式在
 分析器 worker 内重开 APK；隔离模式则启动受同一策略约束的 parser child。APK 句柄不 pickle。
 
 仅 **android（APK）** 走并行快照；无 apk_path 由 pipeline 回退串行。
@@ -94,6 +94,7 @@ class SnapshotContext:
         parser_execution: dict | None = None,
         declared_sizes: dict[str, int] | None = None,
         hiddenapi_relaxation: dict | None = None,
+        prefetch_decode_overhead: dict[str, int] | None = None,
     ) -> None:
         # AnalysisContext 协议的 property/属性。
         self.package_name = package_name
@@ -138,11 +139,12 @@ class SnapshotContext:
         self._native_libs = native_libs
         self._certificates = certificates
         self._files = files  # 预读文本资源 path→bytes
+        self._prefetch_decode_overhead = dict(prefetch_decode_overhead or {})
         self.file_read_ledger = FileReadLedger(read_failures)
         # worker 内惰性 APK 句柄（不 pickle）：None=未建，False=建过但失败，否则为 APK 实例。
         self._worker_apk: Any = None
-        # 本 worker 已计入的非 DEX 实际解压字节数（聚合 zip 炸弹预算的跨读累计器；
-        # int 可 pickle，随快照分发后各 worker 独立累计）。
+        # Defensive actual-work counter for standalone callers outside an
+        # analyzer scope (e.g. the isolated parser's one-read entry point).
         self._lazy_other_extract_bytes = 0
         # 遗留模式可在 worker 惰性建表；隔离模式接收 parser child 物化的表。
         self._worker_declared_sizes: dict[str, int] | None = (
@@ -181,10 +183,17 @@ class SnapshotContext:
         return self._certificates
 
     def read_file(self, path: str) -> bytes | None:
-        """命中预读文本 dict 直接返回；未命中惰性重开 APK 兜底（保证永远返回正确字节）。绝不抛。"""
+        """命中预读按同一额度计费；未命中惰性重开 APK。"""
         self.file_read_ledger.request(path)
         if path in self._files:
+            from fxapk.core.apk import _active_resource_budget
+
             data = self._files[path]
+            budget = _active_resource_budget(path)
+            decoded = (0 if data is None else len(data)) + self._prefetch_decode_overhead.get(path, 0)
+            if budget is not None and (budget.exhausted or not budget.admit(data, decoded)):
+                self.file_read_ledger.record_failure(path, "decompression_budget")
+                return None
             if data is None:
                 self.file_read_ledger.record_failure(
                     path,
@@ -208,6 +217,18 @@ class SnapshotContext:
             return None
 
     def _lazy_read(self, path: str) -> bytes | None:
+        from fxapk.core.apk import (
+            ZipEntryTooLargeError,
+            _OTHER_TOTAL_LIMIT_BYTES,
+            _active_resource_budget,
+            _is_dex_entry_name,
+            _measure_other_decoding,
+        )
+
+        budget = _active_resource_budget(path)
+        if budget is not None and budget.exhausted:
+            self.file_read_ledger.record_failure(path, "decompression_budget")
+            return None
         if self.parser_limits is not None:
             from fxapk.core.parser_limits import ParserLimits
             from fxapk.core.parser_worker import run_parser_read
@@ -223,6 +244,11 @@ class SnapshotContext:
             except Exception:  # noqa: BLE001 — isolated read failures become explicit ledger gaps
                 logger.exception("snapshot isolated read worker failed: %s", path)
                 data, reason, diagnostic = None, "parser_worker_failed", None
+            # The isolated process's own physical limits are independent;
+            # caller-side logical bytes still count just like a cache hit.
+            if budget is not None and not budget.admit(data, 0):
+                self.file_read_ledger.record_failure(path, "decompression_budget")
+                return None
             if data is None:
                 self.file_read_ledger.record_failure(
                     path, reason or "unavailable_context", diagnostic=diagnostic
@@ -240,46 +266,41 @@ class SnapshotContext:
             )
             self.file_read_ledger.record_failure(path, "declared_limit")
             return None
+        standalone_work = getattr(self, "_lazy_other_extract_bytes", 0)
+        start = budget.decode_bytes if budget is not None else standalone_work
+        # Analyzer work never advances the standalone counter. An explicitly
+        # exhausted standalone context must still not perform new physical reads.
+        if max(standalone_work, start) >= _OTHER_TOTAL_LIMIT_BYTES and not _is_dex_entry_name(path):
+            self.file_read_ledger.record_failure(path, "decompression_budget")
+            return None
         apk = self._ensure_worker_apk()
         if apk is None:
             self.file_read_ledger.record_failure(path, "unavailable_context")
             return None
-        from fxapk.core.apk import (
-            ZipEntryTooLargeError,
-            _OTHER_TOTAL_LIMIT_BYTES,
-            _other_extract_total_bytes,
-        )
-
-        # ★聚合解压预算：单文件上限管不住「每条都不超限、条目数无上限」的 zip 炸弹。
-        #   本 worker 的累计计数器随每次惰性读递增，触顶后不再发起新读。
-        #   getattr 兜底：测试可用 __new__ 构造不完整实例。
-        charged_so_far = getattr(self, "_lazy_other_extract_bytes", 0)
-        if charged_so_far >= _OTHER_TOTAL_LIMIT_BYTES:
+        failure = None
+        with _measure_other_decoding(start) as work:
+            try:
+                data = apk.get_file(path)
+            except ZipEntryTooLargeError as exc:
+                logger.warning(
+                    "snapshot 惰性 read_file 跳过（实际解压产出超 %d 字节上限，疑 zip 炸弹）：%s",
+                    exc.limit,
+                    path,
+                )
+                failure = "decompression_budget" if exc.resource_budget else "actual_decompression_limit"
+                data = None
+            except Exception:  # noqa: BLE001 — 同串行，保留可定位缺口
+                logger.debug("snapshot 惰性 read_file 未命中：%s", path, exc_info=True)
+                failure = "read_failure"
+                data = None
+        if budget is None:
+            self._lazy_other_extract_bytes = start + work.bytes_used
+        elif not budget.admit(data, work.bytes_used, denied=failure == "decompression_budget"):
             self.file_read_ledger.record_failure(path, "decompression_budget")
             return None
-        token = _other_extract_total_bytes.set(charged_so_far)
-        try:
-            data = apk.get_file(path)
-            if data is None:
-                self.file_read_ledger.record_failure(path, "unavailable_context")
-            return data
-        except ZipEntryTooLargeError as exc:
-            logger.warning(
-                "snapshot 惰性 read_file 跳过（实际解压产出超 %d 字节上限，疑 zip 炸弹）：%s",
-                exc.limit,
-                path,
-            )
-            self.file_read_ledger.record_failure(path, "actual_decompression_limit")
-            return None
-        except Exception:  # noqa: BLE001 — 缺失/读取失败按 None（与 ApkContext.read_file 一致）
-            logger.debug("snapshot 惰性 read_file 未命中：%s", path, exc_info=True)
-            self.file_read_ledger.record_failure(path, "read_failure")
-            return None
-        finally:
-            charged = _other_extract_total_bytes.get()
-            _other_extract_total_bytes.reset(token)
-            if charged is not None:
-                self._lazy_other_extract_bytes = charged  # type: ignore[attr-defined]
+        if data is None:
+            self.file_read_ledger.record_failure(path, failure or "unavailable_context")
+        return data
 
     def _ensure_declared_sizes(self) -> dict[str, int]:
         """按模式取得 zip 声明大小表并缓存；隔离模式只用父进程传入的表。
@@ -348,6 +369,7 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
     if isinstance(ctx, SnapshotContext):
         return ctx
     files: dict[str, bytes] = {}
+    decode_overhead: dict[str, int] = {}
     ledger = getattr(ctx, "file_read_ledger", None)
     file_list: list[str] = []
     try:
@@ -358,7 +380,7 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
     except Exception:  # noqa: BLE001 — 枚举失败不致命（worker 惰性兜底）
         logger.warning("snapshot 枚举文件表失败，依赖 worker 惰性 read_file 兜底", exc_info=True)
 
-    from fxapk.core.apk import _other_extract_total_bytes
+    from fxapk.core.apk import ApkContext, _other_extract_total_bytes
 
     total = 0
     bad_reads = 0
@@ -415,6 +437,8 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
                 )
                 break
             files[path] = data
+            if isinstance(ctx, ApkContext) and ctx._last_resource_decode_overhead:
+                decode_overhead[path] = ctx._last_resource_decode_overhead
     finally:
         _other_extract_total_bytes.reset(extract_token)
 
@@ -436,6 +460,7 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
         native_libs=list(ctx.native_libs()),
         certificates=list(ctx.certificates()),
         files=files,
+        prefetch_decode_overhead=decode_overhead,
         read_failures=(
             ledger.failure_reasons if isinstance(ledger, FileReadLedger) else None
         ),

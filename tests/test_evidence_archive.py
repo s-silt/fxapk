@@ -747,3 +747,99 @@ def test_review_replays_absolute_source_paths_from_either_platform(tmp_path, hin
     assert result.exit_code == 0, result.output
     with pytest.raises(ArchiveError, match="archive_external_reference"):
         resolve_reference(f"{archive}::plan.json", "/elsewhere/events.jsonl")
+
+
+def test_raw_member_name_agrees_with_reader_name(tmp_path, monkeypatch):
+    # Model two harmless spellings returned by a reader without crafting a ZIP.
+    sample = tmp_path / "simple.zip"
+    source = tmp_path / "inputs"
+    source.mkdir()
+    (source / "note.txt").write_text("ok", encoding="utf-8")
+    pack(source, sample, compression="deflate")
+    original = zipfile.ZipFile.infolist
+
+    def renamed(reader):
+        items = original(reader)
+        items[0].orig_filename = "other-note.txt"
+        return items
+
+    monkeypatch.setattr(zipfile.ZipFile, "infolist", renamed)
+    with pytest.raises(ArchiveError, match="archive_member_path_invalid"):
+        EvidenceArchive(sample)
+
+
+def test_local_reference_is_regular_and_reads_in_small_chunks(tmp_path, monkeypatch):
+    from fxapk.core import evidence_archive
+
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"sample")
+    requests = []
+    real_read_limited = evidence_archive.read_limited
+
+    def traced(stream, limit):
+        class Observed:
+            def read(self, size=-1):
+                requests.append(size)
+                return stream.read(size)
+
+        return real_read_limited(Observed(), limit)
+
+    monkeypatch.setattr(evidence_archive, "read_limited", traced)
+    assert read_reference(source, 128 * 1024) == b"sample"
+    assert requests and max(requests) <= 65536
+    with pytest.raises(ValueError, match="input_byte_budget"):
+        read_reference(source, 5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing / read-only attributes")
+def test_windows_cleanup_retries_only_its_own_staging(tmp_path):
+    import stat
+    from fxapk.core.evidence_archive import remove_owned_staging
+
+    stage = tmp_path / ".fxapk-evidence-cleanup"
+    stage.mkdir()
+    member = stage / "ordinary.txt"
+    member.write_text("ok", encoding="utf-8")
+    member.chmod(stat.S_IREAD)
+    remove_owned_staging(stage, tmp_path)
+    assert not stage.exists()
+    assert tmp_path.is_dir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows bounded sharing retry")
+def test_windows_cleanup_does_not_retry_if_staging_identity_changed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from fxapk.core import evidence_archive
+
+    stage = tmp_path / ".fxapk-evidence-cleanup"
+    stage.mkdir()
+    note = stage / "ordinary.txt"
+    note.write_text("ok", encoding="utf-8")
+    attempts = []
+    replaced = False
+    original = evidence_archive._regular
+
+    def remove(path):
+        attempts.append(path)
+        error = PermissionError("mock sharing conflict")
+        error.winerror = 32
+        raise error
+
+    def delay(_seconds):
+        nonlocal replaced
+        replaced = True
+
+    def regular(path, *, directory=False):
+        info = original(path, directory=directory)
+        if path == stage and replaced:
+            return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1,
+                                   st_birthtime_ns=getattr(info, "st_birthtime_ns", None))
+        return info
+
+    monkeypatch.setattr(evidence_archive.shutil, "rmtree", remove)
+    monkeypatch.setattr(evidence_archive.time, "sleep", delay)
+    monkeypatch.setattr(evidence_archive, "_regular", regular)
+    with pytest.raises(ArchiveError, match="archive_cleanup_boundary"):
+        evidence_archive.remove_owned_staging(stage, tmp_path)
+    assert attempts == [stage]
+    assert note.read_text(encoding="utf-8") == "ok"

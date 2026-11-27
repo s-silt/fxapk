@@ -204,6 +204,7 @@ def test_explicit_dotenv_rejects_execution_path_and_gate_keys(tmp_path, monkeypa
         "FXAPK_VT_KEY": "vt-key-body",
     }
     env.write_text("".join(f"{key}={val}\n" for key, val in planted.items()), encoding="utf-8")
+    env.chmod(0o600)  # This test isolates the key-policy warning.
     for key in planted:
         monkeypatch.delenv(key, raising=False)
     rejected = (
@@ -239,3 +240,34 @@ def test_hostile_dotenv_does_not_open_rea_gate(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("FXAPK_ENABLE_REA", raising=False)
     assert load_dotenv(env) == 0
     assert os.environ.get("FXAPK_ENABLE_REA") != "1"
+
+
+def test_dotenv_rejects_link_before_reading(tmp_path, monkeypatch, caplog):
+    import stat
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    path = tmp_path / ".env"
+    path.write_text("FXAPK_VT_KEY=fixture-only", encoding="utf-8")
+    monkeypatch.delenv("FXAPK_VT_KEY", raising=False)
+    original = Path.lstat
+    def linked(p):
+        return SimpleNamespace(st_mode=stat.S_IFLNK) if p == path else original(p)
+    monkeypatch.setattr(Path, "lstat", linked)
+    assert load_dotenv(path) == 0
+    assert "FXAPK_VT_KEY" not in os.environ
+    assert "fixture-only" not in caplog.text
+
+
+def test_dotenv_loose_permissions_warn_without_exposing_value(tmp_path, monkeypatch, caplog):
+    import pytest
+    if os.name == "nt":
+        pytest.skip("POSIX mode bits")
+    path = tmp_path / ".env"
+    path.write_text("FXAPK_VT_KEY=fixture-only", encoding="utf-8")
+    monkeypatch.delenv("FXAPK_VT_KEY", raising=False)
+    path.chmod(0o664)
+    assert load_dotenv(path) == 0
+    assert "permissions" in caplog.text and "fixture-only" not in caplog.text
+    path.chmod(0o644)
+    assert load_dotenv(path) == 1

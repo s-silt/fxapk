@@ -29,6 +29,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import ModuleType
 from typing import BinaryIO, Callable, Iterator, Self
 
+from fxapk.core.bounded_io import read_limited
 from fxapk.core.json_contract import parse_finite_json_float, reject_nonfinite_json_constant
 from fxapk.core.json_io import loads_bounded
 
@@ -229,6 +230,8 @@ class EvidenceArchive:
             self.infos: dict[str, zipfile.ZipInfo] = {}
             for item in infos:
                 _deadline(self.deadline)
+                if item.orig_filename != item.filename:
+                    raise ArchiveError("archive_member_path_invalid")
                 name = _name(item.filename)
                 folded = _key(name)
                 if folded in seen:
@@ -693,10 +696,17 @@ def read_reference(reference: str | Path, limit: int) -> bytes:
         with EvidenceArchive(parsed[0]) as archive:
             return archive.read(parsed[1], limit)
     path = Path(reference)
-    if not path.is_file():
-        raise ValueError("input_not_regular_file")
-    with path.open("rb") as stream:
-        data = stream.read(limit + 1)
+    try:
+        before = _regular(path)
+    except FileNotFoundError as error:
+        raise ValueError("input_not_regular_file") from error
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        if _identity(os.fstat(stream.fileno())) != _identity(before):
+            raise ArchiveError("archive_changed")
+        data = read_limited(stream, limit)
+        if _identity(os.fstat(stream.fileno())) != _identity(before):
+            raise ArchiveError("archive_changed")
     if len(data) > limit:
         raise ValueError("input_byte_budget")
     return data
@@ -746,10 +756,42 @@ def remove_owned_staging(path: Path, parent: Path) -> None:
     resolved = path.resolve()
     if resolved.parent != parent.resolve() or not resolved.name.startswith(".fxapk-evidence-"):
         raise ArchiveError("archive_cleanup_boundary")
-    _regular(path, directory=True)
-    for folder, dirs, files in os.walk(path, followlinks=False, onerror=_walk_error):
-        for name in dirs:
-            _regular(Path(folder) / name, directory=True)
-        for name in files:
-            _regular(Path(folder) / name)
-    shutil.rmtree(path)
+
+    def identity() -> tuple[int, int, int | None]:
+        info = _regular(path, directory=True)
+        # A partial cleanup updates timestamps, but must not change the inode.
+        return info.st_dev, info.st_ino, getattr(info, "st_birthtime_ns", None)
+
+    original = identity()
+
+    def check_identity() -> None:
+        if path.resolve() != resolved or identity() != original:
+            raise ArchiveError("archive_cleanup_boundary")
+
+    for attempt in range(3):
+        check_identity()
+        for folder, dirs, files in os.walk(path, followlinks=False, onerror=_walk_error):
+            for name in dirs:
+                _regular(Path(folder) / name, directory=True)
+            for name in files:
+                _regular(Path(folder) / name)
+        check_identity()
+        try:
+            shutil.rmtree(path)
+            return
+        except PermissionError as error:
+            # Windows readers can briefly retain handles after writing. Retry
+            # only our validated stage; permanent failure remains observable.
+            code = getattr(error, "winerror", None)
+            if os.name != "nt" or attempt == 2 or code not in (5, 32, 33):
+                raise
+            if code == 5 and error.filename:
+                check_identity()
+                member = Path(error.filename)
+                if not member.resolve().is_relative_to(resolved):
+                    raise ArchiveError("archive_cleanup_boundary") from error
+                info = _regular(member, directory=member.is_dir())
+                if (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY
+                        and (stat.S_ISDIR(info.st_mode) or info.st_nlink == 1)):
+                    member.chmod(info.st_mode | stat.S_IWRITE)
+            time.sleep(0.05 * (attempt + 1))
