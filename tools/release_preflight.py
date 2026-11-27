@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import string
 import tomllib
@@ -104,13 +105,30 @@ def main() -> None:
     parser.add_argument("--plugins", type=Path, default=Path("plugin-dist"))
     parser.add_argument("--assets", type=Path, default=Path("release-assets"))
     parser.add_argument("--notes", type=Path, default=Path("release-notes.md"))
+    parser.add_argument("--build-manifest", type=Path, help="Write a new JSON inventory outside the archive directories")
     parser.add_argument("--tag", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
-    validate_archives(args.root, args.core, args.plugins, args.assets)
+    manifest: Path | None = args.build_manifest
+    if manifest is not None:
+        target = manifest.resolve()
+        notes_target = args.notes.resolve()
+        if target == notes_target:
+            parser.error("--build-manifest must not be the release notes")
+        inputs = (args.core.resolve(), args.plugins.resolve(), args.assets.resolve())
+        if any(output.is_relative_to(directory) for output in (target, notes_target) for directory in inputs):
+            parser.error("--build-manifest and --notes must be outside the release input directories")
+        if manifest.exists() or manifest.is_symlink():
+            parser.error("--build-manifest: File exists; use a new output path")
+    inventory = verified_inventory(args.root, args.core, args.plugins, args.assets)
     notes = render_notes(args.root, args.tag, args.repository, args.commit)
     args.notes.write_text(notes, encoding="utf-8")
+    if manifest is not None:
+        # Pass this flat mapping directly to the offline diagnostics' --inventory.
+        payload = json.dumps(inventory, sort_keys=True, indent=2) + "\n"
+        with manifest.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(payload)
     print("release preflight OK: ten archives, exact SHA-256 inventory, nonempty notes")
 
 

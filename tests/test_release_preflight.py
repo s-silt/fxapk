@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tools.release_preflight import PROJECTS, archive_names, projects, render_notes, validate_archives
 
@@ -122,6 +126,88 @@ def test_workflow_gates_before_upload_without_rebuilding() -> None:
     assert workflow.index("tools/release_smoke.py") < gate
     assert gate < workflow.index("uses: pypa/gh-action-pypi-publish") < workflow.index("gh release create")
     assert "python -m build" not in workflow[gate:]
+
+
+def test_workflow_retains_manifest_before_publishing() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["publish"]["steps"]
+    gate = next(i for i, step in enumerate(steps) if "tools/release_preflight.py" in step.get("run", ""))
+    upload = steps[gate + 1]
+    path = "release-build-manifest.json"
+    assert f"--build-manifest {path}" in steps[gate]["run"]
+    assert upload["uses"].startswith("actions/upload-artifact@")
+    assert upload["with"]["path"] == path
+    assert all(part in upload["with"]["name"] for part in (
+        "${{ github.sha }}", "${{ github.run_id }}", "${{ github.run_attempt }}",
+    ))
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert not {"if", "continue-on-error"} & upload.keys()
+    assert "continue-on-error" not in workflow["jobs"]["publish"]
+    assert steps[gate + 2]["uses"].startswith("pypa/gh-action-pypi-publish@")
+    assert "gh release create" in steps[gate + 3]["run"]
+    assert path not in steps[gate + 3]["run"]
+
+
+def _preflight(bundle: Path, output: Path, *, notes: str = "release-notes.md") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-I", str(ROOT / "tools/release_preflight.py"),
+         "--tag", "v" + projects(bundle)[0]["version"], "--repository", "example/synthetic", "--commit", "a" * 40,
+         "--notes", notes, "--build-manifest", str(output)],
+        cwd=bundle, capture_output=True, text=True, encoding="utf-8", timeout=20, check=False,
+    )
+
+
+def test_cli_build_manifest_matches_exact_inventory(bundle: Path) -> None:
+    from tools.release_state_probe import _inventory_valid
+
+    path = bundle / "first.json"
+    result = _preflight(bundle, path)
+    assert result.returncode == 0, result.stderr
+    assert (bundle / "release-notes.md").is_file()
+    expected = {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in (bundle / "release-assets").iterdir()}
+    assert len(expected) == 11 and "SHA256SUMS.txt" in expected
+    assert json.loads(path.read_bytes()) == expected
+    assert _inventory_valid(json.loads(path.read_bytes()))
+    second = bundle / "second.json"
+    result = _preflight(bundle, second)
+    assert result.returncode == 0, result.stderr
+    assert second.read_bytes() == path.read_bytes()
+    assert len(list((bundle / "release-assets").iterdir())) == 11
+
+
+@pytest.mark.parametrize("failure", ["archive", "notes", "unwritable", "stale", "inside_assets", "same_as_notes"])
+def test_cli_rejects_untrustworthy_manifest_output(bundle: Path, failure: str) -> None:
+    path = bundle / "manifest.json"
+    diagnostic = {
+        "archive": "staged archives differ",
+        "notes": "missing release CHANGELOG section",
+        "unwritable": "No such file or directory",
+        "stale": "File exists",
+        "inside_assets": "must be outside the release input directories",
+        "same_as_notes": "must not be the release notes",
+    }[failure]
+    if failure == "archive":
+        name = sorted(archive_names(projects(bundle)[0]))[0]
+        (bundle / "release-assets" / name).write_bytes(b"changed synthetic archive")
+        checksum(bundle)
+    elif failure == "notes":
+        (bundle / "CHANGELOG.md").write_text("## 0.0.0\nold\n", encoding="utf-8")
+    elif failure == "unwritable":
+        path = bundle / "missing-parent" / "manifest.json"
+    elif failure == "stale":
+        path.write_text("previous attempt", encoding="utf-8")
+    elif failure == "inside_assets":
+        path = bundle / "release-assets" / "manifest.json"
+    elif failure == "same_as_notes":
+        path = bundle / "release-notes.md"
+    result = _preflight(bundle, path)
+    assert result.returncode != 0
+    assert diagnostic in result.stderr
+    assert "release preflight OK" not in result.stdout
+    if failure == "stale":
+        assert path.read_text(encoding="utf-8") == "previous attempt"
+    else:
+        assert not path.exists()
 
 
 def test_cli_writes_notes_only_after_successful_gate(bundle: Path, monkeypatch: pytest.MonkeyPatch) -> None:
