@@ -1,7 +1,9 @@
 """Last observed harness marker, not a timeout cause or process-exit diagnosis."""
 from __future__ import annotations
 
+from pathlib import Path
 import subprocess
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -29,11 +31,15 @@ def last_observed_stage(stderr: bytes | str | None) -> str:
 
 
 def run_node_harness(node: str, program: str) -> subprocess.CompletedProcess[str]:
-    """Keep the existing invocation/10s budget; replace only timeout rendering."""
-    try:
-        return subprocess.run([node], input=program, capture_output=True, text=True, timeout=10)
-    except subprocess.TimeoutExpired as error:
-        stage = last_observed_stage(error.stderr)
+    """Run the synthetic script without waiting for stdin EOF to start evaluation."""
+    with TemporaryDirectory(prefix="fxapk-node-harness-") as directory:
+        script = Path(directory) / "harness.cjs"
+        script.write_bytes(program.encode("utf-8"))
+        try:
+            return subprocess.run([node, str(script)], stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, timeout=10)
+        except subprocess.TimeoutExpired as error:
+            stage = last_observed_stage(error.stderr)
     # Outside the except block: no raw TimeoutExpired context, cmd or streams.
     pytest.fail("node-harness-timeout: reason=subprocess_timeout "
                 f"last_observed_stage={stage} failure_cause=unknown", pytrace=False)

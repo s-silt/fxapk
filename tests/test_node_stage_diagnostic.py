@@ -67,7 +67,32 @@ def test_timeout_keeps_budget_and_exposes_only_observed_stage(monkeypatch, captu
                               f"last_observed_stage={expected} failure_cause=unknown")
     assert new.value.__context__ is None
     assert new.value.pytrace is False
-    assert calls[0] == calls[1]
+    (argv,), kwargs = calls[1]
+    assert argv[0] == "synthetic-node"
+    assert not Path(argv[1]).exists()
+    assert kwargs == {"stdin": subprocess.DEVNULL, "capture_output": True, "text": True, "timeout": 10}
+
+
+def test_harness_runs_utf8_commonjs_file_without_stdin(monkeypatch):
+    program = "process.stdout.write('字');"
+    children = []
+
+    def require_file(argv, **kwargs):
+        assert len(argv) == 2
+        node, filename = argv
+        script = Path(filename)
+        children.append(script)
+        assert node == "synthetic-node"
+        assert script.suffix == ".cjs"
+        assert script.read_bytes() == program.encode("utf-8")
+        assert kwargs == {"stdin": subprocess.DEVNULL, "capture_output": True, "text": True, "timeout": 10}
+        return subprocess.CompletedProcess(argv, 0, "synthetic output", "")
+
+    monkeypatch.setattr(diagnostic.subprocess, "run", require_file)
+    result = diagnostic.run_node_harness("synthetic-node", program)
+    assert result.stdout == "synthetic output"
+    assert len(children) == 1
+    assert not children[0].parent.exists()
 
 
 def test_normal_and_nonzero_results_are_unchanged(monkeypatch):
