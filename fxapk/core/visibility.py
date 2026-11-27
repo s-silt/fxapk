@@ -122,7 +122,9 @@ _INPUT_KEYS_BY_SOURCE: dict[str, tuple[str, ...]] = {
         "resource_files_read_failed", "resource_listing_failed",
         "file_read_visibility", "web_capture_visibility",
     ),
-    "runtime": ("runtime_merged", "capture_quality", "capture_signals", "runtime_report_input"),
+    "runtime": (
+        "runtime_merged", "capture_quality", "capture_signals", "runtime_report_input", "runtime_merge_steps",
+    ),
 }
 
 
@@ -802,6 +804,16 @@ def _runtime_visibility(meta: dict) -> tuple[str, list[str]]:
     runtime_input = meta.get("runtime_report_input")
     if isinstance(runtime_input, dict) and runtime_input.get("status") in {"unavailable", "partial"}:
         return VIS_PARTIAL, ["运行时报告读取失败或有无效事件；不能将缺失解释为无行为"]
+    merge_steps = meta.get("runtime_merge_steps")
+    if isinstance(merge_steps, dict):
+        gaps = sorted(
+            str(name) for name, entry in merge_steps.items()
+            if isinstance(entry, dict) and entry.get("status") in {"error", "skipped"}
+        )
+        if gaps:
+            return VIS_PARTIAL, [
+                f"运行时并回子步骤失败或未执行（{'、'.join(gaps)}）；对应结果不可用，不能将缺失解释为无行为"
+            ]
     if not (meta.get("runtime_merged") or meta.get("capture_quality") or meta.get("capture_signals")):
         return VIS_UNAVAILABLE, ["未做运行时观测（纯静态分析）"]
 

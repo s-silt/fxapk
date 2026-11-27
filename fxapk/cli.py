@@ -2602,11 +2602,12 @@ def _run_dynamic_after_static(
         if delivery_sink is not None:
             delivery_sink.append(written)
 
-    # 抓包成功（done）才把运行时端点并回主报告并重渲；skipped/error 不调 merge。
+    # 抓包跑完（done）或跑完但无可用证据（degraded）都并回主报告并重渲：degraded 的采集质量与
+    # 读取缺口必须进报告，否则可见性会把「抓过、没拿到」误记成「未做运行时观测」。skipped/error 不调 merge。
     status = capture_result.get("status") if isinstance(capture_result, dict) else None
-    from fxapk.dynamic import STATUS_DONE
+    from fxapk.dynamic import STATUS_DEGRADED, STATUS_DONE
 
-    if status != STATUS_DONE:
+    if status not in (STATUS_DONE, STATUS_DEGRADED):
         return
 
     _merge_runtime_into_report(

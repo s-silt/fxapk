@@ -1379,8 +1379,14 @@ def _merge_capture_stage(
     report_paths: list[str],
     delivery_sink: list[object],
 ) -> None:
-    """Merge existing capture reports in order; only multi-round output has a hash gate."""
-    if capture_step["status"] == _DONE and report is not None and capture_round_paths:
+    """Merge existing capture reports in order; only multi-round output has a hash gate.
+
+    Single-round degraded capture still produced a runtime report: merge it so its quality and
+    input gaps reach the report instead of reading as "no runtime observation".
+    """
+    status = capture_step["status"]
+    mergeable = status == _DONE or (round_records is None and status == _DEGRADED)
+    if mergeable and report is not None and capture_round_paths:
         for round_path in capture_round_paths:
             namespace = None
             if round_records is not None:

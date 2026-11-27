@@ -518,6 +518,17 @@ def test_analyze_dynamic_calls_merge_after_capture_done(monkeypatch):
     assert args["endpoints"] is None  # merge 在缓存作用域内自动加载
 
 
+def test_analyze_dynamic_merges_degraded_single_round_capture(monkeypatch):
+    _patch_unpack(monkeypatch)
+    _patch_capture(monkeypatch, {**_done_result(["outdir/runtime_report.json"]), "status": STATUS_DEGRADED})
+    merge_calls = _patch_merge(monkeypatch)
+
+    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
+
+    assert merge_calls["rerender_called"] is True
+    assert merge_calls["rerender_args"]["runtime_report_path"] == "outdir/runtime_report.json"
+
+
 def test_analyze_dynamic_merge_uses_runtime_report_json(monkeypatch):
     """capture report_paths 含 runtime_report.json 时，优先用它作为并入来源路径。"""
     _patch_unpack(monkeypatch)

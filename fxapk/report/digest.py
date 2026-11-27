@@ -609,6 +609,8 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
                 "claim": c,
                 "label": _claim_field(claims, c, "label", c),
                 "missing_sources": _claim_field(claims, c, "missing_sources", []),
+                # 「未评估」与「查过、看不见」分开给：消费方补法不同，不能并成一个缺口列表。
+                "unassessed_sources": _claim_field(claims, c, "unassessed_sources", []),
             }
             for c in blocked
         ],

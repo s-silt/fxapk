@@ -2707,6 +2707,37 @@ def runtime_scope_verified(report: Report, payload: object, evidence_namespace: 
     )
 
 
+# 多轮/重复合并时缺口的严重度：先前轮次记下的缺口不得被后一轮的正常结局覆盖抹掉。
+_INPUT_GAP_RANK = {"partial": 1, "unavailable": 2}
+_STEP_GAP_RANK = {"skipped": 1, "error": 2}
+
+
+def _gap_rank(entry: object, ranks: Mapping[str, int]) -> int:
+    status = entry.get("status") if isinstance(entry, Mapping) else None
+    return ranks.get(status, 0) if isinstance(status, str) else 0
+
+
+def _retain_input_receipt(prior: object, current: dict[str, Any]) -> dict[str, Any]:
+    """保留更严重（同级则更早）的读取缺口回执；无先前缺口时用本轮回执。"""
+    prior_rank = _gap_rank(prior, _INPUT_GAP_RANK)
+    if prior_rank and prior_rank >= _gap_rank(current, _INPUT_GAP_RANK) and isinstance(prior, Mapping):
+        return dict(prior)
+    return current
+
+
+def _retain_merge_steps(prior: object, current: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    """逐子步骤保留更严重（同级则更早）的结局；先前轮次独有的步骤记录原样保留。"""
+    merged: dict[str, dict[str, str]] = {
+        name: dict(entry) for name, entry in prior.items()
+        if isinstance(name, str) and isinstance(entry, Mapping)
+    } if isinstance(prior, Mapping) else {}
+    for name, entry in current.items():
+        prior_rank = _gap_rank(merged.get(name), _STEP_GAP_RANK)
+        if not prior_rank or prior_rank < _gap_rank(entry, _STEP_GAP_RANK):
+            merged[name] = entry
+    return merged
+
+
 def merge_and_rerender(
     report: Report, endpoints: list[Endpoint] | None, out_dir: str, base: str = "report", *,
     formats: list[str] | None = None, on_progress: Callable[[str], None] | None = None,
@@ -2786,7 +2817,9 @@ def _merge_and_rerender(
         if variant:
             stats["runtime_variant"] = variant
         payload = _read_runtime_payload(rr_path)
-        report.meta["runtime_report_input"] = input_receipt(payload)
+        report.meta["runtime_report_input"] = _retain_input_receipt(
+            report.meta.get("runtime_report_input"), input_receipt(payload),
+        )
         ui_observations = payload.get("ui_observations") if isinstance(payload, Mapping) else None
         if isinstance(ui_observations, list):
             existing = report.meta.get("ui_observations")
@@ -2852,7 +2885,9 @@ def _merge_and_rerender(
             for dest_key, src_key in step.stat_map:
                 stats[dest_key] = sub.get(src_key, 0)
         # 落 meta 供出口读：数字仍在，但 status=error 时那些数字**不可用**（不是「零」）。
-        report.meta["runtime_merge_steps"] = step_status
+        report.meta["runtime_merge_steps"] = _retain_merge_steps(
+            report.meta.get("runtime_merge_steps"), step_status,
+        )
 
     if report.meta.get("runtime_observations_truncated"):
         raise ValueError("runtime_observation_budget_exceeded")
