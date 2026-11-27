@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -222,6 +223,84 @@ def test_cli_build_manifest_matches_exact_inventory(bundle: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert second.read_bytes() == path.read_bytes()
     assert len(list((bundle / "release-assets").iterdir())) == 11
+
+
+def test_preflight_manifest_drives_strict_offline_diagnosis(bundle: Path) -> None:
+    manifest = bundle / "release-build-manifest.json"
+    run = _preflight(bundle, manifest)
+    assert run.returncode == 0, run.stderr
+    raw_inventory = manifest.read_bytes()
+    version = projects(bundle)[0]["version"]
+    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+    downloads = bundle / "github-download"
+    shutil.copytree(bundle / "release-assets", downloads)
+    assets = [
+        {"id": asset_id, "name": file.name, "size": file.stat().st_size, "state": "uploaded",
+         "digest": "sha256:" + hashlib.sha256(file.read_bytes()).hexdigest()}
+        for asset_id, file in enumerate(sorted(downloads.iterdir()), 1)
+    ]
+    observed = {"observed_at": before.isoformat(), "capture_id": "synthetic-release"}
+    repo, commit = 1234, "a" * 40
+    tag = f"v{version}"
+    names = archive_names(projects(bundle)[0])
+
+    def snapshot(host: str, path: str, body: dict[str, object]) -> dict[str, object]:
+        return {
+            **observed, "http_status": 200, "body": body,
+            "release_request": {"method": "GET", "request_origin": host, "response_origin": host,
+                                "path": path, "response_path": path},
+        }
+
+    github = snapshot("https://api.github.com", f"/repos/s-silt/fxapk/releases/tags/{tag}", {
+        "id": 17, "tag_name": tag, "draft": False, "assets": assets,
+        "published_at": (before - timedelta(days=1)).isoformat(),
+    })
+    github.update(
+        repository_id=repo,
+        tag_observation={**observed, "repository_id": repo, "tag": tag, "peeled_tag_commit": commit},
+        download_observation={**observed, "repository_id": repo, "release_id": 17,
+                              "asset_ids": {a["name"]: a["id"] for a in assets}},
+    )
+    pypi = snapshot("https://pypi.org", f"/pypi/fxapk/{version}/json", {
+        "info": {"name": "fxapk", "version": version},
+        "urls": [{"filename": name, "yanked": False,
+                  "digests": {"sha256": hashlib.sha256((bundle / "dist" / name).read_bytes()).hexdigest()}}
+                 for name in sorted(names)],
+    })
+    args = [sys.executable, "-m", "tools.release_channel_metadata", "--version", version,
+            "--repository-id", str(repo), "--github-commit", commit,
+            "--downloaded", str(downloads), "--require-evidence", "--inventory", str(manifest)]
+    for channel, capture in (("github", github), ("pypi", pypi)):
+        path = bundle / f"{channel}.json"
+        path.write_text(json.dumps(capture), encoding="utf-8")
+        args.extend((f"--{channel}", str(path)))
+
+    def diagnose() -> tuple[int, dict[str, object]]:
+        result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                                timeout=20, check=False)
+        assert not result.stderr
+        receipt = json.loads(result.stdout)
+        assert manifest.read_bytes() == raw_inventory
+        assert receipt["input_sha256"]["inventory"] == hashlib.sha256(raw_inventory).hexdigest()
+        assert receipt["metadata_comparison"]["state"] == "metadata_agrees"
+        return result.returncode, receipt
+
+    code, receipt = diagnose()
+    assert (code, receipt["state"]) == (0, "evidence_checks_passed")
+    for name in (min(archive_names(projects(bundle)[1])), "SHA256SUMS.txt"):
+        name_path = downloads / name
+        original = name_path.read_bytes()
+        changed = bytes([original[0] ^ 1]) + original[1:]
+        name_path.write_bytes(changed)
+        code, receipt = diagnose()
+        assert (code, receipt["state"]) == (2, "conflict")
+        evidence = receipt["github_evidence"]
+        assert isinstance(evidence, dict)
+        assert evidence["reason"] == "download_digest_mismatch"
+        assert evidence["download_conflict"] == {
+            "asset_name": name, "observed_sha256": hashlib.sha256(changed).hexdigest(),
+        }
+        name_path.write_bytes(original)
 
 
 def test_cli_preserves_notes_symlink_when_writing_build_manifest(bundle: Path) -> None:
