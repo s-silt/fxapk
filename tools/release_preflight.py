@@ -146,6 +146,8 @@ def main() -> None:
             parser.error("--build-manifest and --notes must be outside the release input directories")
         if manifest.exists() or manifest.is_symlink():
             parser.error("--build-manifest: File exists; use a new output path")
+        if not manifest.parent.is_dir():
+            parser.error("--build-manifest parent directory does not exist or is not a directory")
     inventory = verified_inventory(args.root, args.core, args.plugins, args.assets)
     notes = render_notes(args.root, args.tag, args.repository, args.commit)
     if manifest is None:

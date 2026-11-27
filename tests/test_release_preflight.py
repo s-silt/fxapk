@@ -138,7 +138,7 @@ def test_workflow_retains_manifest_before_publishing() -> None:
     assert upload["uses"].startswith("actions/upload-artifact@")
     assert upload["with"]["path"] == path
     assert all(part in upload["with"]["name"] for part in (
-        "${{ github.sha }}", "${{ github.run_id }}", "${{ github.run_attempt }}",
+        "${{ steps.release-preflight.outputs.commit }}", "${{ github.run_id }}", "${{ github.run_attempt }}",
     ))
     assert upload["with"]["if-no-files-found"] == "error"
     assert not {"if", "continue-on-error"} & upload.keys()
@@ -146,6 +146,50 @@ def test_workflow_retains_manifest_before_publishing() -> None:
     assert steps[gate + 2]["uses"].startswith("pypa/gh-action-pypi-publish@")
     assert "gh release create" in steps[gate + 3]["run"]
     assert path not in steps[gate + 3]["run"]
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_preflight_workflow_names_manifest_after_checked_out_commit(bundle: Path, annotated: bool) -> None:
+    import os
+
+    shell = shutil.which("bash")
+    if shell is None or sys.platform == "win32":
+        pytest.skip("release shell step runs on Ubuntu")
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=bundle, encoding="utf-8", timeout=20).strip()
+
+    git("init")
+    git("-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "commit", "--allow-empty", "-m", "test")
+    commit = git("rev-parse", "HEAD")
+    tag = "v" + projects(bundle)[0]["version"]
+    if annotated:
+        git("-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "tag", "-a", tag, "-m", "test")
+    else:
+        git("tag", tag)
+    event_sha = git("rev-parse", tag)
+    assert (event_sha != commit) is annotated
+    (bundle / "tools").mkdir()
+    shutil.copyfile(ROOT / "tools/release_preflight.py", bundle / "tools/release_preflight.py")
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["publish"]["steps"]
+    gate = next(i for i, step in enumerate(steps) if "tools/release_preflight.py" in step.get("run", ""))
+    output = bundle / "step-output"
+    env = dict(os.environ, PATH=os.pathsep.join((str(Path(sys.executable).parent), os.environ["PATH"])),
+               GITHUB_OUTPUT=str(output), GITHUB_SHA=event_sha, GITHUB_REF_NAME=tag,
+               GITHUB_REPOSITORY="example/synthetic")
+    proc = subprocess.run(
+        [shell, "-e", "-o", "pipefail", "-c", steps[gate]["run"]], cwd=bundle, env=env,
+        capture_output=True, text=True, encoding="utf-8", timeout=20, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert output.read_text(encoding="utf-8") == f"commit={commit}\n"
+    suffix = f"${{{{ steps.{steps[gate]['id']}.outputs.commit }}}}"
+    assert suffix in steps[gate + 1]["with"]["name"]
+    notes = (bundle / "release-notes.md").read_text(encoding="utf-8")
+    assert f"/commit/{commit}" in notes
+    if annotated:
+        assert event_sha not in notes
 
 
 def _preflight(bundle: Path, output: Path, *, notes: str = "release-notes.md") -> subprocess.CompletedProcess[str]:
@@ -198,7 +242,7 @@ def test_cli_rejects_untrustworthy_manifest_output(bundle: Path, failure: str) -
     diagnostic = {
         "archive": "staged archives differ",
         "notes": "missing release CHANGELOG section",
-        "unwritable": "No such file or directory",
+        "unwritable": "--build-manifest parent directory does not exist",
         "stale": "File exists",
         "inside_assets": "must be outside the release input directories",
         "same_as_notes": "must not be the release notes",
