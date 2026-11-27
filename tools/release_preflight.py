@@ -135,22 +135,23 @@ def main() -> None:
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
     manifest: Path | None = args.build_manifest
+    notes_path: Path = args.notes
     if manifest is not None:
         target = manifest.resolve()
-        notes_target = args.notes.resolve()
-        if target == notes_target:
+        notes_path = notes_path.resolve()
+        if target == notes_path:
             parser.error("--build-manifest must not be the release notes")
         inputs = (args.core.resolve(), args.plugins.resolve(), args.assets.resolve())
-        if any(output.is_relative_to(directory) for output in (target, notes_target) for directory in inputs):
+        if any(output.is_relative_to(directory) for output in (target, notes_path) for directory in inputs):
             parser.error("--build-manifest and --notes must be outside the release input directories")
         if manifest.exists() or manifest.is_symlink():
             parser.error("--build-manifest: File exists; use a new output path")
     inventory = verified_inventory(args.root, args.core, args.plugins, args.assets)
     notes = render_notes(args.root, args.tag, args.repository, args.commit)
     if manifest is None:
-        args.notes.write_text(notes, encoding="utf-8")
+        notes_path.write_text(notes, encoding="utf-8")
     else:
-        write_build_outputs(args.notes, notes, manifest, inventory)
+        write_build_outputs(notes_path, notes, manifest, inventory)
     print("release preflight OK: ten archives, exact SHA-256 inventory, nonempty notes")
 
 

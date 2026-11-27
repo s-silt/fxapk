@@ -175,6 +175,23 @@ def test_cli_build_manifest_matches_exact_inventory(bundle: Path) -> None:
     assert len(list((bundle / "release-assets").iterdir())) == 11
 
 
+def test_cli_preserves_notes_symlink_when_writing_build_manifest(bundle: Path) -> None:
+    notes = bundle / "original.md"
+    notes.write_text("previous notes", encoding="utf-8")
+    alias = bundle / "alias.md"
+    try:
+        alias.symlink_to(notes.name)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    manifest = bundle / "manifest.json"
+    result = _preflight(bundle, manifest, notes=alias.name)
+    assert result.returncode == 0, result.stderr
+    assert alias.is_symlink()
+    assert "### 本版变更" in notes.read_text(encoding="utf-8")
+    assert len(json.loads(manifest.read_bytes())) == 11
+
+
 @pytest.mark.parametrize("failure", ["archive", "notes", "unwritable", "stale", "inside_assets", "same_as_notes"])
 def test_cli_rejects_untrustworthy_manifest_output(bundle: Path, failure: str) -> None:
     path = bundle / "manifest.json"
@@ -233,13 +250,16 @@ def test_preflight_output_failure_preserves_previous_notes_and_allows_retry(
     write_text = Path.write_text
     replace = os.replace
 
-    def broken_write(path, text, *args, **kwargs):
+    def broken_write(
+        path: Path, text: str, encoding: str | None = None,
+        errors: str | None = None, newline: str | None = None,
+    ) -> int:
         if text.startswith("{"):
-            write_text(path, text[:8], *args, **kwargs)
+            write_text(path, text[:8], encoding=encoding, errors=errors, newline=newline)
             raise OSError("synthetic incomplete manifest write")
-        return write_text(path, text, *args, **kwargs)
+        return write_text(path, text, encoding=encoding, errors=errors, newline=newline)
 
-    def broken_replace(src, dst):
+    def broken_replace(src: Path, dst: Path) -> None:
         if Path(dst) == notes:
             raise OSError("synthetic notes installation failure")
         return replace(src, dst)
