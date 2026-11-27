@@ -1238,8 +1238,10 @@ _CLASS_DECL_RE = re.compile(
 #: 要收敛它需要一条「疑似方法声明」的宽松探测正则，而宽松正则的误报会把大量样本
 #: 打成 partial——收益与代价都要先量化，故留作已知边界而非静默假装不存在。
 _METHOD_DECL_RE = re.compile(
-    r"^\s*(?:(?:public|private|protected|static|final|abstract|synchronized|native|strictfp)\s+)*"
-    r"[\w$<>\[\], ?]+\s+([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?:throws[^{]*)?\{"
+    r"^\s*+(?:(?:public|private|protected|static|final|abstract|synchronized|native|strictfp)\s++)*+"
+    # 类型以非空白开头和结尾；泛型中的空格只分隔类型片段，不与签名分隔符竞争。
+    r"[\w$<>\[\],?]++(?: ++[\w$<>\[\],?]++)*\s++"
+    r"([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?:throws[^{]*)?\{"
 )
 #: 构造器：无返回类型的 `Name(params) {`；是否真为构造器由「名字==类简单名」判定。
 _CTOR_DECL_RE = re.compile(

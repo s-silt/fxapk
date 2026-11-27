@@ -116,9 +116,11 @@ _IPV4_RE = re.compile(r"""(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?(?![
 _DOMAIN_RE = re.compile(
     r"""(?<![\w@./-])((?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,24})(?![\w.-])"""
 )
-# 硬编码密钥键值：key = "value" / "key":"value"。
+# 硬编码密钥键值：key = "value" / "key":"value"。与 js_bundle 一样只从键名边界开始，
+# 并限制键名长度，避免把普通长标识符的每个后缀都重新当成候选。
 _SECRET_KV_RE = re.compile(
-    r"""["']?(?P<key>[A-Za-z_][A-Za-z0-9_]*)["']?\s*[:=]\s*["'](?P<val>[^"'\n]{8,512})["']"""
+    r"""(?<![\w$])["']?(?P<key>[A-Za-z_][A-Za-z0-9_]{0,63})["']?"""
+    r"""\s*[:=]\s*["'](?P<val>[^"'\n]{8,512})["']"""
 )
 _SECRET_HINTS: tuple[str, ...] = (
     "secret", "appkey", "app_key", "appsecret", "app_secret", "access_key",
@@ -1654,13 +1656,23 @@ def _build_jadx_receipt(
 
 
 def _make_tree_writable(path: str) -> None:
-    """尽力把整棵树改成可写（Windows 只读位会让 rmtree 失败）；单点失败继续。"""
-    for dirpath, dirnames, filenames in os.walk(path):
-        for name in dirnames + filenames:
-            try:
-                os.chmod(os.path.join(dirpath, name), stat.S_IWRITE | stat.S_IREAD)
-            except OSError:
+    """尽力修复私有临时树权限；目录可写且可遍历，文件仅所有者可读写。"""
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        try:
+            info = os.lstat(current)
+            # 不跟随软链/重解析点，也不改可能由临时树外共享的文件权限。
+            if getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
                 continue
+            if stat.S_ISDIR(info.st_mode):
+                os.chmod(current, 0o700)
+                with os.scandir(current) as entries:
+                    pending.extend(entry.path for entry in entries)
+            elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                os.chmod(current, 0o600)
+        except OSError:
+            continue
 
 
 def _remove_tree_checked(path: str) -> dict:

@@ -23,6 +23,7 @@ from fxapk.core.jadx_index import (
     JadxIndexError,
     JadxIndexManifest,
     UsageHit,
+    _METHOD_DECL_RE,
     build_key_material,
     derive_index_key,
     derive_shard_key,
@@ -31,6 +32,25 @@ from fxapk.core.jadx_index import (
 from fxapk.core.recognition_codec import canonical_json_v1
 
 _OPTS = "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        (
+            "    public static Map<String, List<Integer>>  select(final int n) throws IOException {",
+            ("select", "final int n"),
+        ),
+        (" \tfinal\tString\tlabel(String... values) {", ("label", "String... values")),
+        ("    <T extends Number> T pick(T value) {", ("pick", "T value")),
+        ("    Model() {", None),  # A constructor has no method return type.
+    ],
+)
+def test_method_declaration_separates_type_and_whitespace(
+    line: str, expected: tuple[str, str] | None,
+) -> None:
+    match = _METHOD_DECL_RE.match(line)
+    assert (match.group(1, 2) if match else None) == expected
 
 
 def _digest(data: bytes) -> str:
