@@ -12,6 +12,7 @@ from zipfile import ZipFile
 
 import pytest
 
+from tools import verify_release_license
 from tools.release_preflight import PROJECTS, archive_names, projects
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +74,11 @@ def test_accepts_all_ten_archives(archives: Path) -> None:
 @pytest.mark.parametrize(
     ("defect", "diagnostic"),
     [
+        ("legacy-version", "one supported Metadata-Version"),
+        ("duplicate-version", "one supported Metadata-Version"),
+        ("invalid-version", "one supported Metadata-Version"),
+        ("legacy-license-field", "legacy License field"),
+        ("oversized-metadata", "member exceeds"),
         ("no-expression", "exactly one License-Expression: MIT"),
         ("duplicate-header", "exactly one License-File: LICENSE"),
         ("missing-license", "expected one regular"),
@@ -84,7 +90,17 @@ def test_rejects_defective_archive(archives: Path, name: str, defect: str, diagn
     metadata = METADATA
     source = (ROOT / "LICENSE").read_bytes()
     license_bytes: bytes | None = source
-    if defect == "no-expression":
+    if defect == "legacy-version":
+        metadata = metadata.replace(b"2.4", b"2.3")
+    elif defect == "duplicate-version":
+        metadata = b"Metadata-Version: 2.4\n" + metadata
+    elif defect == "invalid-version":
+        metadata = metadata.replace(b"2.4", b"2.invalid")
+    elif defect == "legacy-license-field":
+        metadata = b"License: MIT\n" + metadata
+    elif defect == "oversized-metadata":
+        metadata += b"x" * (256 * 1024)
+    elif defect == "no-expression":
         metadata = metadata.replace(b"License-Expression: MIT\n", b"")
     elif defect == "duplicate-header":
         metadata = metadata.replace(b"\n\n", b"\nLicense-File: LICENSE\n\n")
@@ -106,3 +122,21 @@ def test_rejects_missing_last_plugin_sdist(archives: Path) -> None:
     result = _verify(archives)
     assert result.returncode == 1
     assert name in result.stderr
+
+
+@pytest.mark.parametrize("name", [CORE_WHEEL, CORE_SDIST])
+def test_rejects_archive_member_count_over_budget(
+    archives: Path, monkeypatch: pytest.MonkeyPatch, name: str,
+) -> None:
+    monkeypatch.setattr(verify_release_license, "MAX_MEMBERS", 1)
+    reader = verify_release_license.wheel_contents if name.endswith(".whl") else verify_release_license.sdist_contents
+    with pytest.raises(ValueError, match="member count budget"):
+        reader(archives / name)
+
+
+def test_caps_tar_decompression_before_reading_more_members(
+    archives: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_release_license, "MAX_TAR_BYTES", 1024)
+    with pytest.raises(ValueError, match="decompression budget"):
+        verify_release_license.sdist_contents(archives / CORE_SDIST)

@@ -35,5 +35,7 @@ def test_rehearsal_checks_built_archives_before_preflight() -> None:
     build = next(step["run"] for step in steps if step.get("id") == "preflight")
     # Keep the exact lower bound and test the packages that preflight will inventory.
     assert "'setuptools==77.0.3'" in build
+    assert "python -m build --no-isolation" in build.splitlines()
+    assert '[sys.executable, "-m", "build", "--no-isolation", str(Path(project).parent)' in build
     assert build.index("cp dist/") < build.index("python -m tools.verify_release_license")
     assert build.index("python -m tools.verify_release_license") < build.index("python tools/release_preflight.py")
