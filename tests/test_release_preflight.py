@@ -234,15 +234,20 @@ def test_preflight_manifest_drives_strict_offline_diagnosis(bundle: Path) -> Non
     before = datetime.now(timezone.utc) - timedelta(seconds=1)
     downloads = bundle / "github-download"
     shutil.copytree(bundle / "release-assets", downloads)
-    assets = [
+    names = archive_names(projects(bundle)[0])
+    assets: list[dict[str, str | int]] = [
         {"id": asset_id, "name": file.name, "size": file.stat().st_size, "state": "uploaded",
-         "digest": "sha256:" + hashlib.sha256(file.read_bytes()).hexdigest()}
+         **({"digest": "sha256:" + hashlib.sha256(file.read_bytes()).hexdigest()}
+            if file.name in names else {})}
         for asset_id, file in enumerate(sorted(downloads.iterdir()), 1)
     ]
     observed = {"observed_at": before.isoformat(), "capture_id": "synthetic-release"}
     repo, commit = 1234, "a" * 40
     tag = f"v{version}"
-    names = archive_names(projects(bundle)[0])
+
+    # Only the independent build inventory supplies the non-core digests.
+    non_core = {min(archive_names(projects(bundle)[1])), "SHA256SUMS.txt"}
+    assert {asset["name"] for asset in assets if "digest" in asset} == names
 
     def snapshot(host: str, path: str, body: dict[str, object]) -> dict[str, object]:
         return {
@@ -287,7 +292,7 @@ def test_preflight_manifest_drives_strict_offline_diagnosis(bundle: Path) -> Non
 
     code, receipt = diagnose()
     assert (code, receipt["state"]) == (0, "evidence_checks_passed")
-    for name in (min(archive_names(projects(bundle)[1])), "SHA256SUMS.txt"):
+    for name in sorted(non_core):
         name_path = downloads / name
         original = name_path.read_bytes()
         changed = bytes([original[0] ^ 1]) + original[1:]
