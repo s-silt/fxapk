@@ -5,13 +5,18 @@
 `SHA256SUMS.txt` 自身，共十一项。清单是 Actions artifact，不加入 GitHub Release
 附件或 PyPI 包；清单缺失或留存失败会阻断本次发布上传。
 
-按标签对应的完整提交、发布 run ID 和实际尝试编号选取原始构建清单：
+按标签对应的完整提交、发布 run ID 和实际尝试编号选取原始构建清单。
+令 `EVIDENCE_DIR` 指向已存在的证据根目录；每次尝试只下载到新建的子目录：
 
 ```sh
-gh run download "$RUN_ID" --repo s-silt/fxapk \
-  --name "release-build-manifest-${COMMIT}-${RUN_ID}-${ATTEMPT}" \
-  --dir "$EVIDENCE_DIR"
+artifact="release-build-manifest-${COMMIT}-${RUN_ID}-${ATTEMPT}"
+destination="$EVIDENCE_DIR/$artifact"
+mkdir -- "$destination" &&
+  gh run download "$RUN_ID" --repo s-silt/fxapk --name "$artifact" --dir "$destination"
 ```
+
+同名目录已存在时停止，不覆盖原件；下载失败后不要采信该目录中的文件，
+需要重取时改用新的证据根目录。记录 artifact 名称和下载文件的 SHA-256。
 
 核对 run 属于 `release.yml`、标签和提交一致，并确认所选尝试确实生成了待核对的
 发布产物。清单在上传前留存，不证明发布成功；重跑可能重新构建但跳过已发布版本，
