@@ -16,10 +16,14 @@ permissions:
 
 jobs:
   manifest-roundtrip:
-    name: Upload and read back build manifest (no publish)
+    name: Build and upload manifest (no publish)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-name: ${{ steps.preflight.outputs.artifact-name }}
+      manifest-sha256: ${{ steps.preflight.outputs.manifest-sha256 }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -52,26 +56,47 @@ jobs:
           python tools/release_preflight.py --tag "$tag" --repository "$GITHUB_REPOSITORY" \
             --commit "$commit" --build-manifest release-build-manifest.json
           sha256sum release-build-manifest.json
-          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
-          printf 'destination=%s\n' "$(mktemp -d "$RUNNER_TEMP/fxapk-manifest.XXXXXX")" >> "$GITHUB_OUTPUT"
+          digest=$(sha256sum release-build-manifest.json | cut -d ' ' -f 1)
+          printf 'manifest-sha256=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          printf 'artifact-name=rehearsal-release-build-manifest-%s-%s-%s\n' \
+            "$commit" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - name: Upload rehearsal manifest only
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rehearsal-release-build-manifest-${{ steps.preflight.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.preflight.outputs.artifact-name }}
           path: release-build-manifest.json
           if-no-files-found: error
-      - name: Download that exact artifact ID
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          artifact-ids: ${{ steps.upload.outputs.artifact-id }}
-          path: ${{ steps.preflight.outputs.destination }}
-          digest-mismatch: error
-      - name: Verify original and returned bytes
+
+  manifest-readback:
+    name: Read back manifest with gh (no publish)
+    needs: manifest-roundtrip
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Download the retained manifest and check its original digest
         env:
-          DESTINATION: ${{ steps.preflight.outputs.destination }}
-          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.manifest-roundtrip.outputs.artifact-id }}
+          ARTIFACT_NAME: ${{ needs.manifest-roundtrip.outputs.artifact-name }}
+          MANIFEST_SHA256: ${{ needs.manifest-roundtrip.outputs.manifest-sha256 }}
         run: |
-          cmp -- release-build-manifest.json "$DESTINATION/release-build-manifest.json"
-          printf 'artifact_id=%s\n' "$ARTIFACT_ID"
-          sha256sum "$DESTINATION/release-build-manifest.json"
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && -n "$ARTIFACT_NAME" ]]
+          for delay in 0 2 4 8 16; do
+            sleep "$delay"
+            destination=$(mktemp -d "$RUNNER_TEMP/fxapk-manifest.XXXXXX")
+            if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+                --name "$ARTIFACT_NAME" --dir "$destination"; then
+              actual=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+                --jq '[.name, (.workflow_run.id | tostring)] | @tsv')
+              [[ "$actual" == "$ARTIFACT_NAME"$'\t'"$GITHUB_RUN_ID" ]]
+              printf '%s  %s\n' "$MANIFEST_SHA256" "$destination/release-build-manifest.json" |
+                sha256sum --check --strict
+              printf 'artifact_id=%s manifest_sha256=%s\n' "$ARTIFACT_ID" "$MANIFEST_SHA256"
+              exit 0
+            fi
+          done
+          echo "::error::Rehearsal artifact did not become downloadable within the bounded retry window."
+          exit 1
