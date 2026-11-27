@@ -156,10 +156,15 @@ def test_preflight_workflow_names_manifest_after_checked_out_commit(bundle: Path
     if shell is None or sys.platform == "win32":
         pytest.skip("release shell step runs on Ubuntu")
 
-    def git(*args: str) -> str:
-        return subprocess.check_output(["git", *args], cwd=bundle, encoding="utf-8", timeout=20).strip()
+    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    git_env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
 
-    git("init")
+    def git(*args: str) -> str:
+        return subprocess.check_output(
+            ["git", *args], cwd=bundle, env=git_env, encoding="utf-8", timeout=20,
+        ).strip()
+
+    git("init", "--template=")
     git("-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "commit", "--allow-empty", "-m", "test")
     commit = git("rev-parse", "HEAD")
     tag = "v" + projects(bundle)[0]["version"]
@@ -175,7 +180,7 @@ def test_preflight_workflow_names_manifest_after_checked_out_commit(bundle: Path
     steps = workflow["jobs"]["publish"]["steps"]
     gate = next(i for i, step in enumerate(steps) if "tools/release_preflight.py" in step.get("run", ""))
     output = bundle / "step-output"
-    env = dict(os.environ, PATH=os.pathsep.join((str(Path(sys.executable).parent), os.environ["PATH"])),
+    env = dict(git_env, PATH=os.pathsep.join((str(Path(sys.executable).parent), git_env.get("PATH", os.defpath))),
                GITHUB_OUTPUT=str(output), GITHUB_SHA=event_sha, GITHUB_REF_NAME=tag,
                GITHUB_REPOSITORY="example/synthetic")
     proc = subprocess.run(
