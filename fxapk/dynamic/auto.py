@@ -975,9 +975,10 @@ def _write_reports(
         requested.append("html")
         target = out_path / f"{base}.html"
         try:
-            from fxapk.report import html as report_html
+            from fxapk.dynamic.merge import publish_html_report
 
-            report_html.render(report, str(target))  # type: ignore[arg-type]
+            # 同目录暂存后原子替换：重渲失败时保留上一次完整写出的 HTML。
+            publish_html_report(report, target)  # type: ignore[arg-type]
             paths.append(str(target))
             written_formats.append("html")
         except Exception:
@@ -1426,6 +1427,23 @@ def _merge_capture_stage(
                             if merge_step["status"] == _DONE else {}
                         )
                         row["decryption_after_merge"] = dict(report.meta.get("runtime_decrypt_stats", {}))
+    elif (
+        round_records is None
+        and status in (_DONE, _DEGRADED)
+        and isinstance(report, Report)
+        and not capture_round_paths
+    ):
+        steps.append(
+            _record_runtime_report_not_listed(
+                report,
+                out_dir=out_dir,
+                base=base,
+                formats=formats,
+                on_progress=on_progress,
+                report_paths=report_paths,
+                delivery_sink=delivery_sink,
+            )
+        )
     else:
         steps.append(
             _step(
@@ -1434,6 +1452,43 @@ def _merge_capture_stage(
                 "抓包未成功或无静态报告，无运行时端点可并入",
             )
         )
+
+
+def _record_runtime_report_not_listed(
+    report: Report,
+    *,
+    out_dir: str,
+    base: str,
+    formats: list[str],
+    on_progress: Callable[[str], None] | None,
+    report_paths: list[str],
+    delivery_sink: list[object],
+) -> StepResult:
+    """单轮抓包 done/degraded 却未列出本次 runtime_report.json：落读取缺口回执，不并入任何旧文件。"""
+    try:
+        from fxapk.core.report_delivery import ReportDelivery
+        from fxapk.dynamic import merge
+
+        stats = merge.record_runtime_report_not_listed(
+            report, out_dir, base, formats=list(formats), on_progress=on_progress,
+        )
+    except AutoCancelled:
+        raise
+    except Exception:  # noqa: BLE001 - 记录缺口失败不破坏已产出静态报告
+        logger.exception("[auto] 记录运行时输入缺口失败")
+        return _step(_STEP_MERGE, _ERROR, "抓包未列出本次 runtime_report.json，且运行时输入缺口未能写入报告")
+    paths = stats.get("report_paths") or []
+    _extend_unique(report_paths, [str(p) for p in paths] if isinstance(paths, list) else [])
+    delivery = stats.get("report_delivery")
+    if delivery is not None:
+        delivery_sink.append(delivery)
+    if isinstance(delivery, ReportDelivery) and delivery.blocks_success():
+        return _step(_STEP_MERGE, _ERROR, "抓包未列出本次 runtime_report.json；运行时输入缺口已记录，但报告重渲未完成")
+    return _step(
+        _STEP_MERGE,
+        _SKIPPED,
+        "抓包未列出本次 runtime_report.json：运行时输入记为不可用，未并入（目录里的旧文件不算本次证据）",
+    )
 
 
 def _verified_merge_namespace(

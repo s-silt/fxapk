@@ -106,6 +106,10 @@ _INSUFFICIENT = frozenset(
 #: 公开别名：closure 判断「这一维是不是**确证盲区**」时用同一份定义，别各写各的。
 INSUFFICIENT = _INSUFFICIENT
 
+#: ``runtime_report_input.reason``：抓包结果为 done/degraded 却没有列出本次写出的 runtime_report.json。
+#: 运行时这一维是「跑了、但没有可读输入」，既不是纯静态，也不是「看过、无行为」。
+RUNTIME_REPORT_NOT_LISTED = "runtime_report_not_listed"
+
 #: 每个可见性维度实际消费的 ``report.meta`` 原始信号键。快照会记录本轮见到的键集合，
 #: 让后续刷新能区分「合法新增信号」与「旧报告被裁掉了部分输入」。
 _INPUT_KEYS_BY_SOURCE: dict[str, tuple[str, ...]] = {
@@ -803,6 +807,10 @@ def _runtime_visibility(meta: dict) -> tuple[str, list[str]]:
     why: list[str] = []
     runtime_input = meta.get("runtime_report_input")
     if isinstance(runtime_input, dict) and runtime_input.get("status") in {"unavailable", "partial"}:
+        if runtime_input.get("reason") == RUNTIME_REPORT_NOT_LISTED:
+            return VIS_PARTIAL, [
+                "抓包已执行，但本次结果未列出 runtime_report.json；运行时输入不可用，不能将缺失解释为无行为"
+            ]
         return VIS_PARTIAL, ["运行时报告读取失败或有无效事件；不能将缺失解释为无行为"]
     merge_steps = meta.get("runtime_merge_steps")
     if isinstance(merge_steps, dict):
@@ -878,6 +886,12 @@ def _next_actions(sources: dict, remediation: str, meta: dict) -> list[str]:
         actions.append(
             "静态受限且未做运行时观测：跑 `fxapk capture <包名>` 抓包——"
             "真实后端往往只在运行时由配置下发，静态里根本不存在"
+        )
+    runtime_input = meta.get("runtime_report_input")
+    if isinstance(runtime_input, dict) and runtime_input.get("reason") == RUNTIME_REPORT_NOT_LISTED:
+        actions.append(
+            "抓包结果未列出本次 runtime_report.json：核对抓包输出目录与日志，确认原始产物写出后重抓；"
+            "不要用目录里已有的同名旧文件代替本次证据"
         )
     plan = meta.get("config_probe_plan")
     if isinstance(plan, dict) and plan.get("candidates"):
@@ -1126,6 +1140,7 @@ __all__ = [
     "REM_FAILED",
     "REM_NOT_ATTEMPTED",
     "REM_REANALYZED",
+    "RUNTIME_REPORT_NOT_LISTED",
     "VISIBILITY_LEVELS",
     "VIS_COMPLETE",
     "VIS_OPAQUE",
