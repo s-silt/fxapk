@@ -666,6 +666,43 @@ def test_cleanup_failure_blocks_java_complete(monkeypatch, tmp_path) -> None:
     assert _java_vis(result.meta) == "partial"
 
 
+def test_cleanup_retry_keeps_private_directories_traversable(monkeypatch, tmp_path) -> None:
+    root = tmp_path / "jadx_tmp"
+    nested = root / "sources"
+    nested.mkdir(parents=True)
+    source = nested / "Example.java"
+    source.write_text("class Example {}", encoding="utf-8")
+    expected_modes = {root: 0o700, nested: 0o700, source: 0o600}
+    repaired_modes: dict[Path, int] = {}
+    rmtree = jadx.shutil.rmtree
+
+    def chmod(path: str, mode: int) -> None:
+        repaired_modes[Path(path)] = mode
+
+    def remove(path: str) -> None:
+        if repaired_modes != expected_modes:
+            raise PermissionError("fixture tree still needs permission repair")
+        rmtree(path)
+
+    monkeypatch.setattr(jadx.os, "chmod", chmod)
+    monkeypatch.setattr(jadx.shutil, "rmtree", remove)
+    monkeypatch.setattr(jadx, "_CLEANUP_ATTEMPTS", 2)
+    monkeypatch.setattr(jadx, "_CLEANUP_BACKOFF", 0.0)
+    assert jadx._remove_tree_checked(str(root)) == {"complete": True, "reason_codes": []}
+    assert not root.exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("config_name", True), ("k" * 64, True), ("k" * 65, False), ("$config_name", False)],
+)
+def test_key_value_match_respects_whole_identifier_and_length(name: str, expected: bool) -> None:
+    text = f'String {name} = "fixture001";'
+    assert [m.group("key", "val") for m in jadx._SECRET_KV_RE.finditer(text)] == (
+        [(name, "fixture001")] if expected else []
+    )
+
+
 # --- C2：SDK 常量名误报被过滤 --------------------------------------------
 
 
