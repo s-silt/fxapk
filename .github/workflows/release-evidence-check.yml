@@ -9,6 +9,12 @@ on:
       - '.github/workflows/release.yml'
       - '.github/release-notes-template.md'
       - 'tools/release_preflight.py'
+      - 'CHANGELOG.md'
+      - 'pyproject.toml'
+      - 'plugins/fxapk-android-ui/pyproject.toml'
+      - 'plugins/fxapk-rea/pyproject.toml'
+      - 'plugins/fxapk-asc/pyproject.toml'
+      - 'plugins/fxapk-flutter/pyproject.toml'
   workflow_dispatch:
 
 permissions:
