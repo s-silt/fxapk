@@ -503,7 +503,7 @@ def test_analyze_dynamic_no_device_skips(monkeypatch):
 
 def test_analyze_dynamic_calls_merge_after_capture_done(monkeypatch):
     _patch_unpack(monkeypatch)
-    _patch_capture(monkeypatch, _done_result())
+    _patch_capture(monkeypatch, _done_result(["outdir/runtime_report.json"]))
     merge_calls = _patch_merge(monkeypatch)
 
     report = _make_report("com.x")
@@ -541,20 +541,79 @@ def test_analyze_dynamic_merge_uses_runtime_report_json(monkeypatch):
     assert merge_calls["rerender_args"]["endpoints"] is None
 
 
-def test_analyze_dynamic_merge_falls_back_to_out_dir_path(monkeypatch):
-    """capture report_paths 不含 runtime_report.json 时回退 out/runtime_report.json。"""
-    import os
-
+def test_analyze_dynamic_does_not_merge_stale_runtime_report(monkeypatch, tmp_path: Path):
+    """capture 没列出本次写出的 runtime_report.json → 不并入；目录里的旧文件（别的样本）保持原样。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    stale = out / "runtime_report.json"
+    stale_bytes = b'{"package_name": "com.previous.sample", "endpoints": []}'
+    stale.write_bytes(stale_bytes)
     _patch_unpack(monkeypatch)
-    _patch_capture(monkeypatch, _done_result(report_paths=[]))
+    _patch_capture(monkeypatch, {**_done_result(report_paths=[]), "status": STATUS_DEGRADED})
     merge_calls = _patch_merge(monkeypatch)
 
-    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
+    cli._run_dynamic_after_static("a.apk", "com.x", str(out), _make_report("com.x"), ["json"], "demo")
 
-    assert merge_calls["rerender_args"]["runtime_report_path"] == os.path.join(
-        "outdir", "runtime_report.json"
+    assert merge_calls["rerender_called"] is False
+    assert stale.read_bytes() == stale_bytes
+
+
+@pytest.mark.parametrize("base", ["runtime_report", "Runtime_Report"])
+def test_analyze_dynamic_refuses_capture_when_report_aliases_raw_artifact(
+    monkeypatch, tmp_path: Path, base: str,
+):
+    """<base>.json 与 runtime_report.json 同名：抓包会覆盖静态报告、重渲会覆盖原始产物 → 不抓不并。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    existing = out / "runtime_report.json"
+    existing.write_bytes(b'{"synthetic": "static"}')
+    _patch_unpack(monkeypatch)
+    cap_calls = _patch_capture(monkeypatch, _done_result([str(existing)]))
+    merge_calls = _patch_merge(monkeypatch)
+
+    cli._run_dynamic_after_static("a.apk", "com.x", str(out), _make_report("com.x"), ["json"], base)
+
+    assert cap_calls["called"] is False
+    assert merge_calls["rerender_called"] is False
+    assert existing.read_bytes() == b'{"synthetic": "static"}'
+
+
+def test_merge_rerender_refreshes_sha256_sidecar_and_keeps_raw(monkeypatch, tmp_path: Path):
+    """重渲覆盖 <base>.json 后，旁文件哈希必须对应最终文件；原始 runtime_report.json 不被改动。"""
+    import hashlib
+
+    from fxapk.core.report_delivery import ReportDelivery
+    from fxapk.dynamic import merge
+
+    out = tmp_path / "out"
+    out.mkdir()
+    rendered = out / "demo.json"
+    rendered.write_bytes(b'{"synthetic": "static"}')
+    cli._write_sha256_sidecar(out, "demo", [rendered])
+    raw = out / "runtime_report.json"
+    raw_bytes = b'{"package_name": "com.x", "endpoints": []}'
+    raw.write_bytes(raw_bytes)
+
+    merged_bytes = b'{"synthetic": "merged"}'
+
+    def _fake_rerender(report, endpoints, out_dir, base, **kwargs):
+        assert kwargs["runtime_report_path"] == str(raw)
+        target = Path(out_dir) / f"{base}.json"
+        target.write_bytes(merged_bytes)
+        return {"report_paths": [str(target)], "report_delivery": ReportDelivery(("json",), ("json",), (), ())}
+
+    monkeypatch.setattr(merge, "merge_and_rerender", _fake_rerender)
+    sink: list[object] = [ReportDelivery(("json",), ("json",), (), ())]
+
+    cli._merge_runtime_into_report(
+        _done_result([str(raw)]), str(out), _make_report("com.x"), ["json"], "demo", delivery_sink=sink,
     )
-    assert merge_calls["rerender_args"]["endpoints"] is None
+
+    sidecar = (out / "demo.sha256").read_text(encoding="utf-8")
+    assert f"{hashlib.sha256(merged_bytes).hexdigest()}  demo.json" in sidecar
+    assert hashlib.sha256(b'{"synthetic": "static"}').hexdigest() not in sidecar
+    assert raw.read_bytes() == raw_bytes
+    assert len(sink) == 2
 
 
 @pytest.mark.parametrize("status", [STATUS_SKIPPED, STATUS_ERROR])
@@ -582,7 +641,7 @@ def test_analyze_dynamic_merge_exception_does_not_break_static_report(monkeypatc
     from fxapk.dynamic import merge
 
     _patch_unpack(monkeypatch)
-    _patch_capture(monkeypatch, _done_result())
+    _patch_capture(monkeypatch, _done_result(["outdir/runtime_report.json"]))
 
     def _boom_rerender(*args: Any, **kwargs: Any) -> dict[str, Any]:
         raise RuntimeError("merge rerender exploded")
@@ -635,7 +694,7 @@ def test_run_dynamic_after_static_new_signature_passes_report_and_formats(monkey
     """新签名 _run_dynamic_after_static(apk, package, out, report, formats, base) 把
     report+formats+base 透传给 merge_and_rerender。"""
     _patch_unpack(monkeypatch)
-    _patch_capture(monkeypatch, _done_result())
+    _patch_capture(monkeypatch, _done_result(["od/runtime_report.json"]))
     merge_calls = _patch_merge(monkeypatch)
 
     report = _make_report("com.sig")

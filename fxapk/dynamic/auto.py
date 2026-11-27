@@ -1342,7 +1342,10 @@ def _run_capture(
             step["status"] = _DEGRADED
         runtime_path = ""
         if step["status"] in (_DONE, _DEGRADED):
-            runtime_path = _resolve_runtime_report_path(result, out_dir)
+            runtime_path = _resolve_runtime_report_path(result)
+            if runtime_path and _runtime_report_foreign(runtime_path, package_name):
+                step = _step(_STEP_CAPTURE, _ERROR, "运行时报告写明的包名与本次目标不符，拒绝作为证据")
+                runtime_path = ""
         elif step["status"] == _ERROR:
             from fxapk.dynamic.capture_sequence import bounded_runtime_report
             from fxapk.dynamic.merge import import_runtime_diagnostics_only
@@ -1660,16 +1663,23 @@ def _fold_dynamic_step(name: str, result: object) -> tuple[StepResult, list[str]
     return _step(name, folded_status, reason), report_paths
 
 
-def _resolve_runtime_report_path(capture_result: object, out_dir: str) -> str:
-    """从 capture 的 report_paths 找 runtime_report.json，否则回退 out/runtime_report.json。
+def _resolve_runtime_report_path(capture_result: object) -> str:
+    """只认 capture 本次 report_paths 列出的 runtime_report.json；没列出 → 空串。
 
-    与 cli._resolve_runtime_report_path 同口径（不动 capture 契约）。
+    不回退到 ``<out>/runtime_report.json``：本次没写出时，那里只可能是旧运行（甚至别的样本）
+    的残留。与 cli._resolve_runtime_report_path 同口径（不动 capture 契约）。
     """
     if isinstance(capture_result, dict):
         for p in capture_result.get("report_paths") or []:
             if isinstance(p, str) and Path(p).name == "runtime_report.json":
                 return p
-    return str(Path(out_dir) / "runtime_report.json")
+    return ""
+
+
+def _runtime_report_foreign(runtime_report_path: str, package_name: str) -> bool:
+    """报告可读且写明了别的包名 → 不属于本次目标。读不回交给 merge 记读取缺口。"""
+    recorded = _read_runtime_payload(runtime_report_path).get("package_name")
+    return recorded is not None and recorded != package_name
 
 
 def _extend_unique(acc: list[str], new: list[str]) -> None:

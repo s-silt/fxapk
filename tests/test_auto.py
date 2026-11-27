@@ -1598,6 +1598,56 @@ def test_capture_degraded_still_yields_baseline(monkeypatch: pytest.MonkeyPatch,
     assert path == str(rr), "degraded 轮同样产出了 runtime_report，必须解析出路径"
 
 
+def test_degraded_capture_without_listed_report_never_merges_stale_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """本次 capture 没列出 runtime_report.json（写出失败）时，pass1 目录里上一次（别的样本）留下的
+    同名文件不得被拿来合并或判旁路，且原样保留。"""
+    from fxapk.dynamic import STATUS_DEGRADED
+
+    _patch_doctor(monkeypatch, ok=True)
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+    _set_device(monkeypatch, True)
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    stale_dir = tmp_path / "pass1-original"
+    stale_dir.mkdir()
+    stale = stale_dir / "runtime_report.json"
+    stale_bytes = json.dumps({"package_name": "com.previous.sample", "endpoint_total": 9}).encode()
+    stale.write_bytes(stale_bytes)
+    _patch_capture(monkeypatch, _dynamic_result(STATUS_DEGRADED, "无证据路径", report_paths=[]))
+    merge_calls = _patch_merge(monkeypatch)
+
+    result = auto.run("sample.apk", out_dir=str(tmp_path))
+
+    assert merge_calls["rerender_called"] is False
+    assert _status_of(result["steps"], auto._STEP_MERGE) == STATUS_SKIPPED
+    assert stale.read_bytes() == stale_bytes
+
+
+def test_listed_runtime_report_for_other_package_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """列出的报告写明了别的包名 → 不属于本次目标，不作为证据路径返回。"""
+    from fxapk.dynamic import STATUS_DEGRADED
+
+    import fxapk.dynamic.capture as capture_mod
+
+    rr = tmp_path / "runtime_report.json"
+    rr.write_text(json.dumps({"package_name": "com.other.app", "endpoint_total": 0}), encoding="utf-8")
+    monkeypatch.setattr(
+        capture_mod, "run",
+        lambda *a, **k: _dynamic_result(STATUS_DEGRADED, "无证据路径", report_paths=[str(rr)]),
+    )
+
+    step, path = auto._run_capture(
+        "com.fraud.app", out_dir=str(tmp_path), has_device=True, duration=1,
+        on_progress=None, confirm=None,
+    )
+
+    assert step["status"] == STATUS_ERROR
+    assert path == ""
+
+
 def test_negative_endpoint_total_is_undecidable() -> None:
     """★P2：负数计数是坏值，不能当合法基线（会输出「无需旁路」而掩盖问题）。"""
     ok, why = auto._pass1_suggests_bypass("done", {"endpoint_total": -1, "capture_signals": {}})
