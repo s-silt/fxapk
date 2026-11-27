@@ -186,23 +186,27 @@ def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
                 # ★空占位（``KEY=``，常见于从 .env.example 抄来的模板行）不注入：一旦注入，
                 # 高优先 .env 的空占位会**静默掩蔽**低优先 .env 里配好的真实值——症状是
                 # "明明配了 key 却说没配"，离病根极远。想显式置空请用真实环境变量。
-                logger.debug(".env 空占位跳过（不掩蔽低优先级来源）：%s（%s）", key, p)
+                # ★日志不带键名/值：.env 内容属不可信敏感数据，整行进入日志即明文泄露面
+                # （CodeQL py/clear-text-logging-sensitive-data）。只记来源文件——路径由
+                # 本模块候选清单/显式参数决定，不源自文件内容。
+                logger.debug(".env 有空占位行被跳过（不掩蔽低优先级来源）：%s", p)
                 continue
             if key not in _INJECTABLE_KEYS:
-                # 执行路径 / 安全门 / 数据根只记键名：不注入，告警也绝不带值。
+                # 执行路径 / 安全门 / 数据根只计数：不注入，告警绝不带键名或值。
                 rejected.add(key)
                 continue
             if key in os.environ:  # 真实环境变量优先，不覆盖
                 continue
             os.environ[key] = val
             injected += 1
-            # 只记键名与来源文件，绝不回显值——多 .env 并存时"这个值到底来自哪份文件"
-            # 是排障第一问，此前零信号。
-            logger.debug(".env 注入 %s ← %s", key, p)
+            # 只记来源文件，绝不回显键名或值——键名亦属 .env 内容衍生物，明文进日志会扩大
+            # 泄露面（CodeQL py/clear-text-logging-sensitive-data）；多 .env 并存时
+            # "这个值到底来自哪份文件"仍可由来源文件定位。
+            logger.debug(".env 注入一个键 ← %s", p)
         if rejected:
             logger.warning(
-                ".env 拒绝注入非凭证键 %s（%s）；这些变量须在真实进程环境中设置，不得经 .env 注入",
-                ", ".join(sorted(rejected)),
+                ".env 拒绝注入 %d 个非凭证键（%s）；这些变量须在真实进程环境中设置，不得经 .env 注入",
+                len(rejected),
                 p,
             )
     if injected:

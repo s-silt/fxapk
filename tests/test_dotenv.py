@@ -112,15 +112,16 @@ def test_empty_placeholder_does_not_mask_lower_priority(tmp_path, monkeypatch) -
 
 
 def test_injection_logs_source_file(tmp_path, monkeypatch, caplog) -> None:
-    """注入时记「键名 ← 来源文件」（debug 级、绝不回显值）——多 .env 并存时排障第一问。"""
+    """注入时记来源文件（debug 级、绝不回显键名或值）——多 .env 并存时排障第一问。"""
     env = tmp_path / ".env"
     env.write_text("FXAPK_OTX_KEY=abc123\n", encoding="utf-8")
     monkeypatch.delenv("FXAPK_OTX_KEY", raising=False)
     with caplog.at_level("DEBUG", logger="fxapk.core.dotenv"):
         assert load_dotenv(env) == 1
-    hits = [r.message for r in caplog.records if "FXAPK_OTX_KEY" in r.message]
-    assert hits and any(str(env) in m for m in hits)
-    assert not any("abc123" in m for m in hits), "日志绝不回显密钥值"
+    hits = [r.message for r in caplog.records if str(env) in r.message]
+    assert hits, "注入必须记来源文件"
+    assert not any("abc123" in r.message for r in caplog.records), "日志绝不回显密钥值"
+    assert not any("FXAPK_OTX_KEY" in r.message for r in caplog.records), "日志绝不回显键名"
 
 
 def test_non_utf8_file_warns_not_silent(tmp_path, caplog) -> None:
@@ -191,7 +192,7 @@ def test_user_env_is_second_trusted_location(tmp_path, monkeypatch) -> None:
 
 
 def test_explicit_dotenv_rejects_execution_path_and_gate_keys(tmp_path, monkeypatch, caplog) -> None:
-    """显式路径仍只注入白名单键；执行路径 / 安全门 / 数据根被拒，告警只列键名。"""
+    """显式路径仍只注入白名单键；执行路径 / 安全门 / 数据根被拒，告警绝不带键名或值。"""
     env = tmp_path / ".env"
     planted = {
         "PATH": "evil-path-value",
@@ -207,30 +208,23 @@ def test_explicit_dotenv_rejects_execution_path_and_gate_keys(tmp_path, monkeypa
     env.chmod(0o600)  # This test isolates the key-policy warning.
     for key in planted:
         monkeypatch.delenv(key, raising=False)
-    rejected = (
-        "FXAPK_CORPUS",
-        "FXAPK_ENABLE_REA",
-        "FXAPK_HANDOFF_ROOT",
-        "FXAPK_TCPDUMP_BIN",
-        "FXAPK_TOOLCHAIN_FILE",
-        "JAVA_HOME",
-        "PATH",
-    )
     with caplog.at_level("WARNING", logger="fxapk.core.dotenv"):
         assert load_dotenv(env) == 1
     assert os.environ["FXAPK_VT_KEY"] == "vt-key-body"
-    for key in rejected:
-        assert key not in os.environ
+    for key in planted:
+        if key != "FXAPK_VT_KEY":
+            assert key not in os.environ
     warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1
     text = warnings[0]
-    assert ", ".join(rejected) in text
     assert str(env) in text
-    for val in planted.values():
-        if val == "1":
-            assert "FXAPK_ENABLE_REA=1" not in text
+    assert " 7 " in text or "7 个" in text, "告警只报拒绝计数"
+    for key, val in planted.items():
+        if key == "FXAPK_VT_KEY":
             continue
-        assert val not in text
+        assert key not in text, "告警绝不回显被拒键名"
+        if val != "1":
+            assert val not in text, "告警绝不回显被拒键的值"
 
 
 def test_hostile_dotenv_does_not_open_rea_gate(tmp_path, monkeypatch) -> None:
