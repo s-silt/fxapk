@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import io
 import subprocess
 import sys
@@ -140,3 +141,16 @@ def test_caps_tar_decompression_before_reading_more_members(
     monkeypatch.setattr(verify_release_license, "MAX_TAR_BYTES", 1024)
     with pytest.raises(ValueError, match="decompression budget"):
         verify_release_license.sdist_contents(archives / CORE_SDIST)
+
+
+def test_tar_budget_rejects_cumulative_overrun_after_exact_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every request fits the original budget. Only the total crosses it.
+    monkeypatch.setattr(verify_release_license, "MAX_TAR_BYTES", 6)
+    with gzip.GzipFile(fileobj=io.BytesIO(gzip.compress(b"abcdefgh"))) as stream:
+        reader = verify_release_license._TarBudget(stream)
+        assert reader.read(3) == b"abc"
+        assert reader.read(3) == b"def"
+        with pytest.raises(ValueError, match="decompression budget"):
+            reader.read(2)
