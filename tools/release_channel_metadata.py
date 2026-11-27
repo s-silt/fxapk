@@ -193,8 +193,14 @@ def main() -> int:
     parser.add_argument("--repository-id", type=int, required=True)
     parser.add_argument("--github-commit", help="Expected peeled GitHub tag commit; enable GitHub byte evidence checks")
     parser.add_argument("--downloaded", type=Path, help="Local directory of GitHub asset bytes (with --github-commit)")
+    parser.add_argument(
+        "--require-evidence", action="store_true",
+        help="Exit zero only when GitHub tag and asset bytes plus core channel metadata pass",
+    )
     args = parser.parse_args()
     commit: str | None = args.github_commit
+    if args.require_evidence and (commit is None or args.downloaded is None):
+        parser.error("--require-evidence requires --github-commit and --downloaded")
     if args.downloaded is not None and commit is None:
         parser.error("--downloaded requires --github-commit")
     version = args.version
@@ -281,7 +287,9 @@ def main() -> int:
             state, reason = "incomplete", "release_evidence_incomplete"
         receipt.update(state=state, reason=reason)
     print(json.dumps(receipt, sort_keys=True))
-    return 0 if state in {"metadata_agrees", "evidence_checks_passed"} else 2
+    if state == "evidence_checks_passed" or (state == "metadata_agrees" and not args.require_evidence):
+        return 0
+    return 2
 
 
 if __name__ == "__main__":

@@ -66,6 +66,24 @@ def test_both_channels_match_core_build_metadata_despite_github_extras(tmp_path:
     assert receipt["github"]["state"] == receipt["pypi"]["state"] == "metadata_matches"
 
 
+@pytest.mark.parametrize("with_commit", [False, True])
+def test_require_evidence_rejects_missing_evidence_arguments(tmp_path: Path, with_commit: bool) -> None:
+    args = [
+        sys.executable, "-m", "tools.release_channel_metadata", "--version", VERSION,
+        "--repository-id", str(REPO_ID), "--require-evidence",
+    ]
+    for key, value in {"github": _capture("github"), "pypi": _capture("pypi"), "inventory": INVENTORY}.items():
+        path = tmp_path / f"{key}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        args.extend((f"--{key}", str(path)))
+    if with_commit:
+        args.extend(("--github-commit", "c" * 40))
+    result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=10, check=False)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "--require-evidence requires --github-commit and --downloaded" in result.stderr
+
+
 @pytest.mark.parametrize(("problem", "state", "reason"), [
     ("yanked", "incomplete", "file_yanked"),
     ("yank_unknown", "unknown", "file_yank_state_unverified"),
@@ -465,6 +483,14 @@ def test_offline_combined_release_diagnosis(
         key: hashlib.sha256(before[Path(f"{key}.json")]).hexdigest() for key in ("github", "pypi", "inventory")
     }
     assert snapshot() == before
+    if case in {"ok", "wrong-tag", "pypi-missing", "query-forbidden"}:
+        strict = subprocess.run(
+            [*args, "--require-evidence"], cwd=ROOT, capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert not strict.stderr
+        assert strict.returncode == exit_code
+        assert strict.stdout == result.stdout
+        assert snapshot() == before
     if case == "wrong-downloaded-bytes":
         first_observation = {
             "asset_name": WHEEL,
