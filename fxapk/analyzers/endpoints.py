@@ -502,6 +502,8 @@ class EndpointsAnalyzer(BaseAnalyzer):
         截断标记暴露给 meta（dex_strings_truncated），使"字符串池超 _MAX_DEX_STRINGS
         被截断、后段字符串未扫"这一降级在报告里可见，而非静默丢失端点。
         """
+        if getattr(ctx, "dex_available", True) is False:
+            return False, False
         truncated = False
         try:
             for idx, record in enumerate(iter_dex_records(ctx)):

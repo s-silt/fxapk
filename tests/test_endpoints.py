@@ -496,6 +496,18 @@ def test_list_files_failure_still_scans_dex():
     assert any(e.value == "https://pay.heika-gw.cn/n" for e in result.endpoints)
 
 
+def test_explicit_unavailable_dex_is_not_a_successful_empty_scan():
+    class NoDex(FakeContext):
+        dex_available = False
+
+    files = {"assets/c.json": b'{"u":"https://api.example.org/resource"}'}
+    unavailable = EndpointsAnalyzer().analyze(NoDex(files=files))
+    assert unavailable.meta["dex_scanned"] is False
+    assert "https://api.example.org/resource" in _by_value(unavailable)
+    # Legacy contexts without the availability flag may legitimately scan an empty pool.
+    assert EndpointsAnalyzer().analyze(FakeContext()).meta["dex_scanned"] is True
+
+
 def test_native_libs_failure_does_not_crash():
     class _Ctx(FakeContext):
         def native_libs(self):  # type: ignore[override]

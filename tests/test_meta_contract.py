@@ -60,6 +60,34 @@ def test_runtime_discovery_reports_missing_registry_owners_without_raising() -> 
     assert meta_contract.validate_registry_owners(registered - {missing}) == {missing}
 
 
+@pytest.mark.parametrize(("first", "second", "expected"), [
+    (False, True, False), (True, False, False), (True, True, True),
+    (None, True, True), (False, None, False), (None, None, None),
+])
+def test_dex_scan_coverage_from_reporting_analyzers(monkeypatch, first, second, expected):
+    from fxapk.core.models import AnalyzerResult
+    from tests.conftest import FakeContext
+
+    def producer(name, flag):
+        return SimpleNamespace(name=name, requires=[], analyze=lambda ctx: AnalyzerResult(
+            analyzer=name, meta={} if flag is None else {"dex_scanned": flag},
+        ))
+
+    monkeypatch.setenv("FXAPK_NO_PARALLEL", "1")
+    monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [
+        producer("endpoints", first), producer("payment", second),
+    ])
+    report = pipeline.run(FakeContext(), AnalysisConfig(online=False))
+    assert [row["status"] for row in report.analyzer_status] == ["ran", "ran"]
+    if expected is None:
+        assert "dex_scanned" not in report.meta
+    else:
+        assert report.meta["dex_scanned"] is expected
+        assert report.meta["visibility"]["sources"]["dex"]["visibility"] == (
+            "complete" if expected else "unavailable"
+        )
+
+
 def test_analyzer_stage_reconciles_runtime_discovery(monkeypatch) -> None:
     """对账必须接在每次运行的发现结果上，不能只留下一个无人调用的 helper。"""
     seen: list[set[str]] = []
