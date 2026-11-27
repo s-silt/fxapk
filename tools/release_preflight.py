@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import string
 import tomllib
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 PROJECTS = (
     "pyproject.toml",
@@ -98,6 +100,28 @@ def render_notes(root: Path, tag: str, repository: str, commit: str) -> str:
     return notes
 
 
+def write_build_outputs(
+    notes_path: Path, notes: str, manifest_path: Path, inventory: dict[str, str],
+) -> None:
+    # Stage each output on its destination filesystem. Install the manifest
+    # without replacing an existing witness, even if it appeared after checks.
+    with (
+        TemporaryDirectory(prefix=".preflight-inventory-", dir=manifest_path.parent) as manifest_dir,
+        TemporaryDirectory(prefix=".preflight-notes-", dir=notes_path.parent) as notes_dir,
+    ):
+        staged_manifest = Path(manifest_dir) / "inventory.json"
+        staged_notes = Path(notes_dir) / "notes.md"
+        payload = json.dumps(inventory, sort_keys=True, indent=2) + "\n"
+        staged_manifest.write_text(payload, encoding="utf-8", newline="\n")
+        staged_notes.write_text(notes, encoding="utf-8")
+        os.link(staged_manifest, manifest_path)
+        try:
+            os.replace(staged_notes, notes_path)
+        except BaseException:
+            manifest_path.unlink()
+            raise
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
@@ -123,12 +147,10 @@ def main() -> None:
             parser.error("--build-manifest: File exists; use a new output path")
     inventory = verified_inventory(args.root, args.core, args.plugins, args.assets)
     notes = render_notes(args.root, args.tag, args.repository, args.commit)
-    args.notes.write_text(notes, encoding="utf-8")
-    if manifest is not None:
-        # Pass this flat mapping directly to the offline diagnostics' --inventory.
-        payload = json.dumps(inventory, sort_keys=True, indent=2) + "\n"
-        with manifest.open("x", encoding="utf-8", newline="\n") as stream:
-            stream.write(payload)
+    if manifest is None:
+        args.notes.write_text(notes, encoding="utf-8")
+    else:
+        write_build_outputs(args.notes, notes, manifest, inventory)
     print("release preflight OK: ten archives, exact SHA-256 inventory, nonempty notes")
 
 

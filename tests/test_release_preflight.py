@@ -208,6 +208,56 @@ def test_cli_rejects_untrustworthy_manifest_output(bundle: Path, failure: str) -
         assert path.read_text(encoding="utf-8") == "previous attempt"
     else:
         assert not path.exists()
+    assert not (bundle / "release-notes.md").exists()
+
+
+@pytest.mark.parametrize("step", ["manifest_write", "notes_install"])
+def test_preflight_output_failure_preserves_previous_notes_and_allows_retry(
+    bundle: Path, monkeypatch: pytest.MonkeyPatch, step: str,
+) -> None:
+    import os
+
+    from tools.release_preflight import main
+
+    manifest = bundle / "manifest.json"
+    notes = bundle / "notes.md"
+    notes.write_text("previous notes", encoding="utf-8")
+    before = {p.name for p in bundle.iterdir()}
+    monkeypatch.chdir(bundle)
+    monkeypatch.setattr(sys, "argv", [
+        "release_preflight", "--tag", "v" + projects(bundle)[0]["version"],
+        "--repository", "example/synthetic", "--commit", "a" * 40,
+        "--notes", str(notes), "--build-manifest", str(manifest),
+    ])
+
+    write_text = Path.write_text
+    replace = os.replace
+
+    def broken_write(path, text, *args, **kwargs):
+        if text.startswith("{"):
+            write_text(path, text[:8], *args, **kwargs)
+            raise OSError("synthetic incomplete manifest write")
+        return write_text(path, text, *args, **kwargs)
+
+    def broken_replace(src, dst):
+        if Path(dst) == notes:
+            raise OSError("synthetic notes installation failure")
+        return replace(src, dst)
+
+    with monkeypatch.context() as interrupted:
+        if step == "manifest_write":
+            interrupted.setattr(Path, "write_text", broken_write)
+        else:
+            interrupted.setattr(os, "replace", broken_replace)
+        with pytest.raises(OSError, match="synthetic"):
+            main()
+
+    assert not manifest.exists()
+    assert notes.read_text(encoding="utf-8") == "previous notes"
+    assert {p.name for p in bundle.iterdir()} == before
+    main()
+    assert len(json.loads(manifest.read_bytes())) == 11
+    assert "### 本版变更" in notes.read_text(encoding="utf-8")
 
 
 def test_cli_writes_notes_only_after_successful_gate(bundle: Path, monkeypatch: pytest.MonkeyPatch) -> None:
