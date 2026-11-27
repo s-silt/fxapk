@@ -701,6 +701,52 @@ def test_degraded_capture_is_partial_not_complete():
     assert "runtime_contact_observed" in a["blocked_claims"]
 
 
+@pytest.mark.parametrize("step_status", ["error", "skipped"])
+def test_runtime_merge_step_gap_keeps_complete_capture_partial(step_status: str) -> None:
+    a = V.assess(_report(
+        runtime_merged=True,
+        capture_quality={"dynamic_status": "complete", "reason": "ok"},
+        runtime_report_input={"status": "accepted"},
+        runtime_merge_steps={
+            "merge_runtime_credentials": {"status": step_status, "error_type": "RuntimeError"},
+            "merge_runtime_traces": {"status": "ok", "error_type": ""},
+        },
+    ))
+    runtime = a["sources"]["runtime"]
+    assert runtime["visibility"] == V.VIS_PARTIAL
+    assert "merge_runtime_credentials" in runtime["why"][0]
+    assert "runtime_merge_steps" in runtime["inputs_seen"]
+    assert "runtime_contact_observed" in a["blocked_claims"]
+
+
+def test_runtime_merge_steps_all_ok_keep_complete_capture_complete() -> None:
+    a = V.assess(_report(
+        runtime_merged=True,
+        capture_quality={"dynamic_status": "complete", "reason": "ok"},
+        runtime_merge_steps={"merge_runtime_traces": {"status": "ok", "error_type": ""}},
+    ))
+    assert a["sources"]["runtime"]["visibility"] == V.VIS_COMPLETE
+
+
+def test_capture_without_listed_runtime_report_is_partial_not_static_only() -> None:
+    """抓过、但本次没列出 runtime_report.json：运行时一维是「输入不可用」，不是「纯静态未观测」。"""
+    a = V.assess(_report(
+        is_hardened=True,
+        runtime_report_input={
+            "status": "unavailable", "reason": V.RUNTIME_REPORT_NOT_LISTED, "scope": "json_ingestion_only",
+        },
+    ))
+    runtime = a["sources"]["runtime"]
+    assert runtime["visibility"] == V.VIS_PARTIAL
+    assert "未列出" in runtime["why"][0]
+    assert not any("纯静态" in why for why in runtime["why"])
+    assert runtime["inputs_seen"] == ["runtime_report_input"]
+    assert "runtime_contact_observed" in a["blocked_claims"]
+    joined = " ".join(a["next_actions"])
+    assert "runtime_report.json" in joined and "旧文件" in joined
+    assert "未做运行时观测" not in joined
+
+
 def test_next_actions_tell_you_how_to_fix_the_gap():
     """★只报「哪里瞎了」不给补法等于半截活：消费方拿到 degraded 报告得知道下一步做什么。"""
     a = V.assess(_report(is_hardened=True))          # 壳桩 + 未脱壳 + 未做动态

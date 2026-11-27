@@ -490,7 +490,7 @@ def test_doctor_exception_does_not_stop_pipeline(monkeypatch: pytest.MonkeyPatch
     assert result["report_paths"]
 
 
-def test_unpack_exception_does_not_stop_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unpack_exception_does_not_stop_capture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import fxapk.dynamic.unpack as unpack_mod
 
     _patch_doctor(monkeypatch, ok=True)
@@ -504,7 +504,7 @@ def test_unpack_exception_does_not_stop_capture(monkeypatch: pytest.MonkeyPatch)
     cap_calls = _patch_capture(monkeypatch, _dynamic_result(STATUS_DONE, "抓包完成"))
     _patch_merge(monkeypatch)
 
-    result = auto.run("sample.apk", out_dir="out")  # 不应抛
+    result = auto.run("sample.apk", out_dir=str(tmp_path))  # 不应抛
 
     steps = result["steps"]
     assert _status_of(steps, auto._STEP_UNPACK) == STATUS_ERROR
@@ -1598,6 +1598,56 @@ def test_capture_degraded_still_yields_baseline(monkeypatch: pytest.MonkeyPatch,
     assert path == str(rr), "degraded 轮同样产出了 runtime_report，必须解析出路径"
 
 
+def test_degraded_capture_without_listed_report_never_merges_stale_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """本次 capture 没列出 runtime_report.json（写出失败）时，pass1 目录里上一次（别的样本）留下的
+    同名文件不得被拿来合并或判旁路，且原样保留。"""
+    from fxapk.dynamic import STATUS_DEGRADED
+
+    _patch_doctor(monkeypatch, ok=True)
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+    _set_device(monkeypatch, True)
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    stale_dir = tmp_path / "pass1-original"
+    stale_dir.mkdir()
+    stale = stale_dir / "runtime_report.json"
+    stale_bytes = json.dumps({"package_name": "com.previous.sample", "endpoint_total": 9}).encode()
+    stale.write_bytes(stale_bytes)
+    _patch_capture(monkeypatch, _dynamic_result(STATUS_DEGRADED, "无证据路径", report_paths=[]))
+    merge_calls = _patch_merge(monkeypatch)
+
+    result = auto.run("sample.apk", out_dir=str(tmp_path))
+
+    assert merge_calls["rerender_called"] is False
+    assert _status_of(result["steps"], auto._STEP_MERGE) == STATUS_SKIPPED
+    assert stale.read_bytes() == stale_bytes
+
+
+def test_listed_runtime_report_for_other_package_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """列出的报告写明了别的包名 → 不属于本次目标，不作为证据路径返回。"""
+    from fxapk.dynamic import STATUS_DEGRADED
+
+    import fxapk.dynamic.capture as capture_mod
+
+    rr = tmp_path / "runtime_report.json"
+    rr.write_text(json.dumps({"package_name": "com.other.app", "endpoint_total": 0}), encoding="utf-8")
+    monkeypatch.setattr(
+        capture_mod, "run",
+        lambda *a, **k: _dynamic_result(STATUS_DEGRADED, "无证据路径", report_paths=[str(rr)]),
+    )
+
+    step, path = auto._run_capture(
+        "com.fraud.app", out_dir=str(tmp_path), has_device=True, duration=1,
+        on_progress=None, confirm=None,
+    )
+
+    assert step["status"] == STATUS_ERROR
+    assert path == ""
+
+
 def test_negative_endpoint_total_is_undecidable() -> None:
     """★P2：负数计数是坏值，不能当合法基线（会输出「无需旁路」而掩盖问题）。"""
     ok, why = auto._pass1_suggests_bypass("done", {"endpoint_total": -1, "capture_signals": {}})
@@ -1642,3 +1692,77 @@ def test_unknown_identity_reaches_quality_gate(monkeypatch: pytest.MonkeyPatch, 
         "身份必须传到 quality 门，否则机器消费方读不到（只标注不门控＝无效）"
     )
     assert quality.get("dynamic_status") != "complete", "身份不可确认的轮次不得判 complete"
+
+
+@pytest.mark.parametrize("status", [STATUS_DONE, "degraded"])
+def test_single_round_capture_without_listed_report_persists_unavailable_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str,
+) -> None:
+    """done/degraded 却没列出 runtime_report.json：主报告要落「运行时输入不可用」回执，
+    可见性不得写成「纯静态」，也不得读取目录里别的样本留下的同名文件。"""
+    report = _patch_static_ok(monkeypatch, "com.fraud.app")
+    _patch_doctor(monkeypatch, ok=True)
+    _set_device(monkeypatch, True)
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    stale_dir = tmp_path / "pass1-original"
+    stale_dir.mkdir()
+    stale = stale_dir / "runtime_report.json"
+    stale_bytes = json.dumps({
+        "package_name": "com.previous.sample", "runtime_variant": "original-runtime",
+        "endpoints": [{"value": "stale.example", "kind": "domain"}],
+    }).encode()
+    stale.write_bytes(stale_bytes)
+    _patch_capture(monkeypatch, _dynamic_result(status, "无证据路径", report_paths=[]))
+    merge_calls = _patch_merge(monkeypatch)
+
+    result = auto.run("sample.apk", out_dir=str(tmp_path), formats=["json"])
+
+    assert merge_calls["rerender_called"] is False
+    merge_step = next(step for step in result["steps"] if step["name"] == auto._STEP_MERGE)
+    assert merge_step["status"] == STATUS_SKIPPED
+    assert "未列出" in merge_step["detail"]
+    receipt = {"status": "unavailable", "reason": "runtime_report_not_listed", "scope": "json_ingestion_only"}
+    assert report.meta["runtime_report_input"] == receipt
+    runtime = report.meta["visibility"]["sources"]["runtime"]
+    assert runtime["visibility"] == "partial"
+    assert not any("纯静态" in why for why in runtime["why"])
+    for absent in ("runtime_merged", "runtime_variant", "capture_quality"):
+        assert absent not in report.meta
+    assert report.endpoints == []
+    assert stale.read_bytes() == stale_bytes
+
+    written = tmp_path / f"{auto.report_base('sample.apk', 'com.fraud.app')}.json"
+    assert str(written) in result["report_paths"]
+    persisted = json.loads(written.read_text(encoding="utf-8"))["meta"]
+    assert persisted["runtime_report_input"] == receipt
+    assert persisted["visibility"]["sources"]["runtime"]["visibility"] == "partial"
+    assert result["report_delivery"] is not None and not result["report_delivery"].blocks_success()
+
+
+def test_auto_html_rewrite_failure_keeps_previous_complete_html(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """HTML 重写写出一半后 I/O 失败：旧的完整 HTML 原样保留，暂存文件清掉，回执记失败。"""
+    from fxapk.core.report_delivery import ReportDelivery
+    from fxapk.report import html as report_html
+
+    target = tmp_path / "demo.html"
+    previous = "<html><body>previous complete synthetic report</body></html>\n"
+    target.write_text(previous, encoding="utf-8")
+    bystander = tmp_path / ".demo.html.unrelated.tmp"
+    bystander.write_text("not ours", encoding="utf-8")
+
+    def _partial_then_fail(report: Report, path: str) -> None:
+        Path(path).write_text("<html><body>partial", encoding="utf-8")
+        raise OSError("synthetic-disk-full")
+
+    monkeypatch.setattr(report_html, "render", _partial_then_fail)
+    sink: list[object] = []
+    paths = auto._write_reports(
+        _make_report(), out_dir=str(tmp_path), formats=["html", "json"], base="demo", delivery_sink=sink,
+    )
+
+    assert target.read_text(encoding="utf-8") == previous
+    assert sorted(p.name for p in tmp_path.glob(".demo.html.*.tmp")) == [bystander.name]
+    assert paths == [str(tmp_path / "demo.json")]
+    assert sink == [ReportDelivery(("json", "html"), ("json",), ("html",), ())]

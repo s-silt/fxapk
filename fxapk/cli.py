@@ -565,6 +565,22 @@ def analyze(
                 report, web_supplement, None,
                 dynamic=dynamic, device=device_detected, observer_started=False,
             )
+        # ★动态运行的覆盖守卫必须在第一次写报告之前生效：_write_reports 会把
+        #   <base>.json 原子替换落盘——若它与 runtime_report.json 是同一文件，静态写出
+        #   这一步就已经把先前抓包原始字节的目录项顶掉，事后再拒抓包也救不回原始产物。
+        #   纯静态运行（无 --dynamic / 无设备）没有 capture 要跑，行为不变。
+        dynamic_blocked = dynamic and device_detected and _report_aliases_runtime_artifact(
+            out, formats, base
+        )
+        if dynamic_blocked:
+            # 动态运行在此拒绝：不写任何报告、不进动态段。静态报告重跑即可再生，
+            # 而目录里既有的抓包原始字节是不可再生证据。exit 2：配置/输入错误。
+            typer.echo(
+                f"报告文件 {base}.json 与抓包原始产物 runtime_report.json 是同一个文件"
+                "（同名，或输出目录不区分大小写，或是硬链接/符号链接），跳过抓包以免互相覆盖；"
+                "请把 APK 改成别的文件名，或用 --out 换一个输出目录后重跑。"
+            )
+            raise typer.Exit(code=2)
         deliveries: list[object] = [_write_reports(report, out_dir, formats, base)]
 
         _print_summary(report)
@@ -2550,7 +2566,7 @@ def _run_dynamic_after_static(
     """--dynamic：静态完成且有设备时，顺序执行 unpack + capture，并把运行时端点并回主报告。
 
     两个动态模块均惰性导入，缺失时打印"该功能未安装"并跳过，绝不崩主流程。
-    capture status==done 后，惰性 import merge，从 out/runtime_report.json 读回运行时端点，
+    capture done/degraded 后，惰性 import merge，从本次 capture 列出的 runtime_report.json 读回运行时端点，
     去重并入静态 report.endpoints、按 infra 分级生成线索、重渲 report.html/json，
     让真·C2 进入主线索清单而非游离在 runtime_report.json。合并失败不影响已产出静态报告。
     """
@@ -2570,6 +2586,15 @@ def _run_dynamic_after_static(
 
     if not package:
         typer.echo("未知包名，跳过抓包（capture 需目标包名）。")
+        _defer_cdp_pre_observer(report, out, formats, base, web_supplement, delivery_sink)
+        return
+
+    if _report_aliases_runtime_artifact(out, formats, base):
+        typer.echo(
+            f"报告文件 {base}.json 与抓包原始产物 runtime_report.json 是同一个文件"
+            "（同名，或输出目录不区分大小写，或是硬链接/符号链接），跳过抓包以免互相覆盖；"
+            "请把 APK 改成别的文件名，或用 --out 换一个输出目录后重跑。"
+        )
         _defer_cdp_pre_observer(report, out, formats, base, web_supplement, delivery_sink)
         return
 
@@ -2602,11 +2627,12 @@ def _run_dynamic_after_static(
         if delivery_sink is not None:
             delivery_sink.append(written)
 
-    # 抓包成功（done）才把运行时端点并回主报告并重渲；skipped/error 不调 merge。
+    # 抓包跑完（done）或跑完但无可用证据（degraded）都并回主报告并重渲：degraded 的采集质量与
+    # 读取缺口必须进报告，否则可见性会把「抓过、没拿到」误记成「未做运行时观测」。skipped/error 不调 merge。
     status = capture_result.get("status") if isinstance(capture_result, dict) else None
-    from fxapk.dynamic import STATUS_DONE
+    from fxapk.dynamic import STATUS_DEGRADED, STATUS_DONE
 
-    if status != STATUS_DONE:
+    if status not in (STATUS_DONE, STATUS_DEGRADED):
         return
 
     _merge_runtime_into_report(
@@ -2614,59 +2640,127 @@ def _run_dynamic_after_static(
     )
 
 
+def _report_aliases_runtime_artifact(out: str, formats: list[str], base: str) -> bool:
+    """``<base>.json`` 与 capture 写在同目录的 runtime_report.json 是否同一文件。
+
+    同名时静态报告会被原始产物覆盖，重渲又会覆盖原始产物。只看实际文件身份：
+    名字完全相同必冲突；两者都存在时按 samefile 认（覆盖不区分大小写的目录与硬链接/符号链接）；
+    仅大小写不同且都不存在时，探测输出目录是否区分大小写。区分大小写的目录里
+    ``Runtime_Report.json`` 与 ``runtime_report.json`` 是两个文件，不算冲突。
+    """
+    if "json" not in formats:
+        return False
+    rendered = Path(out) / f"{base}.json"
+    raw = Path(out) / "runtime_report.json"
+    if rendered.name == raw.name:
+        return True
+    folded = rendered.name.casefold() == raw.name.casefold()
+    try:
+        rendered_exists, raw_exists = rendered.exists(), raw.exists()
+        if rendered_exists and raw_exists:
+            return rendered.samefile(raw)
+        if rendered_exists or raw_exists or not folded:
+            # 一个在、一个不在：两个名字指向不同目录项。
+            return False
+        return _directory_folds_case(Path(out))
+    except OSError:
+        # 无法确认身份时只对仅大小写不同的名字保守拒绝。
+        return folded
+
+
+def _directory_folds_case(directory: Path) -> bool:
+    """在 ``directory`` 里独占创建一个探测文件，看换大小写的名字能否访问到它；用完即删。"""
+    import uuid
+
+    probe = directory / f".fxapk-case-probe-{uuid.uuid4().hex}"
+    with open(probe, "x", encoding="utf-8"):
+        pass
+    try:
+        return probe.with_name(probe.name.upper()).exists()
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 def _merge_runtime_into_report(
     capture_result: object, out: str, report: Report, formats: list[str], base: str,
     delivery_sink: list[object] | None = None,
 ) -> None:
     """把 capture 抓到的运行时端点并回主报告并重渲；任何失败不破坏已产出的静态报告。"""
+    # 只认本次 capture 列出的产物：目录里的同名旧文件可能来自上一次运行或别的样本。
+    runtime_path = _resolve_runtime_report_path(capture_result)
+
     try:
         from fxapk.dynamic import merge as _merge
     except ImportError:
         typer.echo("该功能未安装：fxapk.dynamic.merge 不可用，跳过运行时端点并入。")
         return
 
-    try:
-        # 运行时端点来源（不动 capture 契约）：优先 report_paths 里的 runtime_report.json，
-        # 否则回退到约定路径 out/runtime_report.json。
-        runtime_path = _resolve_runtime_report_path(capture_result, out)
-        stats = _merge.merge_and_rerender(
-            report,
-            None,
-            out,
-            base,
-            formats=formats,
-            on_progress=lambda m: typer.echo(f"... {m}"),
-            runtime_report_path=runtime_path,
-        )
-        merged = stats.get("merged", 0)
-        new_leads = stats.get("new_leads", 0)
-        report_paths = stats.get("report_paths") or []
+    receipts: list[object] = delivery_sink if delivery_sink is not None else []
+    if not runtime_path:
         typer.echo(
-            f"运行时端点并入：新增端点 {merged}，新增线索 {new_leads}；"
-            f"重渲报告 {len(report_paths)} 份"
+            "抓包未列出本次写出的 runtime_report.json，不并入（目录里的旧文件不算本次证据）；"
+            "报告的运行时输入记为不可用。"
         )
-        for p in report_paths:
-            typer.echo(f"  - {p}")
-        delivery = stats.get("report_delivery")
-        if delivery_sink is not None and delivery is not None:
-            delivery_sink.append(delivery)
-        if isinstance(delivery, ReportDelivery) and delivery.blocks_success():
-            typer.echo("报告重渲未完成。", err=True)
-    except Exception:
-        logger.exception("运行时端点并入/重渲异常（不影响已产出的静态报告）")
-        typer.echo("运行时端点并入异常（详见日志），静态报告不受影响。")
-        if delivery_sink is not None:
+        try:
+            stats = _merge.record_runtime_report_not_listed(
+                report, out, base, formats=formats, on_progress=lambda m: typer.echo(f"... {m}"),
+            )
+            delivery = stats.get("report_delivery")
+            if delivery is not None:
+                receipts.append(delivery)
+            if isinstance(delivery, ReportDelivery) and delivery.blocks_success():
+                typer.echo("报告重渲未完成。", err=True)
+        except Exception:
+            logger.exception("记录运行时输入缺口/重渲异常（不影响已产出的静态报告）")
+            typer.echo("运行时输入缺口未能写入报告（详见日志），静态报告不受影响。")
             required = tuple(fmt for fmt in formats if fmt in ("json", "html"))
-            delivery_sink.append(ReportDelivery(required, (), required, ()))
+            receipts.append(ReportDelivery(required, (), required, ()))
+    else:
+        try:
+            stats = _merge.merge_and_rerender(
+                report,
+                None,
+                out,
+                base,
+                formats=formats,
+                on_progress=lambda m: typer.echo(f"... {m}"),
+                runtime_report_path=runtime_path,
+            )
+            merged = stats.get("merged", 0)
+            new_leads = stats.get("new_leads", 0)
+            report_paths = stats.get("report_paths") or []
+            typer.echo(
+                f"运行时端点并入：新增端点 {merged}，新增线索 {new_leads}；"
+                f"重渲报告 {len(report_paths)} 份"
+            )
+            for p in report_paths:
+                typer.echo(f"  - {p}")
+            delivery = stats.get("report_delivery")
+            if delivery is not None:
+                receipts.append(delivery)
+            if isinstance(delivery, ReportDelivery) and delivery.blocks_success():
+                typer.echo("报告重渲未完成。", err=True)
+        except Exception:
+            logger.exception("运行时端点并入/重渲异常（不影响已产出的静态报告）")
+            typer.echo("运行时端点并入异常（详见日志），静态报告不受影响。")
+            required = tuple(fmt for fmt in formats if fmt in ("json", "html"))
+            receipts.append(ReportDelivery(required, (), required, ()))
+    # 旁文件按最终落盘内容重算，不留覆盖前的哈希。json/html 都经同目录暂存再原子替换：
+    # 重渲失败时目录里仍是本次更早写成的完整产物，哈希的是它；回执里的 failed 照常保留。
+    _write_sha256_sidecar(
+        Path(out), base,
+        [Path(out) / f"{base}.{fmt}" for fmt in ("json", "html", "pdf")
+         if any(isinstance(item, ReportDelivery) and fmt in item.written for item in receipts)],
+    )
 
 
-def _resolve_runtime_report_path(capture_result: object, out: str) -> str:
-    """从 capture 返回的 report_paths 里找 runtime_report.json，否则回退 out/runtime_report.json。"""
+def _resolve_runtime_report_path(capture_result: object) -> str:
+    """只认 capture 返回的 report_paths 里列出的 runtime_report.json；没列出 → 空串（不回退旧文件）。"""
     if isinstance(capture_result, dict):
         for p in capture_result.get("report_paths") or []:
             if isinstance(p, str) and Path(p).name == "runtime_report.json":
                 return p
-    return str(Path(out) / "runtime_report.json")
+    return ""
 
 
 def _report_from_json_dict(payload: dict) -> Report:

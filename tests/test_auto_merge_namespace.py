@@ -86,3 +86,71 @@ def test_merge_stage_refuses_changed_artifact_and_continues_in_order(
     assert first["original_sample_sha256"] == "synthetic"
     assert rejected == rows[1]
     assert all("merge_status" not in row for row in rows)
+
+
+def test_later_round_merge_keeps_earlier_runtime_input_and_step_gaps(tmp_path: Path) -> None:
+    from fxapk.core.models import Report
+    from fxapk.dynamic import merge
+
+    report = Report("com.example.fixture", {}, [], [], [], [])
+    broken = tmp_path / "round-1.json"
+    accepted = tmp_path / "round-2.json"
+    broken.write_bytes(b"{")
+    accepted.write_bytes(b'{"package_name":"com.example.fixture"}')
+    for path in (broken, accepted):
+        merge.merge_and_rerender(
+            report, None, str(tmp_path), "fixture", formats=["json"], runtime_report_path=str(path),
+        )
+
+    assert report.meta["runtime_report_input"]["status"] == "unavailable"
+    assert report.meta["runtime_report_input"]["reason"] == "runtime_report_invalid_json"
+    assert {step["status"] for step in report.meta["runtime_merge_steps"].values()} == {"skipped"}
+    assert report.meta["visibility"]["sources"]["runtime"]["visibility"] == "partial"
+
+
+def test_merge_step_error_survives_later_ok_and_accepted_input_does_not_erase_gap() -> None:
+    from fxapk.dynamic import merge
+
+    steps = merge._retain_merge_steps(
+        {"first": {"status": "error", "error_type": "RuntimeError"}, "earlier_only": {"status": "ok", "error_type": ""}},
+        {"first": {"status": "ok", "error_type": ""}, "second": {"status": "ok", "error_type": ""}},
+    )
+    assert steps == {
+        "first": {"status": "error", "error_type": "RuntimeError"},
+        "earlier_only": {"status": "ok", "error_type": ""},
+        "second": {"status": "ok", "error_type": ""},
+    }
+    partial = {"status": "partial", "gaps": {"messages": {"reason": "invalid_array"}}}
+    accepted = {"status": "accepted", "artifact_sha256": "a" * 64}
+    unavailable = {"status": "unavailable", "reason": "runtime_report_missing"}
+    assert merge._retain_input_receipt(partial, accepted) == partial
+    assert merge._retain_input_receipt(partial, unavailable) == unavailable
+    assert merge._retain_input_receipt(accepted, partial) == partial
+    assert merge._retain_input_receipt(None, accepted) == accepted
+
+
+@pytest.mark.parametrize(("status", "merged"), [("degraded", True), ("error", False), ("skipped", False)])
+def test_single_round_merges_degraded_capture_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str, merged: bool,
+) -> None:
+    from fxapk.core.models import Report
+    from fxapk.dynamic import auto
+
+    report = Report("com.example.fixture", {}, [], [], [], [])
+    calls: list[str] = []
+
+    def render(report_arg, path, **kwargs):
+        assert "evidence_namespace" not in kwargs
+        calls.append(path)
+        return auto._step(auto._STEP_MERGE, "done", "synthetic"), []
+
+    monkeypatch.setattr(auto, "_run_merge", render)
+    steps: list[auto.StepResult] = []
+    auto._merge_capture_stage(
+        report, capture_step=auto._step(auto._STEP_CAPTURE, status, "synthetic"),
+        capture_round_paths=["synthetic-runtime.json"], round_records=None,
+        apk_identity={"which": "original"}, out_dir=str(tmp_path), base="fixture", formats=["json"],
+        on_progress=None, steps=steps, report_paths=[], delivery_sink=[],
+    )
+    assert calls == (["synthetic-runtime.json"] if merged else [])
+    assert [step["status"] for step in steps] == (["done"] if merged else ["skipped"])

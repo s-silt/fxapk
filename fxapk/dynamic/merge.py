@@ -21,9 +21,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import math
+import os
 import re
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -31,6 +33,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, NamedTuple
+from uuid import uuid4
 
 from fxapk.dynamic.capture_provenance import (
     capture_scope, scoped_evidence, scoped_event_refs, retain_observations, project_observations, validate_ledger, append_capture_ref, sync_endpoint_refs,
@@ -2707,6 +2710,37 @@ def runtime_scope_verified(report: Report, payload: object, evidence_namespace: 
     )
 
 
+# 多轮/重复合并时缺口的严重度：先前轮次记下的缺口不得被后一轮的正常结局覆盖抹掉。
+_INPUT_GAP_RANK = {"partial": 1, "unavailable": 2}
+_STEP_GAP_RANK = {"skipped": 1, "error": 2}
+
+
+def _gap_rank(entry: object, ranks: Mapping[str, int]) -> int:
+    status = entry.get("status") if isinstance(entry, Mapping) else None
+    return ranks.get(status, 0) if isinstance(status, str) else 0
+
+
+def _retain_input_receipt(prior: object, current: dict[str, Any]) -> dict[str, Any]:
+    """保留更严重（同级则更早）的读取缺口回执；无先前缺口时用本轮回执。"""
+    prior_rank = _gap_rank(prior, _INPUT_GAP_RANK)
+    if prior_rank and prior_rank >= _gap_rank(current, _INPUT_GAP_RANK) and isinstance(prior, Mapping):
+        return dict(prior)
+    return current
+
+
+def _retain_merge_steps(prior: object, current: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    """逐子步骤保留更严重（同级则更早）的结局；先前轮次独有的步骤记录原样保留。"""
+    merged: dict[str, dict[str, str]] = {
+        name: dict(entry) for name, entry in prior.items()
+        if isinstance(name, str) and isinstance(entry, Mapping)
+    } if isinstance(prior, Mapping) else {}
+    for name, entry in current.items():
+        prior_rank = _gap_rank(merged.get(name), _STEP_GAP_RANK)
+        if not prior_rank or prior_rank < _gap_rank(entry, _STEP_GAP_RANK):
+            merged[name] = entry
+    return merged
+
+
 def merge_and_rerender(
     report: Report, endpoints: list[Endpoint] | None, out_dir: str, base: str = "report", *,
     formats: list[str] | None = None, on_progress: Callable[[str], None] | None = None,
@@ -2786,7 +2820,9 @@ def _merge_and_rerender(
         if variant:
             stats["runtime_variant"] = variant
         payload = _read_runtime_payload(rr_path)
-        report.meta["runtime_report_input"] = input_receipt(payload)
+        report.meta["runtime_report_input"] = _retain_input_receipt(
+            report.meta.get("runtime_report_input"), input_receipt(payload),
+        )
         ui_observations = payload.get("ui_observations") if isinstance(payload, Mapping) else None
         if isinstance(ui_observations, list):
             existing = report.meta.get("ui_observations")
@@ -2852,16 +2888,27 @@ def _merge_and_rerender(
             for dest_key, src_key in step.stat_map:
                 stats[dest_key] = sub.get(src_key, 0)
         # 落 meta 供出口读：数字仍在，但 status=error 时那些数字**不可用**（不是「零」）。
-        report.meta["runtime_merge_steps"] = step_status
+        report.meta["runtime_merge_steps"] = _retain_merge_steps(
+            report.meta.get("runtime_merge_steps"), step_status,
+        )
 
     if report.meta.get("runtime_observations_truncated"):
         raise ValueError("runtime_observation_budget_exceeded")
 
-    # 可见性快照是**派生视图**，不是证据：上面这些 merge 步骤刚写入 runtime_merged /
-    # capture_quality / capture_signals，而它们正是 visibility 判定运行时那一维的输入。
-    # 不重算，最终报告里就会 meta.runtime_merged=True 却 visibility.runtime='unavailable'
+    _refresh_visibility(report, stats)
+
+    report_paths, delivery = _rerender_reports(report, out_path, base, formats, on_progress)
+    stats["report_paths"] = report_paths
+    stats["report_delivery"] = delivery
+    return stats
+
+
+def _refresh_visibility(report: Report, stats: dict[str, Any]) -> None:
+    # 可见性快照是**派生视图**，不是证据：merge 步骤刚写入 runtime_merged /
+    # capture_quality / capture_signals / runtime_report_input，而它们正是 visibility 判定运行时
+    # 那一维的输入。不重算，最终报告里就会 meta.runtime_merged=True 却 visibility.runtime='unavailable'
     # —— 同一个文件里自相矛盾，且 next_actions 还在建议"去抓包"。
-    # assess 自带兜底、绝不抛，不破坏本函数「异常不外抛」的契约。
+    # assess 自带兜底、绝不抛，不破坏调用方「异常不外抛」的契约。
     try:
         # Reuse the shared writer so merge cannot erase confirmed visibility gaps from
         # reports whose raw metadata was trimmed outside the tool.
@@ -2872,11 +2919,48 @@ def _merge_and_rerender(
     except Exception:  # noqa: BLE001 - 重算失败不得影响已完成的合并
         logger.exception("[merge] 可见性重求值失败，保留分析期快照")
 
+
+def record_runtime_report_not_listed(
+    report: Report,
+    out_dir: str,
+    base: str = "report",
+    *,
+    formats: list[str] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """抓包 done/degraded 却未列出本次 runtime_report.json：记读取缺口回执并重渲主报告。
+
+    不读取输出目录里的任何运行时文件（同名旧文件可能来自上一次运行或别的样本），
+    不写端点、采集质量或并入标记；只让可见性如实反映「抓过、但本次没有可读的运行时输入」，
+    而不是「纯静态、未做运行时观测」。
+    """
+    from fxapk.core.visibility import RUNTIME_REPORT_NOT_LISTED
+
+    stats: dict[str, Any] = {}
+    report.meta["runtime_report_input"] = _retain_input_receipt(
+        report.meta.get("runtime_report_input"),
+        {"status": "unavailable", "reason": RUNTIME_REPORT_NOT_LISTED, "scope": "json_ingestion_only"},
+    )
+    _refresh_visibility(report, stats)
+    report_paths, delivery = _rerender_reports(report, Path(out_dir), base, formats, on_progress)
+    stats["report_paths"] = report_paths
+    stats["report_delivery"] = delivery
+    return stats
+
+
+def _rerender_reports(
+    report: Report,
+    out_path: Path,
+    base: str,
+    formats: list[str] | None,
+    on_progress: Callable[[str], None] | None,
+) -> tuple[list[str], Any]:
+    """按 ``formats`` 重渲 json/html；单格式失败记入回执，PDF 不在此重渲（记 skipped）。"""
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
     except OSError:
-        logger.exception("[merge] 创建输出目录失败：%s", out_dir)
+        logger.exception("[merge] 创建输出目录失败：%s", out_path)
 
     from fxapk.core.report_delivery import ReportDelivery
 
@@ -2903,14 +2987,69 @@ def _merge_and_rerender(
     if "pdf" in fmts:
         requested.append("pdf")
 
-    stats["report_paths"] = report_paths
-    stats["report_delivery"] = ReportDelivery(
+    delivery = ReportDelivery(
         tuple(requested),
         tuple(written_formats),
         tuple(failed_formats),
         ("pdf",) if "pdf" in fmts else (),
     )
-    return stats
+    return report_paths, delivery
+
+
+def publish_html_report(report: Report, target: Path) -> None:
+    """渲染到同目录、本次独占创建的短名私有暂存文件，写完整后再原子替换 ``target``。
+
+    暂存文件名独立于最终文件名（``.fxapk-html-<pid>-<uuid8>.tmp``）：再长的合法
+    最终文件名也不会把暂存名顶过文件系统名字长度上限。暂存文件以 O_CREAT|O_EXCL
+    配 0o600 从创建即私有（POSIX；Windows 保留独占创建与原子替换，权限隔离以目录
+    ACL 为准），替换的是目录项——POSIX 下目标名称指向暂存 inode，权限保持受限。
+    渲染或写入中途失败时只删除本次创建的那个暂存文件：``target`` 保持上一次完整
+    发布的内容（或仍不存在），旁文件哈希因此只会对应完整产物；``target`` 若是别的
+    文件的硬链接/别名，被链接的那份文件不会被改写。
+    """
+    from fxapk.core import atomic as core_atomic
+    from fxapk.report import html as report_html
+
+    target = Path(target)
+    core_atomic._ensure_private_directory(target.parent)
+    staging: Path | None = None
+    descriptor: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        for _attempt in range(16):
+            candidate = target.parent / f".fxapk-html-{os.getpid()}-{uuid4().hex[:8]}.tmp"
+            try:
+                descriptor = os.open(candidate, flags, 0o600)
+            except FileExistsError:
+                # 名字为随机 uuid8，碰撞几乎总是并发实例或残留文件；诊断只记计数，
+                # 不含路径（目录名可能含用户/项目信息），便于排查连续碰撞耗尽重试。
+                logger.debug("[merge] HTML 暂存文件名碰撞，重新生成（第 %d 次）", _attempt + 1)
+                continue
+            staging = candidate
+            break
+        if staging is None or descriptor is None:
+            raise OSError(errno.EEXIST, f"cannot allocate unique HTML staging file: {target}", str(target))
+        os.close(descriptor)
+        descriptor = None
+        # 独占创建完成：名字归本次写出所有，清理时不会误删别人的文件。
+        # 渲染管线按 str 路径接口写文本（utf-8 契约与 report/html.render 一致）。
+        report_html.render(report, str(staging))
+        with open(staging, "rb+") as stream:
+            os.fsync(stream.fileno())
+        core_atomic._replace_temp(staging, target)
+        staging = None
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                logger.debug("[merge] 关闭 HTML 暂存文件失败", exc_info=True)
+        if staging is not None:
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("[merge] 清理 HTML 暂存文件失败：%s", staging, exc_info=True)
+        raise
 
 
 def _rerender_json(
@@ -2932,13 +3071,11 @@ def _rerender_json(
 def _rerender_html(
     report: Report, out_path: Any, base: str, on_progress: Callable[[str], None] | None
 ) -> str:
-    """惰性 import report.html 并覆盖写 ``<base>.html``；失败记 logging 返回空串（不致命）。"""
+    """同目录暂存后原子替换 ``<base>.html``；失败记 logging 返回空串，旧的完整 HTML 保持不动。"""
     target = out_path / f"{base}.html"
     _emit(on_progress, f"重渲 {base}.html ...")
     try:
-        from fxapk.report import html as report_html
-
-        report_html.render(report, str(target))
+        publish_html_report(report, target)
     except Exception:  # noqa: BLE001 - 单格式重渲失败不致命，不计入 report_paths
         logger.exception("[merge] 重渲 %s 失败：%s", target.name, target)
         return ""
@@ -2958,4 +3095,6 @@ __all__ = [
     "merge_runtime_remote_control",
     "resolve_dead_drop_c2",
     "merge_and_rerender",
+    "publish_html_report",
+    "record_runtime_report_not_listed",
 ]

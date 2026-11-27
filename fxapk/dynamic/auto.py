@@ -975,9 +975,10 @@ def _write_reports(
         requested.append("html")
         target = out_path / f"{base}.html"
         try:
-            from fxapk.report import html as report_html
+            from fxapk.dynamic.merge import publish_html_report
 
-            report_html.render(report, str(target))  # type: ignore[arg-type]
+            # 同目录暂存后原子替换：重渲失败时保留上一次完整写出的 HTML。
+            publish_html_report(report, target)  # type: ignore[arg-type]
             paths.append(str(target))
             written_formats.append("html")
         except Exception:
@@ -1342,7 +1343,10 @@ def _run_capture(
             step["status"] = _DEGRADED
         runtime_path = ""
         if step["status"] in (_DONE, _DEGRADED):
-            runtime_path = _resolve_runtime_report_path(result, out_dir)
+            runtime_path = _resolve_runtime_report_path(result)
+            if runtime_path and _runtime_report_foreign(runtime_path, package_name):
+                step = _step(_STEP_CAPTURE, _ERROR, "运行时报告写明的包名与本次目标不符，拒绝作为证据")
+                runtime_path = ""
         elif step["status"] == _ERROR:
             from fxapk.dynamic.capture_sequence import bounded_runtime_report
             from fxapk.dynamic.merge import import_runtime_diagnostics_only
@@ -1379,8 +1383,14 @@ def _merge_capture_stage(
     report_paths: list[str],
     delivery_sink: list[object],
 ) -> None:
-    """Merge existing capture reports in order; only multi-round output has a hash gate."""
-    if capture_step["status"] == _DONE and report is not None and capture_round_paths:
+    """Merge existing capture reports in order; only multi-round output has a hash gate.
+
+    Single-round degraded capture still produced a runtime report: merge it so its quality and
+    input gaps reach the report instead of reading as "no runtime observation".
+    """
+    status = capture_step["status"]
+    mergeable = status == _DONE or (round_records is None and status == _DEGRADED)
+    if mergeable and report is not None and capture_round_paths:
         for round_path in capture_round_paths:
             namespace = None
             if round_records is not None:
@@ -1417,6 +1427,23 @@ def _merge_capture_stage(
                             if merge_step["status"] == _DONE else {}
                         )
                         row["decryption_after_merge"] = dict(report.meta.get("runtime_decrypt_stats", {}))
+    elif (
+        round_records is None
+        and status in (_DONE, _DEGRADED)
+        and isinstance(report, Report)
+        and not capture_round_paths
+    ):
+        steps.append(
+            _record_runtime_report_not_listed(
+                report,
+                out_dir=out_dir,
+                base=base,
+                formats=formats,
+                on_progress=on_progress,
+                report_paths=report_paths,
+                delivery_sink=delivery_sink,
+            )
+        )
     else:
         steps.append(
             _step(
@@ -1425,6 +1452,43 @@ def _merge_capture_stage(
                 "抓包未成功或无静态报告，无运行时端点可并入",
             )
         )
+
+
+def _record_runtime_report_not_listed(
+    report: Report,
+    *,
+    out_dir: str,
+    base: str,
+    formats: list[str],
+    on_progress: Callable[[str], None] | None,
+    report_paths: list[str],
+    delivery_sink: list[object],
+) -> StepResult:
+    """单轮抓包 done/degraded 却未列出本次 runtime_report.json：落读取缺口回执，不并入任何旧文件。"""
+    try:
+        from fxapk.core.report_delivery import ReportDelivery
+        from fxapk.dynamic import merge
+
+        stats = merge.record_runtime_report_not_listed(
+            report, out_dir, base, formats=list(formats), on_progress=on_progress,
+        )
+    except AutoCancelled:
+        raise
+    except Exception:  # noqa: BLE001 - 记录缺口失败不破坏已产出静态报告
+        logger.exception("[auto] 记录运行时输入缺口失败")
+        return _step(_STEP_MERGE, _ERROR, "抓包未列出本次 runtime_report.json，且运行时输入缺口未能写入报告")
+    paths = stats.get("report_paths") or []
+    _extend_unique(report_paths, [str(p) for p in paths] if isinstance(paths, list) else [])
+    delivery = stats.get("report_delivery")
+    if delivery is not None:
+        delivery_sink.append(delivery)
+    if isinstance(delivery, ReportDelivery) and delivery.blocks_success():
+        return _step(_STEP_MERGE, _ERROR, "抓包未列出本次 runtime_report.json；运行时输入缺口已记录，但报告重渲未完成")
+    return _step(
+        _STEP_MERGE,
+        _SKIPPED,
+        "抓包未列出本次 runtime_report.json：运行时输入记为不可用，未并入（目录里的旧文件不算本次证据）",
+    )
 
 
 def _verified_merge_namespace(
@@ -1654,16 +1718,23 @@ def _fold_dynamic_step(name: str, result: object) -> tuple[StepResult, list[str]
     return _step(name, folded_status, reason), report_paths
 
 
-def _resolve_runtime_report_path(capture_result: object, out_dir: str) -> str:
-    """从 capture 的 report_paths 找 runtime_report.json，否则回退 out/runtime_report.json。
+def _resolve_runtime_report_path(capture_result: object) -> str:
+    """只认 capture 本次 report_paths 列出的 runtime_report.json；没列出 → 空串。
 
-    与 cli._resolve_runtime_report_path 同口径（不动 capture 契约）。
+    不回退到 ``<out>/runtime_report.json``：本次没写出时，那里只可能是旧运行（甚至别的样本）
+    的残留。与 cli._resolve_runtime_report_path 同口径（不动 capture 契约）。
     """
     if isinstance(capture_result, dict):
         for p in capture_result.get("report_paths") or []:
             if isinstance(p, str) and Path(p).name == "runtime_report.json":
                 return p
-    return str(Path(out_dir) / "runtime_report.json")
+    return ""
+
+
+def _runtime_report_foreign(runtime_report_path: str, package_name: str) -> bool:
+    """报告可读且写明了别的包名 → 不属于本次目标。读不回交给 merge 记读取缺口。"""
+    recorded = _read_runtime_payload(runtime_report_path).get("package_name")
+    return recorded is not None and recorded != package_name
 
 
 def _extend_unique(acc: list[str], new: list[str]) -> None:

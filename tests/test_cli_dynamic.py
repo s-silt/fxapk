@@ -503,7 +503,7 @@ def test_analyze_dynamic_no_device_skips(monkeypatch):
 
 def test_analyze_dynamic_calls_merge_after_capture_done(monkeypatch):
     _patch_unpack(monkeypatch)
-    _patch_capture(monkeypatch, _done_result())
+    _patch_capture(monkeypatch, _done_result(["outdir/runtime_report.json"]))
     merge_calls = _patch_merge(monkeypatch)
 
     report = _make_report("com.x")
@@ -518,6 +518,17 @@ def test_analyze_dynamic_calls_merge_after_capture_done(monkeypatch):
     assert args["endpoints"] is None  # merge 在缓存作用域内自动加载
 
 
+def test_analyze_dynamic_merges_degraded_single_round_capture(monkeypatch):
+    _patch_unpack(monkeypatch)
+    _patch_capture(monkeypatch, {**_done_result(["outdir/runtime_report.json"]), "status": STATUS_DEGRADED})
+    merge_calls = _patch_merge(monkeypatch)
+
+    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
+
+    assert merge_calls["rerender_called"] is True
+    assert merge_calls["rerender_args"]["runtime_report_path"] == "outdir/runtime_report.json"
+
+
 def test_analyze_dynamic_merge_uses_runtime_report_json(monkeypatch):
     """capture report_paths 含 runtime_report.json 时，优先用它作为并入来源路径。"""
     _patch_unpack(monkeypatch)
@@ -530,20 +541,228 @@ def test_analyze_dynamic_merge_uses_runtime_report_json(monkeypatch):
     assert merge_calls["rerender_args"]["endpoints"] is None
 
 
-def test_analyze_dynamic_merge_falls_back_to_out_dir_path(monkeypatch):
-    """capture report_paths 不含 runtime_report.json 时回退 out/runtime_report.json。"""
-    import os
-
+def test_analyze_dynamic_does_not_merge_stale_runtime_report(monkeypatch, tmp_path: Path):
+    """capture 没列出本次写出的 runtime_report.json → 不并入；目录里的旧文件（别的样本）保持原样。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    stale = out / "runtime_report.json"
+    stale_bytes = b'{"package_name": "com.previous.sample", "endpoints": []}'
+    stale.write_bytes(stale_bytes)
     _patch_unpack(monkeypatch)
-    _patch_capture(monkeypatch, _done_result(report_paths=[]))
+    _patch_capture(monkeypatch, {**_done_result(report_paths=[]), "status": STATUS_DEGRADED})
     merge_calls = _patch_merge(monkeypatch)
 
-    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
+    cli._run_dynamic_after_static("a.apk", "com.x", str(out), _make_report("com.x"), ["json"], "demo")
 
-    assert merge_calls["rerender_args"]["runtime_report_path"] == os.path.join(
-        "outdir", "runtime_report.json"
+    assert merge_calls["rerender_called"] is False
+    assert stale.read_bytes() == stale_bytes
+
+
+def _directory_folds_case(directory: Path) -> bool:
+    """测试侧独立探测：该目录是否把仅大小写不同的名字当成同一个文件。"""
+    probe = directory / "case-probe-fixture"
+    probe.write_bytes(b"")
+    try:
+        return (directory / "CASE-PROBE-FIXTURE").exists()
+    finally:
+        probe.unlink()
+
+
+def test_analyze_dynamic_refuses_capture_when_report_name_equals_raw_artifact(
+    monkeypatch, tmp_path: Path, capsys,
+):
+    """<base>.json 与 runtime_report.json 完全同名：抓包会覆盖静态报告、重渲会覆盖原始产物 → 不抓不并。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    existing = out / "runtime_report.json"
+    existing.write_bytes(b'{"synthetic": "static"}')
+    _patch_unpack(monkeypatch)
+    cap_calls = _patch_capture(monkeypatch, _done_result([str(existing)]))
+    merge_calls = _patch_merge(monkeypatch)
+
+    cli._run_dynamic_after_static("a.apk", "com.x", str(out), _make_report("com.x"), ["json"], "runtime_report")
+
+    assert cap_calls["called"] is False
+    assert merge_calls["rerender_called"] is False
+    assert existing.read_bytes() == b'{"synthetic": "static"}'
+    message = capsys.readouterr().out
+    assert "--out" in message and "改成别的文件名" in message
+
+
+def test_mixed_case_report_name_conflicts_only_when_output_root_folds_case(
+    monkeypatch, tmp_path: Path,
+):
+    """Runtime_Report.json：不区分大小写的目录里与 runtime_report.json 是同一文件 → 拒绝；
+    区分大小写的目录里是两个文件 → 正常抓包，原始产物不被改动。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    folds = _directory_folds_case(out)
+    existing = out / "runtime_report.json"
+    existing.write_bytes(b'{"synthetic": "static"}')
+    _patch_unpack(monkeypatch)
+    cap_calls = _patch_capture(monkeypatch, _done_result([str(existing)]))
+    merge_calls = _patch_merge(monkeypatch)
+
+    cli._run_dynamic_after_static("a.apk", "com.x", str(out), _make_report("com.x"), ["json"], "Runtime_Report")
+
+    assert cap_calls["called"] is (not folds)
+    assert merge_calls["rerender_called"] is (not folds)
+    assert existing.read_bytes() == b'{"synthetic": "static"}'
+
+
+def test_mixed_case_alias_check_probes_root_when_neither_file_exists(tmp_path: Path) -> None:
+    """两个名字都还不存在时按输出目录的实际大小写语义判定，探测文件用完即删。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    folds = _directory_folds_case(out)
+
+    assert cli._report_aliases_runtime_artifact(str(out), ["json"], "Runtime_Report") is folds
+    assert cli._report_aliases_runtime_artifact(str(out), ["json"], "runtime_report") is True
+    assert cli._report_aliases_runtime_artifact(str(out), ["json"], "demo") is False
+    assert list(out.iterdir()) == []
+
+
+def test_report_hard_linked_to_raw_artifact_is_refused(tmp_path: Path) -> None:
+    """名字不同但是同一个文件（硬链接）仍算冲突：按文件身份判定，不只看名字。"""
+    import os
+
+    out = tmp_path / "out"
+    out.mkdir()
+    raw = out / "runtime_report.json"
+    raw.write_bytes(b'{"synthetic": "raw"}')
+    try:
+        os.link(raw, out / "evidence.json")
+    except (OSError, NotImplementedError):
+        pytest.skip("output root does not support hard links")
+
+    assert cli._report_aliases_runtime_artifact(str(out), ["json"], "evidence") is True
+    assert cli._report_aliases_runtime_artifact(str(out), ["html"], "evidence") is False
+
+
+def test_merge_rerender_refreshes_sha256_sidecar_and_keeps_raw(monkeypatch, tmp_path: Path):
+    """重渲覆盖 <base>.json 后，旁文件哈希必须对应最终文件；原始 runtime_report.json 不被改动。"""
+    import hashlib
+
+    from fxapk.core.report_delivery import ReportDelivery
+    from fxapk.dynamic import merge
+
+    out = tmp_path / "out"
+    out.mkdir()
+    rendered = out / "demo.json"
+    rendered.write_bytes(b'{"synthetic": "static"}')
+    cli._write_sha256_sidecar(out, "demo", [rendered])
+    raw = out / "runtime_report.json"
+    raw_bytes = b'{"package_name": "com.x", "endpoints": []}'
+    raw.write_bytes(raw_bytes)
+
+    merged_bytes = b'{"synthetic": "merged"}'
+
+    def _fake_rerender(report, endpoints, out_dir, base, **kwargs):
+        assert kwargs["runtime_report_path"] == str(raw)
+        target = Path(out_dir) / f"{base}.json"
+        target.write_bytes(merged_bytes)
+        return {"report_paths": [str(target)], "report_delivery": ReportDelivery(("json",), ("json",), (), ())}
+
+    monkeypatch.setattr(merge, "merge_and_rerender", _fake_rerender)
+    sink: list[object] = [ReportDelivery(("json",), ("json",), (), ())]
+
+    cli._merge_runtime_into_report(
+        _done_result([str(raw)]), str(out), _make_report("com.x"), ["json"], "demo", delivery_sink=sink,
     )
-    assert merge_calls["rerender_args"]["endpoints"] is None
+
+    sidecar = (out / "demo.sha256").read_text(encoding="utf-8")
+    assert f"{hashlib.sha256(merged_bytes).hexdigest()}  demo.json" in sidecar
+    assert hashlib.sha256(b'{"synthetic": "static"}').hexdigest() not in sidecar
+    assert raw.read_bytes() == raw_bytes
+    assert len(sink) == 2
+
+
+def test_merge_html_partial_write_then_io_error_keeps_complete_html_and_its_checksum(
+    monkeypatch, tmp_path: Path,
+):
+    """重渲 HTML 写出一半后 I/O 失败：上一次完整的 HTML 原样保留，旁文件哈希对应它，
+    暂存文件清掉，回执仍记 html 失败；JSON 照常更新。"""
+    import hashlib
+    import json as _json
+
+    from fxapk.core.report_delivery import ReportDelivery, combine_deliveries
+    from fxapk.report import html as report_html
+
+    out = tmp_path / "out"
+    out.mkdir()
+    html = out / "demo.html"
+    html_bytes = b"<html><body>static synthetic report</body></html>\n"
+    html.write_bytes(html_bytes)
+    rendered = out / "demo.json"
+    rendered.write_bytes(b'{"synthetic": "static"}')
+    raw = out / "runtime_report.json"
+    raw_bytes = b'{"package_name": "com.x", "endpoints": []}'
+    raw.write_bytes(raw_bytes)
+
+    def _partial_then_fail(report, path):
+        Path(path).write_text("<html><body>half written", encoding="utf-8")
+        raise OSError("synthetic-disk-full")
+
+    monkeypatch.setattr(report_html, "render", _partial_then_fail)
+    sink: list[object] = [ReportDelivery(("json", "html"), ("json", "html"), (), ())]
+
+    cli._merge_runtime_into_report(
+        _done_result([str(raw)]), str(out), _make_report("com.x"), ["html", "json"], "demo", delivery_sink=sink,
+    )
+
+    assert html.read_bytes() == html_bytes
+    assert not list(out.glob(".demo.html.*.tmp"))
+    assert raw.read_bytes() == raw_bytes
+    delivery = combine_deliveries(sink)
+    assert delivery is not None and delivery.blocks_success()
+    assert "html" in delivery.failed
+    merged = _json.loads(rendered.read_text(encoding="utf-8"))
+    assert merged["meta"]["runtime_report_input"]["status"] == "accepted"
+    sidecar = (out / "demo.sha256").read_text(encoding="utf-8")
+    assert f"{hashlib.sha256(html_bytes).hexdigest()}  demo.html" in sidecar
+    assert f"{hashlib.sha256(rendered.read_bytes()).hexdigest()}  demo.json" in sidecar
+
+
+@pytest.mark.parametrize("status", [STATUS_DONE, STATUS_DEGRADED])
+def test_analyze_dynamic_unlisted_runtime_report_persists_unavailable_input(
+    monkeypatch, tmp_path: Path, status: str,
+):
+    """抓包 done/degraded 却没列出 runtime_report.json：主报告落「运行时输入不可用」回执并刷新可见性，
+    不读目录里的旧文件、不伪造端点或采集质量。"""
+    import hashlib
+    import json as _json
+
+    from fxapk.core.report_delivery import ReportDelivery
+
+    out = tmp_path / "out"
+    out.mkdir()
+    stale = out / "runtime_report.json"
+    stale_bytes = b'{"package_name": "com.previous.sample", "endpoints": [{"value": "stale.example"}]}'
+    stale.write_bytes(stale_bytes)
+    _patch_unpack(monkeypatch)
+    _patch_capture(monkeypatch, {**_done_result(report_paths=[]), "status": status})
+    merge_calls = _patch_merge(monkeypatch)
+    report = _make_report("com.x")
+    sink: list[object] = []
+
+    cli._run_dynamic_after_static("a.apk", "com.x", str(out), report, ["json"], "demo", delivery_sink=sink)
+
+    assert merge_calls["rerender_called"] is False
+    receipt = {"status": "unavailable", "reason": "runtime_report_not_listed", "scope": "json_ingestion_only"}
+    assert report.meta["runtime_report_input"] == receipt
+    runtime = report.meta["visibility"]["sources"]["runtime"]
+    assert runtime["visibility"] == "partial"
+    assert not any("纯静态" in why for why in runtime["why"])
+    for absent in ("runtime_merged", "runtime_variant", "capture_quality"):
+        assert absent not in report.meta
+    assert report.endpoints == []
+    assert stale.read_bytes() == stale_bytes
+    persisted = _json.loads((out / "demo.json").read_text(encoding="utf-8"))["meta"]
+    assert persisted["runtime_report_input"] == receipt
+    assert persisted["visibility"]["sources"]["runtime"]["visibility"] == "partial"
+    assert sink == [ReportDelivery(("json",), ("json",), (), ())]
+    digest = hashlib.sha256((out / "demo.json").read_bytes()).hexdigest()
+    assert f"{digest}  demo.json" in (out / "demo.sha256").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("status", [STATUS_SKIPPED, STATUS_ERROR])
@@ -571,7 +790,7 @@ def test_analyze_dynamic_merge_exception_does_not_break_static_report(monkeypatc
     from fxapk.dynamic import merge
 
     _patch_unpack(monkeypatch)
-    _patch_capture(monkeypatch, _done_result())
+    _patch_capture(monkeypatch, _done_result(["outdir/runtime_report.json"]))
 
     def _boom_rerender(*args: Any, **kwargs: Any) -> dict[str, Any]:
         raise RuntimeError("merge rerender exploded")
@@ -624,7 +843,7 @@ def test_run_dynamic_after_static_new_signature_passes_report_and_formats(monkey
     """新签名 _run_dynamic_after_static(apk, package, out, report, formats, base) 把
     report+formats+base 透传给 merge_and_rerender。"""
     _patch_unpack(monkeypatch)
-    _patch_capture(monkeypatch, _done_result())
+    _patch_capture(monkeypatch, _done_result(["od/runtime_report.json"]))
     merge_calls = _patch_merge(monkeypatch)
 
     report = _make_report("com.sig")
@@ -1294,3 +1513,250 @@ def test_pcap_leads_into_rerenders_html(monkeypatch, tmp_path: Path):
     html = hp.read_text(encoding="utf-8")
     assert "STALE" not in html
     assert "pcap-sni.example.net" in html
+
+
+# ---------------------------------------------------------------------------
+# W2-A · 修复 1：analyze 的 runtime_report.json 覆盖守卫在第一次写报告前生效
+# ---------------------------------------------------------------------------
+
+
+def _analyze_dynamic_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Any]:
+    """analyze --dynamic 端到端桩环境：静态流水线/设备/capture 全 mock，
+    `_write_reports` 走真实现（写 tiny JSON 报告）。返回 capture 调用记录。"""
+    from fxapk.core import tools
+
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
+    monkeypatch.setattr(cli.device, "has_device", lambda: True)
+    monkeypatch.setattr("fxapk.core.pipeline.run", lambda ctx, config: _make_report("com.x"))
+    monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
+    _patch_unpack(monkeypatch)
+    cap_calls = _patch_capture(monkeypatch, _done_result())
+    _patch_merge(monkeypatch)
+    return cap_calls
+
+
+@pytest.mark.parametrize("prior_raw", [True, False])
+def test_analyze_dynamic_guard_precedes_first_write_exact_name(
+    monkeypatch, tmp_path: Path, prior_raw: bool,
+) -> None:
+    """<base>.json 与 runtime_report.json 同名：第一次写报告前就 exit 2——既有原始字节
+    不被替换；原本空的输出目录也不新增任何产物；capture 不运行。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    preexisting = out / "runtime_report.json"
+    raw_bytes = b'{"synthetic": "prior raw capture"}'
+    if prior_raw:
+        preexisting.write_bytes(raw_bytes)
+    cap_calls = _analyze_dynamic_env(monkeypatch)
+
+    apk = tmp_path / "runtime_report.apk"
+    apk.write_bytes(b"PK\x03\x04 synthetic")
+    res = runner.invoke(
+        cli.app, ["analyze", str(apk), "--dynamic", "--offline", "--out", str(out)]
+    )
+
+    assert res.exit_code == 2
+    assert cap_calls["called"] is False
+    assert "--out" in res.output and "改成别的文件名" in res.output
+    if prior_raw:
+        assert sorted(p.name for p in out.iterdir()) == ["runtime_report.json"]
+        assert preexisting.read_bytes() == raw_bytes
+    else:
+        assert list(out.iterdir()) == []
+
+
+def test_analyze_dynamic_noncolliding_name_writes_reports_and_runs_capture(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """不撞名（demo.json ≠ runtime_report.json）：照常以 <base> 命名写报告并进入动态段，
+    目录里既有的原始产物原样保留。"""
+    import json as _json
+
+    out = tmp_path / "out"
+    out.mkdir()
+    preexisting = out / "runtime_report.json"
+    raw_bytes = b'{"synthetic": "prior raw capture"}'
+    preexisting.write_bytes(raw_bytes)
+    cap_calls = _analyze_dynamic_env(monkeypatch)
+
+    apk = tmp_path / "demo.apk"
+    apk.write_bytes(b"PK\x03\x04 synthetic")
+    res = runner.invoke(
+        cli.app, ["analyze", str(apk), "--dynamic", "--offline", "--out", str(out)]
+    )
+
+    assert res.exit_code == 0, res.output
+    assert cap_calls["called"] is True
+    assert preexisting.read_bytes() == raw_bytes
+    assert (out / "demo.html").is_file()
+    persisted = _json.loads((out / "demo.json").read_text(encoding="utf-8"))
+    assert persisted["meta"]["runtime_report_input"]["status"] == "unavailable"
+
+
+def test_analyze_dynamic_guard_precedes_first_write_mixed_case(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """Runtime_Report.json：不区分大小写的输出目录里与 runtime_report.json 同文件 →
+    第一次写报告前即拒绝；区分大小写 → 正常进入动态段。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    folds = _directory_folds_case(out)
+    preexisting = out / "runtime_report.json"
+    raw_bytes = b'{"synthetic": "prior raw capture"}'
+    preexisting.write_bytes(raw_bytes)
+    cap_calls = _analyze_dynamic_env(monkeypatch)
+
+    apk = tmp_path / "Runtime_Report.apk"
+    apk.write_bytes(b"PK\x03\x04 synthetic")
+    res = runner.invoke(
+        cli.app, ["analyze", str(apk), "--dynamic", "--offline", "--out", str(out)]
+    )
+
+    assert res.exit_code == (0 if not folds else 2)
+    assert cap_calls["called"] is (not folds)
+    assert preexisting.read_bytes() == raw_bytes
+    names = sorted(p.name for p in out.iterdir())
+    if folds:
+        assert names == ["runtime_report.json"]
+    else:
+        assert {"Runtime_Report.json", "Runtime_Report.html"} <= set(names)
+
+
+def test_analyze_dynamic_guard_precedes_first_write_hard_link(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """名字不同但 <base>.json 是 runtime_report.json 的硬链接（同一文件身份）→
+    静态写出若先落盘就已顶掉原始字节，守卫必须在写之前拒。"""
+    import os
+
+    out = tmp_path / "out"
+    out.mkdir()
+    raw = out / "runtime_report.json"
+    raw_bytes = b'{"synthetic": "prior raw capture"}'
+    raw.write_bytes(raw_bytes)
+    try:
+        os.link(raw, out / "evidence.json")
+    except (OSError, NotImplementedError):
+        pytest.skip("output root does not support hard links")
+    cap_calls = _analyze_dynamic_env(monkeypatch)
+
+    apk = tmp_path / "evidence.apk"
+    apk.write_bytes(b"PK\x03\x04 synthetic")
+    res = runner.invoke(
+        cli.app, ["analyze", str(apk), "--dynamic", "--offline", "--out", str(out)]
+    )
+
+    assert res.exit_code == 2
+    assert cap_calls["called"] is False
+    assert raw.read_bytes() == raw_bytes
+    # 同一 inode 内容必须仍是原始字节（静态 JSON 没把它顶掉）。
+    assert (out / "evidence.json").read_bytes() == raw_bytes
+    assert sorted(p.name for p in out.iterdir()) == ["evidence.json", "runtime_report.json"]
+
+
+def test_analyze_static_only_unaffected_by_preexisting_raw(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """纯静态（无 --dynamic）：即便 base 撞名 runtime_report.json 也照常覆盖写——
+    没有 capture 要跑，不存在互相覆盖，静态行为保持不变。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    preexisting = out / "runtime_report.json"
+    preexisting.write_bytes(b'{"synthetic": "prior raw capture"}')
+    _stub_analyze_static(monkeypatch, _make_report("com.x"))
+
+    apk = tmp_path / "runtime_report.apk"
+    apk.write_bytes(b"PK\x03\x04 synthetic")
+    res = runner.invoke(
+        cli.app, ["analyze", str(apk), "--offline", "--out", str(out)]
+    )
+
+    assert res.exit_code == 0
+    # 静态写出覆盖同名文件是既有契约：内容已替换为静态 JSON 报告。
+    assert b"prior raw capture" not in preexisting.read_bytes()
+    assert (out / "runtime_report.html").is_file()
+
+
+# ---------------------------------------------------------------------------
+# W2-A · 修复 2：publish_html_report 短名私有暂存
+# ---------------------------------------------------------------------------
+
+
+def test_publish_html_long_final_name_uses_short_private_staging(tmp_path: Path) -> None:
+    """长合法最终文件名（235 字符组件）：暂存名与最终名独立（短名），完整 HTML 发布、无暂存残留。
+    旧实现的 ``.<最终名>.<随机>.tmp`` 会超出 255 字符的组件上限。"""
+    import os
+
+    from fxapk.dynamic import merge as merge_mod
+
+    stem_len = 230  # + ".html" = 235 字符
+    if os.name == "nt":
+        # 未开长路径的 Windows 整条路径上限 259 字符：组件按 tmp_path 剩余预算截短。
+        stem_len = min(stem_len, 259 - len(str(tmp_path)) - 1 - len(".html"))
+        if stem_len < 1:
+            pytest.skip("tmp_path too long for a MAX_PATH-bounded file name")
+    target = tmp_path / f"{'a' * stem_len}.html"
+
+    merge_mod.publish_html_report(_make_report("com.x"), target)
+
+    content = target.read_text(encoding="utf-8")
+    assert "<!DOCTYPE html>" in content and content.rstrip().endswith("</html>")
+    assert [p.name for p in tmp_path.iterdir()] == [target.name]
+
+
+def test_publish_html_posix_replaces_prior_private_target_intact(tmp_path: Path) -> None:
+    """POSIX：替换既有私有 target 后最终文件是完整新 HTML 且仍 0o600；替换的是目录项，
+    旧 inode 的硬链接别名保留原字节，不被原地改写。"""
+    import os
+
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits not applicable on Windows")
+    from fxapk.dynamic import merge as merge_mod
+
+    target = tmp_path / "r.html"
+    prior = b"<html><body>prior private synthetic report</body></html>\n"
+    target.write_bytes(prior)
+    target.chmod(0o600)
+    alias = tmp_path / "a.html"
+    try:
+        os.link(target, alias)
+    except (OSError, NotImplementedError):
+        pytest.skip("output root does not support hard links")
+
+    merge_mod.publish_html_report(_make_report("com.x"), target)
+
+    content = target.read_text(encoding="utf-8")
+    assert "<!DOCTYPE html>" in content and content.rstrip().endswith("</html>")
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert not target.samefile(alias)
+    assert alias.read_bytes() == prior
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.html", "r.html"]
+
+
+def test_publish_html_failure_cleans_only_own_staging(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """渲染中途失败：只删本次创建的暂存文件，旁观者 .tmp 与既有 target 原样保留。"""
+    from fxapk.dynamic import merge as merge_mod
+    from fxapk.report import html as report_html
+
+    target = tmp_path / "demo.html"
+    previous = "<html><body>previous complete synthetic report</body></html>\n"
+    target.write_text(previous, encoding="utf-8")
+    bystander = tmp_path / ".demo.html.unrelated.tmp"
+    bystander.write_text("not ours", encoding="utf-8")
+
+    def _partial_then_fail(report: Report, path: str) -> None:
+        Path(path).write_text("<html><body>partial", encoding="utf-8")
+        raise OSError("synthetic-disk-full")
+
+    monkeypatch.setattr(report_html, "render", _partial_then_fail)
+
+    with pytest.raises(OSError):
+        merge_mod.publish_html_report(_make_report("com.x"), target)
+
+    assert target.read_text(encoding="utf-8") == previous
+    survivors = sorted(p.name for p in tmp_path.iterdir())
+    assert survivors == sorted([target.name, bystander.name])

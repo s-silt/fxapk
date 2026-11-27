@@ -862,3 +862,22 @@ def test_cli_digest_normalizes_saved_source_levels(
     assert ("note" in section) is warn
     assert "synthetic-invalid-level" not in result.stdout + result.stderr
     assert path.read_bytes() == original
+
+
+def test_digest_blocked_claims_keep_unassessed_separate_from_missing() -> None:
+    report = {"meta": {"visibility": {
+        "sources": {"dex": {"visibility": "stub_only"}, "resource": {"visibility": "unknown"}},
+        "claims": {"static_endpoint_exhaustive": {
+            "label": "synthetic label", "eligible": False,
+            "missing_sources": ["dex"], "unassessed_sources": ["resource"],
+        }},
+        "blocked_claims": ["static_endpoint_exhaustive", "legacy_claim"],
+    }}}
+
+    blocked = build_digest(report)["visibility"]["blocked_claims"]
+
+    assert blocked == [
+        {"claim": "static_endpoint_exhaustive", "label": "synthetic label",
+         "missing_sources": ["dex"], "unassessed_sources": ["resource"]},
+        {"claim": "legacy_claim", "label": "legacy_claim", "missing_sources": [], "unassessed_sources": []},
+    ]
