@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import math
@@ -2996,29 +2997,58 @@ def _rerender_reports(
 
 
 def publish_html_report(report: Report, target: Path) -> None:
-    """渲染到同目录、本次独占创建的暂存文件，写完整后再原子替换 ``target``。
+    """渲染到同目录、本次独占创建的短名私有暂存文件，写完整后再原子替换 ``target``。
 
-    渲染或写入中途失败时只删除本次创建的暂存文件：``target`` 保持上一次完整发布的内容
-    （或仍不存在），旁文件哈希因此只会对应完整产物。替换的是目录项，``target`` 若是别的
+    暂存文件名独立于最终文件名（``.fxapk-html-<pid>-<uuid8>.tmp``）：再长的合法
+    最终文件名也不会把暂存名顶过文件系统名字长度上限。暂存文件以 O_CREAT|O_EXCL
+    配 0o600 从创建即私有（POSIX；Windows 保留独占创建与原子替换，权限隔离以目录
+    ACL 为准），替换的是目录项——POSIX 下目标名称指向暂存 inode，权限保持受限。
+    渲染或写入中途失败时只删除本次创建的那个暂存文件：``target`` 保持上一次完整
+    发布的内容（或仍不存在），旁文件哈希因此只会对应完整产物；``target`` 若是别的
     文件的硬链接/别名，被链接的那份文件不会被改写。
     """
+    from fxapk.core import atomic as core_atomic
     from fxapk.report import html as report_html
 
     target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = target.with_name(f".{target.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    with open(staging, "x", encoding="utf-8"):
-        pass  # 独占创建：名字归本次写出所有，清理时不会误删别人的文件
+    core_atomic._ensure_private_directory(target.parent)
+    staging: Path | None = None
+    descriptor: int | None = None
     try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        for _attempt in range(16):
+            candidate = target.parent / f".fxapk-html-{os.getpid()}-{uuid4().hex[:8]}.tmp"
+            try:
+                descriptor = os.open(candidate, flags, 0o600)
+            except FileExistsError:
+                # 名字为随机 uuid8，碰撞几乎总是并发实例或残留文件；诊断只记计数，
+                # 不含路径（目录名可能含用户/项目信息），便于排查连续碰撞耗尽重试。
+                logger.debug("[merge] HTML 暂存文件名碰撞，重新生成（第 %d 次）", _attempt + 1)
+                continue
+            staging = candidate
+            break
+        if staging is None or descriptor is None:
+            raise OSError(errno.EEXIST, f"cannot allocate unique HTML staging file: {target}", str(target))
+        os.close(descriptor)
+        descriptor = None
+        # 独占创建完成：名字归本次写出所有，清理时不会误删别人的文件。
+        # 渲染管线按 str 路径接口写文本（utf-8 契约与 report/html.render 一致）。
         report_html.render(report, str(staging))
         with open(staging, "rb+") as stream:
             os.fsync(stream.fileno())
-        os.replace(staging, target)
+        core_atomic._replace_temp(staging, target)
+        staging = None
     except BaseException:
-        try:
-            staging.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("[merge] 清理 HTML 暂存文件失败：%s", staging, exc_info=True)
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                logger.debug("[merge] 关闭 HTML 暂存文件失败", exc_info=True)
+        if staging is not None:
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("[merge] 清理 HTML 暂存文件失败：%s", staging, exc_info=True)
         raise
 
 

@@ -565,6 +565,22 @@ def analyze(
                 report, web_supplement, None,
                 dynamic=dynamic, device=device_detected, observer_started=False,
             )
+        # ★动态运行的覆盖守卫必须在第一次写报告之前生效：_write_reports 会把
+        #   <base>.json 原子替换落盘——若它与 runtime_report.json 是同一文件，静态写出
+        #   这一步就已经把先前抓包原始字节的目录项顶掉，事后再拒抓包也救不回原始产物。
+        #   纯静态运行（无 --dynamic / 无设备）没有 capture 要跑，行为不变。
+        dynamic_blocked = dynamic and device_detected and _report_aliases_runtime_artifact(
+            out, formats, base
+        )
+        if dynamic_blocked:
+            # 动态运行在此拒绝：不写任何报告、不进动态段。静态报告重跑即可再生，
+            # 而目录里既有的抓包原始字节是不可再生证据。exit 2：配置/输入错误。
+            typer.echo(
+                f"报告文件 {base}.json 与抓包原始产物 runtime_report.json 是同一个文件"
+                "（同名，或输出目录不区分大小写，或是硬链接/符号链接），跳过抓包以免互相覆盖；"
+                "请把 APK 改成别的文件名，或用 --out 换一个输出目录后重跑。"
+            )
+            raise typer.Exit(code=2)
         deliveries: list[object] = [_write_reports(report, out_dir, formats, base)]
 
         _print_summary(report)
