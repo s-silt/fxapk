@@ -68,6 +68,31 @@ jobs:
           /tmp/release-smoke/bin/python -m pip install dist/*.whl
           /tmp/release-smoke/bin/python -I tools/release_smoke.py --expect-version "${GITHUB_REF_NAME#v}"
           sha256sum dist/*.whl
+      # ★插件注册契约：同样只用上面构建出的**同一批** wheel 文件，不重新构建。core 与 registered
+      #   各用一个全新 venv：core 只装核心、必须零插件入口；registered 装核心 + Android UI +
+      #   Flutter + REA，入口与归属逐条精确。ASC 无插件入口，其锁定运行时由 CI asc-live 单独验证。
+      - name: Plugin registration smoke on the exact wheels to be released
+        run: |
+          one() {
+            local matches=($1)
+            if [ "${#matches[@]}" -ne 1 ] || [ ! -f "${matches[0]}" ]; then
+              echo "::error::expected exactly one wheel matching $1" >&2
+              return 1
+            fi
+            realpath -- "${matches[0]}"
+          }
+          core=$(one 'dist/fxapk-*.whl')
+          ui=$(one 'plugin-dist/fxapk_android_ui-*.whl')
+          flutter=$(one 'plugin-dist/fxapk_flutter-*.whl')
+          rea=$(one 'plugin-dist/fxapk_rea-*.whl')
+          script="$GITHUB_WORKSPACE/tools/release_plugin_smoke.py"
+          for mode in core registered; do
+            env_dir=$(mktemp -d "$RUNNER_TEMP/fxapk-plugin-smoke-$mode.XXXXXX")
+            python -m venv "$env_dir/venv"
+            if [ "$mode" = core ]; then wheels=("$core"); else wheels=("$core" "$ui" "$flutter" "$rea"); fi
+            "$env_dir/venv/bin/python" -m pip install --disable-pip-version-check "${wheels[@]}"
+            (cd "$env_dir" && "$env_dir/venv/bin/python" -I "$script" --expect-version "${GITHUB_REF_NAME#v}" "$mode")
+          done
       - name: Hash release archives
         run: |
           mkdir release-assets
