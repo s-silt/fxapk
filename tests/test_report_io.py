@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import threading
 
+import pytest
+
 from fxapk.core.models import (
     Confidence,
     Endpoint,
@@ -84,6 +86,31 @@ def test_report_round_trip_preserves_health_and_closure(tmp_path):
     assert loaded.leads[0].category is LeadCategory.DOMAIN
     assert loaded.findings[0].severity is Severity.INFO
     assert loaded.endpoints[0].evidences[0].observed_at is None
+
+
+@pytest.mark.parametrize(
+    ("health", "expected"),
+    [
+        ({}, ("complete", 1.0)),
+        ({"analysis_status": None}, (None, 1.0)),
+        ({"completeness": None}, ("complete", None)),
+        ({"analysis_status": None, "completeness": None}, (None, None)),
+        ({"analysis_status": "failed", "completeness": 0.0}, ("failed", 0.0)),
+    ],
+)
+def test_report_round_trip_distinguishes_null_from_missing_health(
+    tmp_path: Path,
+    health: dict[str, object],
+    expected: tuple[str | None, float | None],
+) -> None:
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({"package_name": "synthetic", **health}), encoding="utf-8")
+
+    loaded = load_report(path)
+    assert (loaded.analysis_status, loaded.completeness) == expected
+    write_report(loaded, path, render_existing_html=False)
+    rewritten = json.loads(path.read_text(encoding="utf-8"))
+    assert (rewritten["analysis_status"], rewritten["completeness"]) == expected
 
 
 def test_write_report_atomically_preserves_unknown_top_level_extensions(tmp_path):

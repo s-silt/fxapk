@@ -992,11 +992,13 @@ class Report:
     # ---- 结果可信度地基（消费方据此判断这份报告有多可信 / 是否完整）----
     #: 报告结构版本（见 REPORT_SCHEMA_VERSION）。
     schema_version: str = REPORT_SCHEMA_VERSION
-    #: 分析完整度：complete | partial | failed（据 analyzer_status 聚合，见 pipeline._analysis_health）。
-    analysis_status: str = ANALYSIS_STATUS_COMPLETE
-    #: 完整度比例 0..1 = 成功跑完 ÷ (成功 + 报错) 的分析器数（能力/平台跳过的不计入分母）。
-    completeness: float = 1.0
+    #: 分析完整度：complete | partial | failed；None 表示不可考。
+    analysis_status: str | None = ANALYSIS_STATUS_COMPLETE
+    #: 0..1，None 表示不可考。常规分析按运行的分析器数作分母；独立复核按已执行的计划任务
+    #: （ok/partial/failed）作分母、仅 ok 计入分子，not_run/unsupported 不计入但保留在
+    #: analysis_status、analyzer_status 与任务回执中；无可执行任务时为 failed + 0.0。
+    completeness: float | None = 1.0
     #: 报错的**关键**分析器名（失败即报告核心不可信；--strict 据此非零退出）。
     critical_failures: list[str] = field(default_factory=list)
-    #: 因缺能力 / 平台不适用被跳过的分析器名（环境门控，非故障；仅信息性、不计入 completeness）。
+    #: 因缺能力 / 平台不适用被跳过的分析器名（环境门控，非故障）。
     skipped_analyzers: list[str] = field(default_factory=list)

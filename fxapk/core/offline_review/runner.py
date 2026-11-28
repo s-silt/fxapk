@@ -249,9 +249,14 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
         write_json(output / "review.json", receipt)
         if progress:
             progress({"id": row["id"], "state": row["state"], "reason_codes": row["reason_codes"]})
-    states = {row["state"] for row in receipt["tasks"]}
-    receipt["state"] = ("ok" if states == {"ok"} else
-                        "failed" if "failed" in states and not states & {"ok", "partial"} else "partial")
+    task_rows = receipt["tasks"]
+    states = {row["state"] for row in task_rows}
+    if states == {"ok"}:
+        receipt["state"] = "ok"
+    elif "failed" in states and not states & {"ok", "partial"}:
+        receipt["state"] = "failed"
+    else:
+        receipt["state"] = "partial"
     write_json(output / "review.json", receipt)
     write_json(output / "feedback.json", feedback(receipt))
     if retain_inputs:
@@ -259,15 +264,24 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
     if report is None:
         report = Report(package_name="offline-evidence-review", meta={}, leads=[], endpoints=[], findings=[], analyzer_status=[])
         report.meta["sample_sha256"] = sample
-        report.analysis_status = "complete" if receipt["state"] == "ok" else receipt["state"]
-        checked = [row for row in receipt["tasks"] if row["state"] not in {"not_run", "unsupported"}]
-        report.completeness = sum(row["state"] == "ok" for row in checked) / len(checked) if checked else 0.0
-        for row in receipt["tasks"]:
+        # Standalone completeness scores executed eligible tasks: ok, partial and
+        # failed rows are attempts, and only ok counts as complete. not_run and
+        # unsupported rows stay visible through state, analyzer_status, skipped
+        # analyzers and task receipts. Zero eligible attempts fail closed on the
+        # standalone report (failed / 0.0) while the task receipt stays partial.
+        executed = [row for row in task_rows if row["state"] not in {"not_run", "unsupported"}]
+        report.completeness = sum(row["state"] == "ok" for row in executed) / len(executed) if executed else 0.0
+        for row in task_rows:
             name = "offline_review:" + row["id"]
             status = "ran" if row["state"] == "ok" else "skipped" if row["state"] in {"not_run", "unsupported"} else "error"
             report.analyzer_status.append({"name": name, "status": status, "reason": ";".join(row["reason_codes"])})
             if status == "skipped":
                 report.skipped_analyzers.append(name)
+        report.analysis_status = (
+            ANALYSIS_STATUS_FAILED if not executed
+            else ANALYSIS_STATUS_COMPLETE if receipt["state"] == "ok"
+            else receipt["state"]
+        )
     # Only attach the bounded metadata projection. Full sensitive details remain in local receipts.
     report.meta["offline_evidence_review"] = projection(receipt)
     try:
