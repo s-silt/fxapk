@@ -621,3 +621,93 @@ def test_decompile_clean_exit_with_unverified_output_is_partial_and_uncached(
     else:
         assert index_statuses == ["disabled", "disabled"]
         assert not (tmp_path / "jadx-cache").exists()
+
+
+@pytest.mark.parametrize("flag", _OUTPUT_UNVERIFIED)
+def test_decompile_clean_exit_with_unverified_output_does_not_reuse_existing_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, flag: str,
+) -> None:
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: (["jadx"], {}))
+    run_reason_codes: tuple[str, ...] = ()
+
+    def run(cmd, *, timeout, env=None, **_limits):  # noqa: ANN001
+        if "--version" in cmd:
+            return _clean_exit("1.5.2\n")
+        pkg = Path(cmd[cmd.index("-d") + 1]) / "sources" / "com" / "x"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "C.java").write_text(
+            'class C { String u = "https://cfg-host.example/api"; }\n', encoding="utf-8",
+        )
+        return _clean_exit(reason_codes=run_reason_codes)
+
+    monkeypatch.setattr(proctree, "run_owned", run)
+    apk = tmp_path / "app.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("classes.dex", b"dex-payload")
+    cache_root = tmp_path / "jadx-cache"
+    ctx = FakeContext(apk_path=str(apk), jadx_cache_root=str(cache_root))
+
+    first = JadxAnalyzer().analyze(ctx)
+    first_receipt = first.meta["jadx_receipt"]
+    (first_run,) = first_receipt["runs"]
+    assert first.meta["jadx_endpoint_count"] >= 1
+    assert (
+        first_run["returncode"], first_run["timed_out"], first_run["ownership_complete"],
+        first_run["termination_complete"], first_run["forced_tree_kill"],
+    ) == (0, False, True, True, False)
+    assert first_receipt["status"] == first.meta["jadx_status"] == "ok"
+    assert first_receipt["complete"] is True
+    assert first.meta["jadx_index_status"] == first_receipt["index"]["status"] == "built"
+    index_key = first.meta["jadx_index_key"]
+    assert first_receipt["index"]["key"] == index_key
+    assert (cache_root / index_key / "manifest.json").is_file()
+    assert isinstance(JadxIndexStore(cache_root).load_index(index_key), LoadedIndex)
+    cache_before = {
+        p.relative_to(cache_root).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in sorted(cache_root.rglob("*"))
+        if p.is_file()
+    }
+    assert f"{index_key}/manifest.json" in cache_before
+
+    load_calls: list[str] = []
+    build_calls: list[str] = []
+    orig_load = JadxIndexStore.load_index
+    orig_build = JadxIndexStore.build_index
+
+    def tracked_load(self: JadxIndexStore, key: str):  # noqa: ANN202
+        load_calls.append(key)
+        return orig_load(self, key)
+
+    def tracked_build(self: JadxIndexStore, source_root, manifest, **kwargs):  # noqa: ANN001, ANN202
+        build_calls.append(manifest.index_key)
+        return orig_build(self, source_root, manifest, **kwargs)
+
+    monkeypatch.setattr(JadxIndexStore, "load_index", tracked_load)
+    monkeypatch.setattr(JadxIndexStore, "build_index", tracked_build)
+    run_reason_codes = (flag,)
+
+    second = JadxAnalyzer().analyze(ctx)
+    second_receipt = second.meta["jadx_receipt"]
+    (second_run,) = second_receipt["runs"]
+    assert second.meta["jadx_endpoint_count"] >= 1
+    assert second_run["options_digest"] == first_run["options_digest"]
+    assert (
+        second_run["returncode"], second_run["timed_out"], second_run["ownership_complete"],
+        second_run["termination_complete"], second_run["forced_tree_kill"],
+    ) == (0, False, True, True, False)
+    assert second_receipt["status"] == second.meta["jadx_status"] == "partial"
+    assert second_receipt["complete"] is False
+    assert {flag, "producer_partial"} <= set(second_receipt["reason_codes"])
+    assert flag in second_run["reason_codes"]
+    assert second.meta["jadx_index_status"] == second_receipt["index"]["status"] == "disabled"
+    assert flag in second_receipt["index"]["reason_codes"]
+    assert "jadx_index_key" not in second.meta and "key" not in second_receipt["index"]
+    assert "jadx_query_sources" not in second.meta
+    assert load_calls == []
+    assert build_calls == []
+    cache_after = {
+        p.relative_to(cache_root).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in sorted(cache_root.rglob("*"))
+        if p.is_file()
+    }
+    assert cache_after == cache_before
