@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import IO
 
 from fxapk.core.redact import safe_exception_text
 
@@ -108,62 +110,123 @@ def _reap_returncode(proc: subprocess.Popen[str], reasons: list[str]) -> int | N
     return proc.returncode
 
 
-def _communicate_capped(
-    proc: subprocess.Popen[str],
-    payload: str | None,
-    timeout: float,
-    max_stdout_bytes: int | None,
-    max_stderr_bytes: int | None,
-) -> tuple[str, str, bool, bool]:
-    """边读边计数字节。超限只表示要杀整树，不把读完再切片当成内存限额。"""
-    exceeded = threading.Event()
-    chunks: dict[str, bytearray] = {"out": bytearray(), "err": bytearray()}
+class _OutputPipes:
+    """Separate root exit from pipe EOF. The owner stops the tree before final drain."""
 
-    def pump(stream: object, key: str, limit: int | None) -> None:
-        raw = getattr(stream, "buffer", None)
-        if raw is None:
-            return
-        while True:
-            block = raw.read(65536)
-            if not block:
-                return
-            chunks[key].extend(block)
-            if limit is not None and len(chunks[key]) > limit:
-                del chunks[key][limit:]
-                exceeded.set()
-                return
+    def __init__(self, stdout: IO[str], stderr: IO[str], out_limit: int | None, err_limit: int | None):
+        self.streams = (stdout, stderr)
+        self.normalize_newlines = out_limit is None and err_limit is None
+        self.buffers = (bytearray(), bytearray())
+        self.lock = threading.Lock()
+        self.changed = threading.Event()
+        self.cancel = threading.Event()
+        self.exceeded = threading.Event()
+        self.read_failed = threading.Event()
+        self.readers = [
+            threading.Thread(
+                target=self._pump, args=(stream, buf, limit), name=f"fxapk-pipe-{name}", daemon=True,
+            )
+            for stream, buf, limit, name in (
+                (stdout, self.buffers[0], out_limit, "stdout"),
+                (stderr, self.buffers[1], err_limit, "stderr"),
+            )
+        ]
 
-    if payload is not None and proc.stdin is not None:
-        proc.stdin.write(payload)
-        proc.stdin.close()
-    threads = [
-        threading.Thread(target=pump, args=(proc.stdout, "out", max_stdout_bytes), daemon=True),
-        threading.Thread(target=pump, args=(proc.stderr, "err", max_stderr_bytes), daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
-    deadline = time.monotonic() + timeout
-    while any(thread.is_alive() for thread in threads):
-        if exceeded.is_set() or time.monotonic() >= deadline:
-            break
-        time.sleep(_QUIESCE_INTERVAL)
-    timed_out = False
-    if not exceeded.is_set():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-        else:
-            # Both pipes can reach EOF while the command is still finishing.
-            # Preserve communicate's single deadline for both I/O and process exit.
+    def _pump(self, stream: IO[str], buf: bytearray, limit: int | None) -> None:
+        try:
+            fd = stream.fileno()
+            if sys.platform != "win32":
+                os.set_blocking(fd, False)
+            idle = 0.001
+            while not self.cancel.is_set():
+                block = _read_pipe_chunk(fd)
+                if block is None:  # Writer still open, but nothing available.
+                    self.cancel.wait(idle)
+                    idle = min(_QUIESCE_INTERVAL, 2 * idle)
+                    continue
+                idle = 0.001
+                if not block:
+                    break
+                with self.lock:
+                    room = len(block) if limit is None else max(0, limit - len(buf))
+                    buf.extend(block[:room])
+                    if room < len(block):
+                        self.exceeded.set()
+                        break
+        except Exception:  # noqa: BLE001 - a reader failure must invalidate the captured output
+            self.read_failed.set()
+        finally:
             try:
-                proc.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-    for thread in threads:
-        thread.join(timeout=1.0)
-    stdout = bytes(chunks["out"]).decode("utf-8", errors="replace")
-    stderr = bytes(chunks["err"]).decode("utf-8", errors="replace")
-    return stdout, stderr, exceeded.is_set(), timed_out
+                stream.close()
+            except OSError:
+                self.read_failed.set()
+            finally:
+                self.changed.set()
+
+    def start(self) -> None:
+        for reader in self.readers:
+            reader.start()
+
+    def wait_for_root(self, proc: subprocess.Popen[str], deadline: float) -> bool:
+        """True only for a live root exceeding its deadline, never for a held pipe."""
+        while any(reader.is_alive() for reader in self.readers):
+            if self.exceeded.is_set() or self.read_failed.is_set() or proc.poll() is not None:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            self.changed.wait(min(_QUIESCE_INTERVAL, remaining))
+            self.changed.clear()
+        if self.exceeded.is_set() or self.read_failed.is_set():
+            return False
+        # Both pipes can reach EOF while the command is still finishing.
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            return True
+        return False
+
+    def _join(self, budget: float) -> bool:
+        deadline = time.monotonic() + budget
+        for reader in self.readers:
+            if reader.ident is not None:
+                reader.join(timeout=max(0.0, deadline - time.monotonic()))
+        return not any(reader.is_alive() for reader in self.readers)
+
+    def close(self) -> None:
+        self.cancel.set()
+        self._join(_ROOT_EXIT_GRACE)
+        for reader, stream in zip(self.readers, self.streams):
+            if reader.ident is None:  # Thread.start() failed before it owned its pipe.
+                stream.close()
+
+    def finish(self, reasons: list[str]) -> tuple[str, str]:
+        # Even a handle outside our verified tree cannot strand a blocking read.
+        if not self._join(_ROOT_EXIT_GRACE):
+            reasons.append("output_drain_unverified")
+            self.close()
+        if self.read_failed.is_set():
+            reasons.append("output_read_failed")
+        with self.lock:
+            if self.exceeded.is_set():
+                reasons.append("output_limit")
+            stdout, stderr = (buffer.decode("utf-8", errors="replace") for buffer in self.buffers)
+        if self.normalize_newlines:
+            # Preserve Popen.communicate(text=True) output for uncapped callers.
+            stdout = stdout.replace("\r\n", "\n").replace("\r", "\n")
+            stderr = stderr.replace("\r\n", "\n").replace("\r", "\n")
+        return stdout, stderr
+
+
+def _write_gate_input(stream: IO[str], payload: str) -> bool:
+    try:
+        try:
+            stream.write(payload)
+        finally:
+            stream.close()  # Buffered writes may fail only when flushed here.
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def run_owned(
@@ -229,8 +292,28 @@ if sys.platform == "win32":
     # -----------------------------------------------------------------------
     import ctypes
     import ctypes.wintypes as wintypes
+    import msvcrt
+
 
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    # On Python 3.11 os.set_blocking does not yet support Windows pipes.
+    _kernel32.PeekNamedPipe.argtypes = (
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+    )
+    _kernel32.PeekNamedPipe.restype = wintypes.BOOL
+
+    def _read_pipe_chunk(fd: int) -> bytes | None:
+        available = wintypes.DWORD()
+        if not _kernel32.PeekNamedPipe(
+            msvcrt.get_osfhandle(fd), None, 0, None, ctypes.byref(available), None,
+        ):
+            error = ctypes.get_last_error()
+            if error == 109:  # ERROR_BROKEN_PIPE: all writer handles closed
+                return b""
+            raise ctypes.WinError(error)
+        return os.read(fd, min(available.value, 65536)) if available.value else None
 
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
     _JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x0008
@@ -346,6 +429,7 @@ if sys.platform == "win32":
         def __init__(self, job: int) -> None:
             self.job = job
             self.handles: list[int] = []
+            self.handle_lock = threading.Lock()
             self.seen = 0
             self.failed = False
             self.lock = threading.Lock()
@@ -385,7 +469,11 @@ if sys.platform == "win32":
                 _kernel32.CloseHandle(handle)
                 self.failed = True
                 return
-            self.handles.append(int(handle))
+            with self.handle_lock:
+                if not self.stop.is_set():
+                    self.handles.append(int(handle))
+                    return
+            _kernel32.CloseHandle(handle)  # Shutdown raced handle acquisition.
 
         def _collect(self) -> None:
             try:
@@ -405,6 +493,8 @@ if sys.platform == "win32":
                         return
                     if message.value == _JOB_OBJECT_MSG_NEW_PROCESS:
                         with self.lock:
+                            if self.stop.is_set():
+                                return
                             if self.seen >= 4096 or not pid.value:
                                 self.failed = True
                                 return
@@ -454,12 +544,22 @@ if sys.platform == "win32":
 
         def close(self) -> None:
             self.stop.set()
-            self.thread.join(timeout=1.0)
-            if self.thread.is_alive():
-                raise RuntimeError("Job exit tracker did not stop within its shutdown budget")
-            for handle in self.handles:
-                _kernel32.CloseHandle(handle)
-            _kernel32.CloseHandle(self.port)
+            try:
+                self.thread.join(timeout=_ROOT_EXIT_GRACE)
+                if self.thread.is_alive():
+                    logger.warning("[proctree] Job exit tracker exceeded its shutdown budget")
+            except RuntimeError:
+                logger.warning("[proctree] Job exit tracker join failed", exc_info=True)
+            finally:
+                try:
+                    # Never wait on the collector's lock around OS process queries.
+                    # New handles racing shutdown are closed by the collector itself.
+                    with self.handle_lock:
+                        handles, self.handles = self.handles, []
+                    for handle in handles:
+                        _kernel32.CloseHandle(handle)
+                finally:
+                    _kernel32.CloseHandle(self.port)
 
     def _create_kill_on_close_job() -> int | None:
         """建 Job 并置 KILL_ON_JOB_CLOSE（父进程崩溃时句柄关闭 → 整树兜底清理）。失败 → None。"""
@@ -640,6 +740,7 @@ if sys.platform == "win32":
         timed_out = False
         forced = False
         owned = False
+        capture: _OutputPipes | None = None
         reasons: list[str] = []
         try:
             if job is not None and tracker is not None and _assign_pid_to_job(job, proc.pid):
@@ -658,33 +759,19 @@ if sys.platform == "win32":
                     forced_tree_kill=False, reason_codes=_codes(*reasons),
                 )
             assert job is not None  # owned=True 蕴含 job 建立成功
-            payload = json.dumps(cmd, ensure_ascii=False) + "\n"
-            try:
-                if max_stdout_bytes is None and max_stderr_bytes is None:
-                    stdout, stderr = proc.communicate(input=payload, timeout=timeout)
-                else:
-                    stdout, stderr, capped, cap_timed_out = _communicate_capped(
-                        proc, payload, timeout, max_stdout_bytes, max_stderr_bytes,
-                    )
-                    if capped or cap_timed_out:
-                        _kernel32.TerminateJobObject(job, 1)
-                        if capped:
-                            reasons.append("output_limit")
-                        if cap_timed_out:
-                            timed_out = True
-                            reasons.append("timeout")
-            except subprocess.TimeoutExpired:
-                timed_out = True
+            assert proc.stdout is not None and proc.stderr is not None
+            capture = _OutputPipes(proc.stdout, proc.stderr, max_stdout_bytes, max_stderr_bytes)
+            deadline = time.monotonic() + timeout
+            capture.start()
+            sent = _write_gate_input(proc.stdin, json.dumps(cmd, ensure_ascii=False) + "\n")
+            if not sent:
+                reasons.append("gate_input_failed")
+            timed_out = sent and capture.wait_for_root(proc, deadline)
+            if timed_out:
                 reasons.append("timeout")
+            if not sent or timed_out or capture.exceeded.is_set() or capture.read_failed.is_set():
                 _kernel32.TerminateJobObject(job, 1)
-                stdout, stderr = _drain(proc)
-            if not timed_out:
-                # 截断强杀后可能尚未回收根进程；清理仍走原有短宽限。
-                if proc.poll() is None:
-                    try:
-                        proc.wait(timeout=_ROOT_EXIT_GRACE)
-                    except subprocess.TimeoutExpired:
-                        pass
+            else:
                 # 门（含其子命令）已退出：宽限后 Job 计数仍 >0 说明有脱管后代 → 强杀整树。
                 active = _job_active_after_grace(job)
                 if active is None:
@@ -704,6 +791,7 @@ if sys.platform == "win32":
             if not terminated:
                 reasons.append("survivors_after_kill")
             # 超时路径此前把 returncode 强制写成 None，正常退出码和被强杀的真实退出码都消失。
+            stdout, stderr = capture.finish(reasons)
             returncode = _reap_returncode(proc, reasons)
             if returncode == _GATE_ABORT_EXIT:
                 # 理论不可达（owned 才发命令），防御性定性为放弃执行。
@@ -719,20 +807,29 @@ if sys.platform == "win32":
                 process_limit_enforced=max_processes is not None and owned,
             )
         finally:
-            if job is not None:
-                try:
-                    if tracker is not None:
-                        tracker.close()
-                finally:
-                    _kernel32.CloseHandle(job)  # KILL_ON_JOB_CLOSE：兜底再清一次
+            try:
+                if job is not None:
+                    try:
+                        if tracker is not None:
+                            tracker.close()
+                    finally:
+                        _kernel32.CloseHandle(job)  # KILL_ON_JOB_CLOSE
+            finally:
+                if capture is not None:
+                    capture.close()
 
 else:
     # -----------------------------------------------------------------------
     # POSIX：新进程组 + killpg
     # -----------------------------------------------------------------------
-    import os
     import signal
     import uuid
+
+    def _read_pipe_chunk(fd: int) -> bytes | None:
+        try:
+            return os.read(fd, 65536)
+        except BlockingIOError:
+            return None
 
     _POSIX_TOKEN_ENV = "_FXAPK_OWNED_POSIX_TOKENS"
     _POSIX_TOKENS: dict[int, str] = {}
@@ -913,32 +1010,18 @@ else:
         forced = False
         reasons: list[str] = []
         completed = False
+        capture: _OutputPipes | None = None
         try:
-            try:
-                if max_stdout_bytes is None and max_stderr_bytes is None:
-                    stdout, stderr = proc.communicate(timeout=timeout)
-                else:
-                    stdout, stderr, capped, cap_timed_out = _communicate_capped(
-                        proc, None, timeout, max_stdout_bytes, max_stderr_bytes,
-                    )
-                    if capped or cap_timed_out:
-                        _posix_kill_group(pgid)
-                        if capped:
-                            reasons.append("output_limit")
-                        if cap_timed_out:
-                            timed_out = True
-                            reasons.append("timeout")
-            except subprocess.TimeoutExpired:
-                timed_out = True
+            assert proc.stdout is not None and proc.stderr is not None
+            capture = _OutputPipes(proc.stdout, proc.stderr, max_stdout_bytes, max_stderr_bytes)
+            deadline = time.monotonic() + timeout
+            capture.start()
+            timed_out = capture.wait_for_root(proc, deadline)
+            if timed_out:
                 reasons.append("timeout")
+            if timed_out or capture.exceeded.is_set() or capture.read_failed.is_set():
                 _posix_kill_group(pgid)
-                stdout, stderr = _drain(proc)
-            if not timed_out:
-                if proc.poll() is None:
-                    try:
-                        proc.wait(timeout=_ROOT_EXIT_GRACE)
-                    except subprocess.TimeoutExpired:
-                        pass
+            else:
                 # 根已退出：宽限后仍有脱管后代才强杀整组，该次运行不算完整覆盖。
                 if _posix_pids_after_grace(pgid):
                     forced = True
@@ -947,6 +1030,7 @@ else:
             terminated = _posix_wait_quiesce(pgid)
             if not terminated:
                 reasons.append("tree_state_unverified" if pgid in _POSIX_UNVERIFIED else "survivors_after_kill")
+            stdout, stderr = capture.finish(reasons)
             result = OwnedRun(
                 returncode=_reap_returncode(proc, reasons),
                 stdout=stdout, stderr=stderr, timed_out=timed_out,
@@ -970,6 +1054,8 @@ else:
                     proc.wait(timeout=_DRAIN_BUDGET)
                 except Exception:  # noqa: BLE001 - 外层保留原始 internal_error
                     logger.exception("[proctree] POSIX 异常收口 reap 失败：pgid=%s", pgid)
+            if capture is not None:
+                capture.close()
             _POSIX_TOKENS.pop(pgid, None)
             _POSIX_STARTED.pop(pgid, None)
             _POSIX_UNVERIFIED.discard(pgid)
