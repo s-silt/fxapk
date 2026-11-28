@@ -501,3 +501,220 @@ def test_cross_analyzer_decoded_manifest_and_plaintext_assets_end_to_end() -> No
         assert secret[:6] not in full_blob
         assert secret[-6:] not in full_blob
         assert str(len(secret)) not in full_blob
+
+
+def test_extension_first_routing_and_json_malformed_nonfallback() -> None:
+    toml_val = "SYNTH_INVALID_TOML_SECTION_VALUE_1111"
+    ini_val = "SYNTH_INVALID_INI_SECTION_VALUE_22222"
+    unknown_val = "SYNTH_INVALID_UNKNOWN_JSON_VALUE_3333"
+    dex_json_val = "SYNTH_INVALID_DEX_JSON_VALUE_44444444"
+    contents = {
+        # 以 [section] 开头且以 [footer] 结尾：按后缀优先直达锚定字面量扫描，绝不误判为 JSON
+        "assets/config/cloud.toml": f'[cloud]\nqiniu_secret_key = "{toml_val}"\n[footer]',
+        "assets/config/cloud.ini": f'[cloud]\nupyun_secret_key = "{ini_val}"\n[footer]',
+        # 未知扩展名资源与 DEX 片段走内容形态启发式
+        "assets/config/cloud_unknown": json.dumps({"rongcloud_app_secret": unknown_val}),
+        # .json 畸形内容绝不回退正则，即便内部含合法整行 KV
+        "assets/config/malformed_kv.json": 'aliyun_access_key_secret = "SYNTH_INVALID_JSON_KV_FALLBACK_5555"',
+        "assets/config/malformed_trunc.json": '{"tencent_secret_key": "SYNTH_INVALID_JSON_TRUNC_666666", ',
+    }
+    ctx = _Ctx(
+        dex=[json.dumps({"huaweicloud_sdk_sk": dex_json_val})],
+        files=list(contents),
+        contents={p: t.encode("utf-8") for p, t in contents.items()},
+    )
+    result = BackendCredentialAnalyzer().analyze(ctx)
+    assert {lead.value for lead in result.leads} == {
+        "qiniu:qiniu_secret_key=[REDACTED]",
+        "upyun:upyun_secret_key=[REDACTED]",
+        "rongcloud:rongcloud_app_secret=[REDACTED]",
+        "huawei_cloud:huaweicloud_sdk_sk=[REDACTED]",
+    }
+    blob = json.dumps([lead.value + lead.notes for lead in result.leads], ensure_ascii=False)
+    for secret in (toml_val, ini_val, unknown_val, dex_json_val):
+        assert secret not in blob
+
+
+def test_json_single_leading_utf8_bom_only() -> None:
+    single_bom_val = "SYNTH_INVALID_SINGLE_BOM_JSON_1234567"
+    double_bom_val = "SYNTH_INVALID_DOUBLE_BOM_JSON_7654321"
+    contents = {
+        "assets/config/bom_single.json": (
+            b"\xef\xbb\xbf" + json.dumps({"qiniu_secret_key": single_bom_val}).encode("utf-8")
+        ),
+        "assets/config/bom_double.json": (
+            b"\xef\xbb\xbf\xef\xbb\xbf" + json.dumps({"upyun_secret_key": double_bom_val}).encode("utf-8")
+        ),
+    }
+    ctx = _Ctx(files=list(contents), contents=contents)
+    result = BackendCredentialAnalyzer().analyze(ctx)
+    assert [lead.value for lead in result.leads] == ["qiniu:qiniu_secret_key=[REDACTED]"]
+    assert [(r.source, r.location) for r in result.leads[0].source_refs] == [
+        ("resource", "assets/config/bom_single.json")
+    ]
+
+
+def test_res_raw_qualified_directory_boundary() -> None:
+    zh_val = "SYNTH_INVALID_RAW_ZH_VALUE_111111111"
+    bcp47_val = "SYNTH_INVALID_RAW_BCP47_VALUE_222222"
+    extless_val = "SYNTH_INVALID_RAW_EXTLESS_VALUE_3333"
+    rejected_xml = '<resources><string name="agora_app_certificate">SYNTH_INVALID_REJECTED_BOUNDARY_99</string></resources>'
+    rejected_json = json.dumps({"tencent_secret_key": "SYNTH_INVALID_REJECTED_RAW_BOUNDARY"})
+    contents = {
+        "res/raw-zh-rCN/cloud.json": json.dumps({"qiniu_secret_key": zh_val}),
+        "res/raw-b+zh+Hans+CN/cloud.toml": f'[cloud]\nupyun_secret_key = "{bcp47_val}"\n[end]',
+        "res/raw-v24/cloud_cfg": json.dumps({"rongcloud_app_secret": extless_val}),
+        # 越界/非法限定符、编译资源与二进制 ARSC 一律排除
+        "res/raw-/cloud.json": rejected_json,
+        "res/raw_backup/cloud.json": rejected_json,
+        "res/raw-zh/../values/strings.xml": rejected_xml,
+        "res/values-zh-rCN/strings.xml": rejected_xml,
+        "resources.arsc": rejected_json,
+    }
+    ctx = _Ctx(
+        files=list(contents),
+        contents={p: t.encode("utf-8") for p, t in contents.items()},
+    )
+    result = BackendCredentialAnalyzer().analyze(ctx)
+    assert {lead.value for lead in result.leads} == {
+        "qiniu:qiniu_secret_key=[REDACTED]",
+        "upyun:upyun_secret_key=[REDACTED]",
+        "rongcloud:rongcloud_app_secret=[REDACTED]",
+    }
+
+
+def test_xml_ascii_edge_whitespace_strip_and_json_no_trim() -> None:
+    xml_val = "SYNTH_INVALID_XML_ASCII_STRIP_123456"
+    contents = {
+        "assets/config/formatted.xml": (
+            f'<resources><string name="aliyun_access_key_secret">\n  \t{xml_val}\r\n  </string></resources>'
+        ),
+        # 非 ASCII 空白（NBSP）在 XML 中不裁剪；JSON 字符串标量绝不裁剪两端空白
+        "assets/config/nbsp.xml": (
+            '<resources><string name="tencent_secret_key">\u00a0SYNTH_INVALID_XML_NBSP_12345678\u00a0</string></resources>'
+        ),
+        "assets/config/padded.json": json.dumps({"agora_app_certificate": "  SYNTH_INVALID_JSON_PADDED_123456  "}),
+    }
+    ctx = _Ctx(
+        files=list(contents),
+        contents={p: t.encode("utf-8") for p, t in contents.items()},
+    )
+    result = BackendCredentialAnalyzer().analyze(ctx)
+    assert [lead.value for lead in result.leads] == ["aliyun:aliyun_access_key_secret=[REDACTED]"]
+
+
+def test_structured_json_and_xml_escaped_keys_detected_after_decode() -> None:
+    json_val = "SYNTH_INVALID_ESCAPED_JSON_KEY_12345"
+    xml_val = "SYNTH_INVALID_ESCAPED_XML_KEY_678901"
+    contents = {
+        # 原始文本不含未转义拼写 qiniu_secret_key / agora_app_certificate
+        "assets/config/escaped.json": '{"\\u0071iniu_secret_key": "' + json_val + '"}',
+        "assets/config/escaped.xml": (
+            f'<resources><string name="&#x61;gora_app_certificate">{xml_val}</string></resources>'
+        ),
+    }
+    assert "qiniu_secret_key" not in contents["assets/config/escaped.json"]
+    assert "agora_app_certificate" not in contents["assets/config/escaped.xml"]
+    ctx = _Ctx(
+        files=list(contents),
+        contents={p: t.encode("utf-8") for p, t in contents.items()},
+    )
+    result = BackendCredentialAnalyzer().analyze(ctx)
+    assert {lead.value for lead in result.leads} == {
+        "qiniu:qiniu_secret_key=[REDACTED]",
+        "agora:agora_app_certificate=[REDACTED]",
+    }
+
+
+def test_invalid_literals_do_not_consume_candidate_cap_and_overflow_flags_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bc_mod, "_MAX_CLOUD_CANDIDATES_PER_TEXT", 1)
+    valid = "SYNTH_INVALID_CAP_VALID_VALUE_123456"
+    early_invalid = {
+        "assets/cap/early.json": json.dumps(
+            {"a": {"qiniu_secret_key": "true"}, "b": {"qiniu_secret_key": "short"}, "c": {"upyun_secret_key": valid}}
+        ),
+        "assets/cap/early.xml": (
+            '<resources><string name="agora_app_certificate">null</string>'
+            f'<string name="agora_app_certificate">{valid}</string></resources>'
+        ),
+        "assets/cap/early.txt": f'tencent_secret_key = "false"\ntencent_secret_key = "{valid}"',
+    }
+    ctx = _Ctx(files=list(early_invalid), contents={p: t.encode("utf-8") for p, t in early_invalid.items()})
+    result = BackendCredentialAnalyzer().analyze(ctx)
+    # 早期无效值不占上限，后续有效值不被遮蔽；恰好等于上限不误报截断
+    assert {lead.value for lead in result.leads} == {
+        "upyun:upyun_secret_key=[REDACTED]",
+        "agora:agora_app_certificate=[REDACTED]",
+        "tencent_cloud:tencent_secret_key=[REDACTED]",
+    }
+    assert "backend_credential_budget_exhausted" not in result.meta
+
+    overflow = {"assets/cap/two.txt": f'tencent_secret_key = "{valid}"\ntencent_secret_key = "{valid}"'}
+    over = BackendCredentialAnalyzer().analyze(
+        _Ctx(files=list(overflow), contents={p: t.encode("utf-8") for p, t in overflow.items()})
+    )
+    assert over.meta["backend_credential_budget_exhausted"] == 1
+    assert [len(lead.source_refs) for lead in over.leads] == [1]
+
+
+def test_json_node_cap_boundary_and_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:
+    valid = "SYNTH_INVALID_NODE_CAP_VALUE_1234567"
+    doc = json.dumps({"outer": {"qiniu_secret_key": valid}}).encode("utf-8")
+    ctx = _Ctx(files=["assets/n.json"], contents={"assets/n.json": doc})
+    monkeypatch.setattr(bc_mod, "_MAX_CLOUD_JSON_NODES", 2)
+    exact = BackendCredentialAnalyzer().analyze(ctx)
+    assert [lead.value for lead in exact.leads] == ["qiniu:qiniu_secret_key=[REDACTED]"]
+    assert "backend_credential_budget_exhausted" not in exact.meta
+    monkeypatch.setattr(bc_mod, "_MAX_CLOUD_JSON_NODES", 1)
+    short = BackendCredentialAnalyzer().analyze(ctx)
+    assert short.leads == []
+    assert short.meta["backend_credential_budget_exhausted"] == 1
+
+
+def test_capped_refs_deterministic_across_member_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bc_mod, "_MAX_CLOUD_REFS_PER_HIT", 2)
+    contents = {
+        "assets/z/cloud.json": json.dumps({"qiniu_secret_key": "SYNTH_INVALID_REFCAP_Z_VALUE_00000"}),
+        "assets/a/cloud.json": json.dumps(
+            {"x": {"qiniu_secret_key": "SYNTH_INVALID_REFCAP_A1_VALUE_9999"}, "y": {"qiniu_secret_key": "SYNTH_INVALID_REFCAP_A2_VALUE_1111"}}
+        ),
+        "assets/m/cloud.json": json.dumps({"qiniu_secret_key": "SYNTH_INVALID_REFCAP_M_VALUE_55555"}),
+    }
+    data = {p: t.encode("utf-8") for p, t in contents.items()}
+    marker = "qiniu:qiniu_secret_key=[REDACTED]"
+    expected = [
+        ("resource", "assets/a/cloud.json", f"{marker} #1"),
+        ("resource", "assets/a/cloud.json", f"{marker} #2"),
+    ]
+    for order in (sorted(contents), sorted(contents, reverse=True)):
+        result = BackendCredentialAnalyzer().analyze(_Ctx(files=order, contents=data))
+        assert [lead.value for lead in result.leads] == [marker]
+        assert [(e.source, e.location, e.snippet) for e in result.leads[0].source_refs] == expected
+        assert result.meta["backend_credential_budget_exhausted"] == 1
+        blob = json.dumps([e.snippet for e in result.leads[0].source_refs])
+        assert "SYNTH" not in blob
+
+
+def test_cloud_only_resources_after_legacy_budget_without_legacy_leak(monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy_basic = "Authorization: Basic " + base64.b64encode(b"admin:LegacyPass123").decode("ascii")
+    leak_basic = "Authorization: Basic " + base64.b64encode(b"root:QxzwvKkpp8812").decode("ascii")
+    cloud_val = "SYNTH_INVALID_CLOUD_ONLY_RAW_VALUE_77"
+    contents = {
+        # 列举在前，但仅云资源必须排在既有 legacy 资源之后、只吃剩余预算
+        "res/raw-v24/extra_cfg": f'qiniu_secret_key = "{cloud_val}"\n{leak_basic}',
+        "assets/legacy.txt": legacy_basic,
+    }
+    data = {p: t.encode("utf-8") for p, t in contents.items()}
+    full = BackendCredentialAnalyzer().analyze(_Ctx(files=list(contents), contents=data))
+    assert {lead.value for lead in full.leads} == {
+        "Basic admin:LegacyPass123",
+        "qiniu:qiniu_secret_key=[REDACTED]",
+    }
+    assert "backend_credential_budget_exhausted" not in full.meta
+
+    monkeypatch.setattr(bc_mod, "_MAX_TOTAL_RESOURCE_BYTES", len(data["assets/legacy.txt"]))
+    capped = BackendCredentialAnalyzer().analyze(_Ctx(files=list(contents), contents=data))
+    assert [lead.value for lead in capped.leads] == ["Basic admin:LegacyPass123"]
+    assert capped.meta["backend_credential_budget_exhausted"] == 1
