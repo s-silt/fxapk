@@ -251,6 +251,8 @@ def _worker_analyze(name: str) -> tuple:
 
 
 def _invoke_analyzer(ctx: object, name: str, analyzer: object) -> tuple:
+    from fxapk.core.apk import _analyzer_file_read_scope
+
     ledger = getattr(ctx, "file_read_ledger", None)
     begin_scope = getattr(ledger, "begin_scope", None)
     end_scope = getattr(ledger, "end_scope", None)
@@ -264,7 +266,8 @@ def _invoke_analyzer(ctx: object, name: str, analyzer: object) -> tuple:
             return []
         return [gap for item in raw if (gap := normalize_gap(item)) is not None]
     try:
-        result = getattr(analyzer, "analyze")(ctx)
+        with _analyzer_file_read_scope():
+            result = getattr(analyzer, "analyze")(ctx)
     except Exception as exc:  # noqa: BLE001 — 单分析器失败不炸 worker，回传错误
         # 错误处理铁律：记完整堆栈（与串行 _analyze_serial 同口径）。worker 已在 _worker_init
         # 配好日志，logger.exception 把 traceback 落到 worker stderr（继承主控台）；否则并行路只

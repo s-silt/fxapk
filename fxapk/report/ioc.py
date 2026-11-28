@@ -64,13 +64,13 @@ _ADVICE_INVESTIGATE = "建议调证"
 #: Excel 公式注入触发字符：单元格首字符 ∈ 此集合时，Excel/WPS 会把整格当公式求值。
 #: IOC 值（域名/配置键/联系串）直接来自不可信样本内容，攻击者可构造 ``=cmd|...`` 等载荷，
 #: 分析员一打开导出的 CSV 就触发。与 OneDrive 富化工具的 csv_safe 同口径。
-_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@")
 
 
 def _csv_safe(value: Any) -> str:
     """防 Excel/WPS 公式注入：首字符是公式触发符时前置单引号（值本身不变、只加显示转义）。"""
     s = _str_or_empty(value)
-    if s and s[0] in _CSV_FORMULA_TRIGGERS:
+    if s.startswith(("\t", "\r", "\n")) or s.lstrip().startswith(_CSV_FORMULA_TRIGGERS):
         return "'" + s
     return s
 

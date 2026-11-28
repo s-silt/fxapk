@@ -1498,3 +1498,17 @@ def test_polish_toc_and_offline_discipline(sample_report: Report, tmp_path: Path
     assert literal_urls == []  # 模板任何行含字面 URL 都拒（复审收紧：{{ 行豁免是漏报面）
     # P1 回归锁：既有 class 只增不改——旧类 top 必须与新类并存
     assert 'class="top report-top"' in html
+
+
+@pytest.mark.parametrize("link,clickable", [
+    ("https://registry.example.test/check", True),
+    ("http://registry.example.test/check", True),
+    ("sample:inert", False),
+    ("//registry.example.test/check", False),
+])
+def test_icp_lookup_url_is_only_clickable_for_web_links(sample_report, link, clickable):
+    ep = next(ep for ep in sample_report.endpoints if ep.kind == "domain")
+    ep.enrichment = {"icp": {"subject": "registry lookup", "lookup_url": link}}
+    html = report_html.render_to_string(sample_report)
+    assert "registry lookup" in html
+    assert (f'href="{link}"' in html) is clickable

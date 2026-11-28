@@ -5,7 +5,6 @@ import base64
 import binascii
 import hashlib
 import ipaddress
-import json
 from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -14,7 +13,8 @@ from urllib.parse import urljoin, urlsplit
 from fxapk.analyzers._common import EndpointCollector
 from fxapk.analyzers.endpoints import EndpointsAnalyzer
 from fxapk.analyzers.web_evidence import _iter_text, coverage_meta_categories_for
-from fxapk.core.json_contract import reject_nonfinite_json_constant
+from fxapk.core.json_contract import parse_finite_json_float, reject_nonfinite_json_constant
+from fxapk.core.json_io import loads_bounded
 from fxapk.core.models import AnalyzerResult, Evidence
 from fxapk.core.registry import BaseAnalyzer
 from fxapk.core.webctx import (
@@ -98,7 +98,10 @@ def decode_har_evidence(ctx: "AnalysisContext") -> tuple[AnalyzerResult, tuple[W
     for path, text in _iter_text(ctx, "web_har", (".har", ".har.json"), result, raw_inputs=raw_inputs):
         source_sha256 = hashlib.sha256(raw_inputs[path]).hexdigest()
         try:
-            payload = json.loads(text.lstrip("\ufeff"), parse_constant=reject_nonfinite_json_constant)
+            payload = loads_bounded(
+                text.lstrip("\ufeff"), parse_constant=reject_nonfinite_json_constant,
+                parse_float=parse_finite_json_float,
+            )
         except (ValueError, RecursionError):
             gap("invalid_har_json")
             continue

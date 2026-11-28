@@ -1403,3 +1403,37 @@ def test_backfill_materializes_latest_case_bindings_before_equal_length_write(
     assert entry["case_ids"] == ["case-a", "case-b"]
     assert entry["case_id"] is None
     assert entry["report_bytes_sha256_origin"] == corpus.HASH_ORIGIN_BACKFILL
+
+
+def test_catalog_lock_creates_private_state_and_checks_links(tmp_path, monkeypatch):
+    import os
+    import stat
+    from types import SimpleNamespace
+
+    root = tmp_path / "private" / "catalog"
+    lock = root / catalog.CATALOG_LOCK_NAME
+    with catalog.catalog_write_lock(root):
+        assert lock.is_file()
+        if os.name == "posix":
+            for path in (root.parent, root, lock):
+                assert path.stat().st_mode & 0o077 == 0
+
+    # A mocked linked lock must be rejected before an open attempt.
+    original_stat = Path.lstat
+    def lstat(path):
+        if path == lock:
+            return SimpleNamespace(st_mode=stat.S_IFLNK)
+        return original_stat(path)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(OSError, match="not a regular private file"):
+        with catalog.catalog_write_lock(root):
+            pytest.fail("must not hold a linked lock")
+
+
+def test_catalog_lock_works_without_windows_reparse_stat_constant(tmp_path, monkeypatch):
+    import stat
+
+    root = tmp_path / "catalog-posix"
+    monkeypatch.delattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", raising=False)
+    with catalog.catalog_write_lock(root):
+        assert (root / catalog.CATALOG_LOCK_NAME).is_file()

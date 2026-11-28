@@ -996,3 +996,130 @@ def test_build_snapshot_charges_discarded_reads_and_caps_bad_reads() -> None:
     snap_mod.build_snapshot(ctx3)
     assert seen == [0]
     assert apk_mod._other_extract_total_bytes.get() is None
+
+
+class _BudgetReader:
+    def __init__(self, files, overhead=None):
+        self.files = files
+        self.overhead = overhead or {}
+
+    def get_file(self, path):
+        from fxapk.core import apk as apk_mod
+
+        data = self.files[path]
+        prior = apk_mod._other_extract_total_bytes.get()
+        if prior is not None:
+            total = prior + len(data) + self.overhead.get(path, 0)
+            if total > apk_mod._OTHER_TOTAL_LIMIT_BYTES:
+                apk_mod._other_extract_total_bytes.set(apk_mod._OTHER_TOTAL_LIMIT_BYTES + 1)
+                raise apk_mod.ZipEntryTooLargeError(path, apk_mod._OTHER_TOTAL_LIMIT_BYTES)
+            apk_mod._other_extract_total_bytes.set(total)
+        return data
+
+    def get_files(self):
+        return list(self.files)
+
+
+class _BudgetAnalyzer:
+    def __init__(self, name, paths):
+        self.name = name
+        self.paths = paths
+
+    def analyze(self, ctx):
+        from fxapk.core.models import AnalyzerResult
+
+        return AnalyzerResult(analyzer=self.name, meta={
+            "readable": [ctx.read_file(path) is not None for path in self.paths],
+        })
+
+
+def _budget_bytes(rows):
+    import json
+
+    return json.dumps([
+        (name, result.meta, result.input_gaps, error) for name, result, error in rows
+    ], ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+def _budget_worker(files, *, cached=None, overhead=None, snapshot=None):
+    import pickle
+
+    from fxapk.core.models import AnalysisConfig, ComponentSet
+
+    if snapshot is None:
+        snapshot = SnapshotContext(
+            package_name="com.example.synthetic", manifest_xml="", platform="android",
+            config=AnalysisConfig(online=False), apk_path="", extra_dex_paths=[],
+            jadx_cache_root=None, jadx_baseline_index=None, permissions=[],
+            components=ComponentSet(), dex_strings=(), file_list=list(files),
+            native_libs=[], certificates=[], files=cached or {},
+        )
+    clone = pickle.loads(pickle.dumps(snapshot))
+    clone._worker_apk = _BudgetReader(files, overhead)
+    return clone
+
+
+def test_resource_budget_is_per_analyzer_independent_of_worker_assignment(monkeypatch):
+    from fxapk.core import apk as apk_mod
+    from fxapk.core.models import AnalysisConfig
+
+    monkeypatch.setattr(apk_mod, "_OTHER_TOTAL_LIMIT_BYTES", 5)
+    files = {"one.bin": b"abc", "two.bin": b"def"}
+    reads = [("first", _BudgetAnalyzer("first", ["one.bin"])),
+             ("second", _BudgetAnalyzer("second", ["two.bin"]))]
+    serial_ctx = apk_mod.ApkContext(_BudgetReader(files), [], AnalysisConfig(online=False))
+    serial = parallel._analyze_serial(serial_ctx, reads)
+    same_worker = parallel._analyze_serial(_budget_worker(files), reads)
+    split_workers = [
+        parallel._invoke_analyzer(_budget_worker(files), name, analyzer)
+        for name, analyzer in reads
+    ]
+
+    assert [row[1].meta["readable"] for row in serial] == [[True], [True]]
+    assert _budget_bytes(serial) == _budget_bytes(same_worker) == _budget_bytes(split_workers)
+
+
+def test_resource_budget_covers_prefetch_and_cache_hits_without_poisoning_next_analyzer(monkeypatch):
+    from fxapk.core import apk as apk_mod
+    from fxapk.core.models import AnalysisConfig
+
+    monkeypatch.setattr(apk_mod, "_OTHER_TOTAL_LIMIT_BYTES", 5)
+    files = {"one.txt": b"abc", "two.bin": b"def"}
+    tasks = [("repeat", _BudgetAnalyzer("repeat", ["one.txt", "one.txt", "two.bin"])),
+             ("next", _BudgetAnalyzer("next", ["one.txt", "two.bin"])),
+             ("next_again", _BudgetAnalyzer("next_again", ["two.bin"]))]
+    serial_ctx = apk_mod.ApkContext(_BudgetReader(files), [], AnalysisConfig(online=False))
+    serial = parallel._analyze_serial(serial_ctx, tasks)
+    prefetched = parallel._analyze_serial(_budget_worker(files, cached={"one.txt": b"abc"}), tasks)
+    lazy = parallel._analyze_serial(_budget_worker(files), tasks)
+
+    assert [row[1].meta["readable"] for row in serial] == [[True, False, False], [True, False], [True]]
+    assert [gap["reason"] for gap in serial[0][1].input_gaps] == ["decompression_budget"] * 2
+    assert _budget_bytes(serial) == _budget_bytes(prefetched) == _budget_bytes(lazy)
+
+
+def test_prefetch_preserves_extra_decoder_cost_without_charging_a_later_scope_early(monkeypatch):
+    from fxapk.core import apk as apk_mod
+    from fxapk.core.models import AnalysisConfig, ComponentSet
+
+    monkeypatch.setattr(apk_mod, "_OTHER_TOTAL_LIMIT_BYTES", 5)
+    files = {"prefix.txt": b"ab", "body.bin": b"cd"}
+    overhead = {"prefix.txt": 2}
+    config = AnalysisConfig(online=False)
+    ctx = apk_mod.ApkContext(_BudgetReader(files, overhead), [], config)
+    # Only the archive resource interfaces participate in this regression.
+    ctx.__dict__.update(_pkg_decision=("com.example.synthetic", None), manifest_xml="")
+    monkeypatch.setattr(ctx, "permissions", lambda: [])
+    monkeypatch.setattr(ctx, "components", ComponentSet)
+    monkeypatch.setattr(ctx, "certificates", lambda: [])
+
+    snapshot = build_snapshot(ctx)
+    assert snapshot._files == {"prefix.txt": b"ab"}
+    tasks = [("pair", _BudgetAnalyzer("pair", ["prefix.txt", "body.bin"])),
+             ("body", _BudgetAnalyzer("body", ["body.bin"]))]
+    serial = parallel._analyze_serial(ctx, tasks)
+    from_prefetch = parallel._analyze_serial(_budget_worker(files, overhead=overhead, snapshot=snapshot), tasks)
+    from_lazy = parallel._analyze_serial(_budget_worker(files, overhead=overhead), tasks)
+
+    assert [row[1].meta["readable"] for row in serial] == [[True, False], [True]]
+    assert _budget_bytes(serial) == _budget_bytes(from_prefetch) == _budget_bytes(from_lazy)
