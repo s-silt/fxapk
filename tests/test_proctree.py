@@ -107,7 +107,7 @@ def test_capped_run_waits_for_process_after_output_eof(
     try:
         capture.start()
         assert capture._join(5.0)
-        now = time.monotonic()
+        now = 100.0
         monkeypatch.setattr(proctree, "time", SimpleNamespace(monotonic=lambda: now))
         assert capture.wait_for_root(proc, now + remaining) is timed_out
         proc.wait.assert_called_once_with(timeout=remaining)
