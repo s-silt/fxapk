@@ -8,11 +8,15 @@
 from __future__ import annotations
 
 import hashlib
+import zipfile
 from pathlib import Path
 
 import pytest
 
+from fxapk.analyzers import jadx
+from fxapk.analyzers.jadx import JadxAnalyzer
 from fxapk.core import judgment_ledger as jl
+from fxapk.core import proctree
 from fxapk.core import recognition_contract as rc
 from fxapk.core.jadx_index import (
     DexInput,
@@ -40,6 +44,7 @@ from fxapk.core.jadx_ownership import (
     RegionOwnership,
     project_ownership,
 )
+from tests.conftest import FakeContext
 from tests.recognition_fixtures import (
     FIXED_TIME,
     append_record,
@@ -544,3 +549,75 @@ def test_generic_overload_identities_survive_ownership(tmp_path: Path) -> None:
         "handle/1",
         "handle/2",
     ]
+
+
+_OUTPUT_UNVERIFIED = ("output_drain_unverified", "output_read_failed")
+
+
+def _clean_exit(stdout: str = "", reason_codes: tuple[str, ...] = ()) -> proctree.OwnedRun:
+    return proctree.OwnedRun(
+        returncode=0, stdout=stdout, stderr="", timed_out=False,
+        ownership_complete=True, termination_complete=True,
+        forced_tree_kill=False, reason_codes=reason_codes,
+    )
+
+
+@pytest.mark.parametrize("flag", _OUTPUT_UNVERIFIED)
+def test_version_probe_rejects_clean_exit_with_unverified_output(
+    monkeypatch: pytest.MonkeyPatch, flag: str,
+) -> None:
+    monkeypatch.setattr(proctree, "run_owned", lambda *_a, **_kw: _clean_exit("1.5.2\n"))
+    assert jadx._probe_jadx_version((["jadx"], {})) == "1.5.2"
+    monkeypatch.setattr(
+        proctree, "run_owned", lambda *_a, **_kw: _clean_exit("1.5.2\n", (flag,)),
+    )
+    assert jadx._probe_jadx_version((["jadx"], {})) is None
+
+
+@pytest.mark.parametrize("flag", [None, *_OUTPUT_UNVERIFIED])
+def test_decompile_clean_exit_with_unverified_output_is_partial_and_uncached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, flag: str | None,
+) -> None:
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: (["jadx"], {}))
+
+    def run(cmd, *, timeout, env=None, **_limits):  # noqa: ANN001
+        if "--version" in cmd:
+            return _clean_exit("1.5.2\n")
+        pkg = Path(cmd[cmd.index("-d") + 1]) / "sources" / "com" / "x"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "C.java").write_text(
+            'class C { String u = "https://cfg-host.example/api"; }\n', encoding="utf-8",
+        )
+        return _clean_exit(reason_codes=(flag,) if flag else ())
+
+    monkeypatch.setattr(proctree, "run_owned", run)
+    apk = tmp_path / "app.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("classes.dex", b"dex-payload")
+    ctx = FakeContext(apk_path=str(apk), jadx_cache_root=str(tmp_path / "jadx-cache"))
+
+    index_statuses: list[str] = []
+    for _ in range(2):  # The second pass shows whether the first one published an index.
+        result = JadxAnalyzer().analyze(ctx)
+        receipt = result.meta["jadx_receipt"]
+        (run_receipt,) = receipt["runs"]
+        index_statuses.append(result.meta["jadx_index_status"])
+        assert result.meta["jadx_endpoint_count"] >= 1
+        assert (
+            run_receipt["returncode"], run_receipt["timed_out"], run_receipt["ownership_complete"],
+            run_receipt["termination_complete"], run_receipt["forced_tree_kill"],
+        ) == (0, False, True, True, False)
+        if flag is None:
+            assert receipt["status"] == "ok" and receipt["complete"] is True
+            continue
+        assert receipt["status"] == result.meta["jadx_status"] == "partial"
+        assert receipt["complete"] is False
+        assert {flag, "producer_partial"} <= set(receipt["reason_codes"])
+        assert flag in run_receipt["reason_codes"]
+        assert flag in receipt["index"]["reason_codes"]
+        assert "jadx_index_key" not in result.meta and "key" not in receipt["index"]
+    if flag is None:
+        assert index_statuses == ["built", "reused"]
+    else:
+        assert index_statuses == ["disabled", "disabled"]
+        assert not (tmp_path / "jadx-cache").exists()

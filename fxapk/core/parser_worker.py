@@ -27,6 +27,8 @@ _LOG_TREE_REASON_CODES = frozenset({
     "survivors_after_kill",
     "tree_state_unverified",
 })
+# A clean exit cannot vouch for a response whose pipe drain or read was not verified.
+_OUTPUT_UNVERIFIED_CODES = frozenset({"output_drain_unverified", "output_read_failed"})
 
 
 class ParserBridgeError(RuntimeError):
@@ -450,6 +452,8 @@ def _run_operation(request: dict[str, Any], limits: ParserLimits) -> dict[str, A
                 max_stderr_bytes=limits.max_stderr_bytes,
             )
             reason = _fail_reason(run)
+            if reason is None and not _OUTPUT_UNVERIFIED_CODES.isdisjoint(run.reason_codes):
+                reason = "parser_invalid_response"
             if reason:
                 read_diagnostic = None
                 if request["operation"] == "read_file" and reason == "parser_worker_failed":
