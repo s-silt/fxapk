@@ -17,7 +17,9 @@ import sys
 import zipfile
 import zlib
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, NoReturn, cast
@@ -491,9 +493,10 @@ class ZipEntryTooLargeError(RuntimeError):
     entry: str | None
     limit: int
 
-    def __init__(self, entry: str | None, limit: int) -> None:
+    def __init__(self, entry: str | None, limit: int, *, resource_budget: bool = False) -> None:
         self.entry = entry
         self.limit = limit
+        self.resource_budget = resource_budget
         display_entry = entry if entry is not None else "<未知条目>"
         super().__init__(f"疑 zip 炸弹：条目 {display_entry} 实际解压产出超 {limit} 字节上限")
 
@@ -519,6 +522,70 @@ _other_extract_total_bytes: ContextVar[int | None] = ContextVar(
 _OTHER_TOTAL_LIMIT_BYTES = 1024 * 1024 * 1024
 
 
+@dataclass
+class _AnalyzerResourceBudget:
+    """One analyzer's logical reads and equivalent decode work, not one worker's.
+
+    Reused bytes still count as reads. For cached content we replay the known
+    decode cost so prefetch or earlier analyzers cannot change availability.
+    Physical work is separately metered by the decoder, including discarded
+    output and fallback attempts.
+    """
+
+    logical_bytes: int = 0
+    decode_bytes: int = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return max(self.logical_bytes, self.decode_bytes) >= _OTHER_TOTAL_LIMIT_BYTES
+
+    def admit(self, data: bytes | None, decoded: int, *, denied: bool = False) -> bool:
+        count = 0 if data is None else len(data)
+        if (denied or self.logical_bytes + count > _OTHER_TOTAL_LIMIT_BYTES
+                or self.decode_bytes + max(count, decoded) > _OTHER_TOTAL_LIMIT_BYTES):
+            self.decode_bytes = _OTHER_TOTAL_LIMIT_BYTES
+            return False
+        self.logical_bytes += count
+        self.decode_bytes += max(count, decoded)
+        return True
+
+
+_ANALYZER_RESOURCE_BUDGET: ContextVar[_AnalyzerResourceBudget | None] = ContextVar(
+    "analyzer_resource_budget", default=None,
+)
+
+
+@contextmanager
+def _analyzer_file_read_scope() -> Iterator[None]:
+    token = _ANALYZER_RESOURCE_BUDGET.set(_AnalyzerResourceBudget())
+    try:
+        yield
+    finally:
+        _ANALYZER_RESOURCE_BUDGET.reset(token)
+
+
+def _active_resource_budget(path: str) -> _AnalyzerResourceBudget | None:
+    # Main DEX uses a separate compatibility and size policy.
+    return None if _is_dex_entry_name(path) else _ANALYZER_RESOURCE_BUDGET.get()
+
+
+@dataclass
+class _DecodingWork:
+    bytes_used: int = 0
+
+
+@contextmanager
+def _measure_other_decoding(start: int) -> Iterator[_DecodingWork]:
+    """Bound a raw read at the remaining allowance and measure its actual work."""
+    work = _DecodingWork()
+    token = _other_extract_total_bytes.set(start)
+    try:
+        yield work
+    finally:
+        work.bytes_used = max(0, (_other_extract_total_bytes.get() or 0) - start)
+        _other_extract_total_bytes.reset(token)
+
+
 def _bounded_extract_file_based_on_header_info(
     apk_file: BinaryIO,
     local_header_info: Mapping[str, Any],
@@ -526,9 +593,20 @@ def _bounded_extract_file_based_on_header_info(
 ) -> tuple[bytes, str]:
     """按 apkInspector 原分支提取条目，但按实际解压产出施加单文件硬上限。"""
 
-    cap = _MAX_DECOMPRESSED_FILE_BYTES
     raw_entry = central_directory_info.get("filename")
     entry = raw_entry if isinstance(raw_entry, str) else None
+    is_dex = entry is not None and _is_dex_entry_name(entry)
+
+    def _attempt_cap() -> int:
+        # The fallback is a new decoding attempt, not another chance to spend
+        # the original remaining allowance.
+        charged = None if is_dex else _other_extract_total_bytes.get()
+        if charged is None:
+            return _MAX_DECOMPRESSED_FILE_BYTES
+        remaining = _OTHER_TOTAL_LIMIT_BYTES - charged
+        if remaining <= 0:
+            raise ZipEntryTooLargeError(entry, _OTHER_TOTAL_LIMIT_BYTES, resource_budget=True)
+        return min(_MAX_DECOMPRESSED_FILE_BYTES, remaining)
 
     def _charge_other_total(nbytes: int) -> None:
         """非 DEX 条目按实际解压产出计入跨条目总预算；超限抛 ZipEntryTooLargeError。
@@ -536,7 +614,7 @@ def _bounded_extract_file_based_on_header_info(
         只在 ``_other_extract_total_bytes`` 作用域内生效（None → 不聚合，与 DEX 计数器
         同口径）；DEX 条目走自己的 ``_dex_extract_total_bytes``，此处跳过。
         """
-        if entry is not None and _is_dex_entry_name(entry):
+        if is_dex:
             return
         current = _other_extract_total_bytes.get()
         if current is None:
@@ -550,11 +628,9 @@ def _bounded_extract_file_based_on_header_info(
                 _OTHER_TOTAL_LIMIT_BYTES,
                 entry if entry is not None else "<未知条目>",
             )
-            raise ZipEntryTooLargeError(entry, _OTHER_TOTAL_LIMIT_BYTES)
+            raise ZipEntryTooLargeError(entry, _OTHER_TOTAL_LIMIT_BYTES, resource_budget=True)
 
-    def _raise_too_large(indicator: str) -> NoReturn:
-        # ★被丢弃的解压产出同样计入聚合预算——「解压到 cap+1 才放弃」的工作不白做。
-        _charge_other_total(cap + 1)
+    def _raise_too_large(indicator: str, cap: int) -> NoReturn:
         logger.warning(
             "apkInspector 有界解压拒绝（疑 zip 炸弹）：条目 %s 实际产出超 %d 字节上限（%s）",
             entry if entry is not None else "<未知条目>",
@@ -566,11 +642,12 @@ def _bounded_extract_file_based_on_header_info(
     def _bounded_read(size: int, indicator: str) -> bytes:
         # ZIP 头字段正常为无符号整数。若异常调用者传入负数，也不能让 read(-1)
         # 退化为无界读取；改为最多探测 cap + 1 字节。
+        cap = _attempt_cap()
         read_size = cap + 1 if size < 0 else min(size, cap + 1)
         data = apk_file.read(read_size)
-        if len(data) > cap:
-            _raise_too_large(indicator)
         _charge_other_total(len(data))
+        if len(data) > cap:
+            _raise_too_large(indicator, cap)
         return data
 
     def _bounded_inflate(
@@ -587,6 +664,7 @@ def _bounded_extract_file_based_on_header_info(
         ``zlib.decompress(whole, -15)`` 一致：短读（EOF）照原样、尾随垃圾忽略、
         不完整流抛 ``zlib.error``。
         """
+        cap = _attempt_cap()
         c_obj = zlib.decompressobj(-15)
         output = bytearray()
         # 负值按原 read(-1) 语义读到 EOF；ZIP 头字段正常为无符号整数。
@@ -605,10 +683,15 @@ def _bounded_extract_file_based_on_header_info(
                     left -= len(pending)
             remaining = cap + 1 - len(output)
             if remaining <= 0:
-                _raise_too_large(indicator)
-            output.extend(c_obj.decompress(pending, remaining))
+                _raise_too_large(indicator, cap)
+            decoded = c_obj.decompress(pending, remaining)
+            # Charge every returned chunk before any later read or decode can
+            # fail, so an attempted fallback only receives the remaining budget.
+            _charge_other_total(len(decoded))
+            output.extend(decoded)
+            del decoded
             if len(output) > cap:
-                _raise_too_large(indicator)
+                _raise_too_large(indicator, cap)
             pending = c_obj.unconsumed_tail
             if c_obj.eof:
                 break
@@ -622,9 +705,7 @@ def _bounded_extract_file_based_on_header_info(
         #   ``decompress(data, max_length)`` 则按需分块增长、不按 max_length 预分配
         #   （CPython 3.11.15 / 3.12.10 实测 max_length=500MiB 峰值 0.1MiB），故 max_length 无须再切块。
         # ★已产出的字节无论后续成功/失败都计入聚合预算（真实解压工作不白做）。
-        produced = len(output)
         if not c_obj.eof:
-            _charge_other_total(produced)
             raise zlib.error("Error -5 while decompressing data: incomplete or truncated stream")
 
         # 普通 DEFLATED 与 zlib.decompress 一致，忽略 unused_data。篡改分支
@@ -636,10 +717,8 @@ def _bounded_extract_file_based_on_header_info(
             if not trailing and (left is None or left > 0):
                 trailing = bool(apk_file.read(1))
             if trailing:
-                _charge_other_total(produced)
                 raise ValueError("Invalid or non-pure deflate")
 
-        _charge_other_total(produced)
         return bytes(output)
 
     filename_length = int(local_header_info["file_name_length"])
@@ -702,7 +781,7 @@ def _bounded_extract_file_based_on_header_info(
             extracted_data = compressed_data
             indicator = "STORED_TAMPERED"
 
-    if entry is not None and _is_dex_entry_name(entry):
+    if is_dex:
         previous_total = _dex_extract_total_bytes.get()
         if previous_total is not None:
             # Level 2.5：对 classes*.dex 的实际解压产出跨条目累计。声明可低报骗过
@@ -792,6 +871,11 @@ class ApkContext:
         self.file_read_ledger = FileReadLedger()
         # _read_cache 累计已缓存字节数（防病态多文件累加撑爆内存，见 _MAX_TOTAL_CACHE_BYTES）。
         self._cached_bytes = 0
+        self._serial_resource_bytes = 0
+        # Usual cached bytes carry exactly their length in decode cost. Store
+        # only exceptions (failed reads or extra work before a fallback).
+        self._read_cache_receipts: dict[str, tuple[int, str | None]] = {}
+        self._last_resource_decode_overhead = 0
         # extra_dex_objs: 脱壳 dump 出来、外部传入的额外 DEX（androguard DEX 实例）。
         # 其字符串并入 dex_strings() 产出，使脱壳后的隐藏端点/SDK 也能被静态分析命中。
         self._extra_dex_objs = list(extra_dex_objs or [])
@@ -1124,12 +1208,20 @@ class ApkContext:
         ledger = self.file_read_ledger
         ledger.request(path)
         cache = self._read_cache
+        budget = _active_resource_budget(path)
+        if budget is not None and budget.exhausted:
+            ledger.record_failure(path, "decompression_budget")
+            return None
         if path in cache:
             cached = cache[path]
+            extra, failure = self._read_cache_receipts.get(path, (0, None))
+            decode_cost = extra + (0 if cached is None else len(cached))
+            if budget is not None and not budget.admit(cached, decode_cost):
+                ledger.record_failure(path, "decompression_budget")
+                return None
+            self._last_resource_decode_overhead = extra
             if cached is None:
-                ledger.record_failure(
-                    path, ledger.failure_for(path) or "unavailable_context"
-                )
+                ledger.record_failure(path, failure or "unavailable_context")
             return cached
         declared = self._declared_sizes.get(path)
         if declared is not None and declared > _MAX_DECOMPRESSED_FILE_BYTES:
@@ -1141,29 +1233,53 @@ class ApkContext:
             )
             ledger.record_failure(path, "declared_limit")
             cache[path] = None
+            self._read_cache_receipts[path] = (0, "declared_limit")
             return None
-        try:
-            data = self._apk.get_file(path)
-        except ZipEntryTooLargeError as exc:
-            logger.warning(
-                "read_file 跳过（实际解压产出超 %d 字节上限，疑 zip 炸弹）：%s",
-                exc.limit,
-                path,
-            )
-            ledger.record_failure(path, "actual_decompression_limit")
-            data = None
-        except Exception:
-            # androguard 对缺失文件抛 FileNotPresent；视为正常缺失但仍记录
-            logger.debug("read_file 未命中：%s", path, exc_info=True)
-            ledger.record_failure(path, "read_failure")
-            data = None
-        if data is None and ledger.failure_for(path) is None:
-            ledger.record_failure(path, "unavailable_context")
+        outer = _other_extract_total_bytes.get()
+        # Snapshot materialization has its own actual-work limit. Neither it
+        # nor earlier analyzers contributes to the active analyzer allowance.
+        start = (budget.decode_bytes if budget is not None
+                 else max(outer or 0, self._serial_resource_bytes))
+        if start >= _OTHER_TOTAL_LIMIT_BYTES and not _is_dex_entry_name(path):
+            ledger.record_failure(path, "decompression_budget")
+            return None
+        failure = None
+        with _measure_other_decoding(start) as work:
+            try:
+                data = self._apk.get_file(path)
+            except ZipEntryTooLargeError as exc:
+                logger.warning(
+                    "read_file 跳过（实际解压产出超 %d 字节上限，疑 zip 炸弹）：%s",
+                    exc.limit,
+                    path,
+                )
+                failure = "decompression_budget" if exc.resource_budget else "actual_decompression_limit"
+                data = None
+            except Exception:
+                # androguard 对缺失文件抛 FileNotPresent；视为正常缺失但仍记录
+                logger.debug("read_file 未命中：%s", path, exc_info=True)
+                failure = "read_failure"
+                data = None
+        if budget is None:
+            self._serial_resource_bytes += work.bytes_used
+            if outer is not None:
+                _other_extract_total_bytes.set(outer + work.bytes_used)
+        elif not budget.admit(data, work.bytes_used, denied=failure == "decompression_budget"):
+            failure = "decompression_budget"
+        if failure == "decompression_budget":
+            # This resource can still be readable in another analyzer's scope.
+            ledger.record_failure(path, failure)
+            return None
+        extra = max(0, work.bytes_used - (0 if data is None else len(data)))
+        self._last_resource_decode_overhead = extra
         # 超大文件（大 .so / 大资源）不进缓存，避免常驻内存。None（未命中）仍缓存以避免重复
         # 未命中查询；小文件照常缓存供多分析器重复读命中。未缓存的文件（无论何种原因）仍
         # 返回完整字节，只是每次重读——不缓存只影响性能，不影响正确性。
         if data is None:
+            reason = failure or "unavailable_context"
+            ledger.record_failure(path, reason)
             cache[path] = data
+            self._read_cache_receipts[path] = (extra, reason)
         elif len(data) > _MAX_READ_CACHE_BYTES:
             logger.debug(
                 "read_file 跳过缓存（超 %d 字节，避免常驻内存）：%s（%d 字节）",
@@ -1183,6 +1299,8 @@ class ApkContext:
         else:
             cache[path] = data
             self._cached_bytes += len(data)
+            if extra:
+                self._read_cache_receipts[path] = (extra, None)
         return data
 
     def native_libs(self) -> list[str]:

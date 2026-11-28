@@ -563,3 +563,108 @@ def test_non_dex_aggregate_budget_bounds_runaway_reads(
         entry.zip, bomb_local, bomb_central
     )
     assert data == _BOMB_PAYLOAD
+
+
+def test_serial_resource_budget_spans_uncached_reads_and_respects_parent_scope(monkeypatch):
+    class Reader:
+        def __init__(self):
+            self.calls = []
+
+        def get_file(self, path):
+            self.calls.append(path)
+            seen = apk_mod._other_extract_total_bytes.get()
+            assert seen is not None
+            apk_mod._other_extract_total_bytes.set(seen + 2)
+            return b"ok"
+
+    reader = Reader()
+    ctx = ApkContext(reader, [], AnalysisConfig(online=False))
+    monkeypatch.setattr(apk_mod, "_OTHER_TOTAL_LIMIT_BYTES", 4)
+    assert ctx.read_file("one.txt") == b"ok"
+    assert ctx.read_file("one.txt") == b"ok"  # cached, no charge
+    parent = apk_mod._other_extract_total_bytes.set(0)
+    try:
+        assert ctx.read_file("two.txt") == b"ok"
+        assert apk_mod._other_extract_total_bytes.get() == 2
+    finally:
+        apk_mod._other_extract_total_bytes.reset(parent)
+    assert ctx.read_file("three.txt") is None
+    assert ctx.file_read_ledger.failure_for("three.txt") == "decompression_budget"
+    assert reader.calls == ["one.txt", "two.txt"]
+    assert apk_mod._other_extract_total_bytes.get() is None
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_mock_decoder_work_is_charged_before_possible_fallback(monkeypatch, retry):
+    import io
+
+    class Stream(io.BytesIO):
+        reads: list[int]
+        def __init__(self):
+            super().__init__(b" " * 30 + b"notes")
+            self.reads = []
+
+        def read(self, size=-1):
+            self.reads.append(size)
+            return super().read(size)
+
+    class Decoder:
+        unconsumed_tail = b""
+        eof = False
+        calls = 0
+
+        def decompress(self, _data, maximum):
+            self.calls += 1
+            if self.calls == 1:
+                assert maximum == 5
+                return b"abc"
+            raise zlib.error("mock decoder failure")
+
+    stream = Stream()
+    monkeypatch.setattr(apk_mod, "_OTHER_TOTAL_LIMIT_BYTES", 5)
+    monkeypatch.setattr(apk_mod, "_INFLATE_CHUNK_BYTES", 1)
+    monkeypatch.setattr(zlib, "decompressobj", lambda *args: Decoder())
+    local = {"file_name_length": 0, "compressed_size": 2, "uncompressed_size": 4,
+             "extra_field_length": 0, "compression_method": 1 if retry else 8}
+    central = {"filename": "notes.bin", "relative_offset_of_local_file_header": 0}
+    token = apk_mod._other_extract_total_bytes.set(1)
+    try:
+        with pytest.raises(apk_mod.ZipEntryTooLargeError if retry else zlib.error):
+            apk_mod._bounded_extract_file_based_on_header_info(stream, local, central)
+        assert apk_mod._other_extract_total_bytes.get() == (6 if retry else 4)
+        assert stream.reads == ([1, 1, 2] if retry else [1, 1])
+    finally:
+        apk_mod._other_extract_total_bytes.reset(token)
+
+
+def test_bounded_inflate_small_inert_data_succeeds_with_exact_accounting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    payload = b"inert-sample-payload-for-bounded-inflate-0123456789"
+    compressor = zlib.compressobj(wbits=-15)
+    compressed = compressor.compress(payload) + compressor.flush()
+    stream = io.BytesIO(b"\x00" * 30 + compressed)
+    local = {
+        "file_name_length": 0,
+        "compressed_size": len(compressed),
+        "uncompressed_size": len(payload),
+        "extra_field_length": 0,
+        "compression_method": 8,
+    }
+    central = {
+        "filename": "inert.txt",
+        "relative_offset_of_local_file_header": 0,
+    }
+    monkeypatch.setattr(apk_mod, "_INFLATE_CHUNK_BYTES", 4)
+    token = apk_mod._other_extract_total_bytes.set(0)
+    try:
+        data, indicator = apk_mod._bounded_extract_file_based_on_header_info(
+            stream, local, central
+        )
+        assert data == payload
+        assert indicator == "DEFLATED"
+        assert apk_mod._other_extract_total_bytes.get() == len(payload)
+    finally:
+        apk_mod._other_extract_total_bytes.reset(token)

@@ -12,6 +12,7 @@ from dataclasses import replace
 from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
+from urllib.parse import urlsplit
 
 from fxapk.core import infra
 from fxapk.core.coverage import collect_coverage
@@ -375,6 +376,21 @@ def network_leads_by_advice(leads: list[Lead]) -> dict[str, list[Lead]]:
     }
 
 
+def _web_lookup_url(value: object) -> str | None:
+    """Only absolute HTTP(S) URLs can become clickable report links."""
+    if (not isinstance(value, str) or not value or "\\" in value
+            or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)):
+        return None
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        _ = parsed.port
+    except ValueError:
+        return None
+    return value
+
+
 def _build_environment(template_dir: str) -> Environment:
     """用给定模板目录构造 Jinja2 Environment 并注册自定义 filter。
 
@@ -394,6 +410,7 @@ def _build_environment(template_dir: str) -> Environment:
     env.filters["confidence_class"] = confidence_class
     env.filters["advice_label"] = advice_label
     env.filters["advice_class"] = advice_class
+    env.filters["web_lookup_url"] = _web_lookup_url
     return env
 
 

@@ -446,3 +446,12 @@ def test_missing_shape_uncertain_key_defaults_to_false() -> None:
     rows = ioc.leads_to_ioc_rows(_make_report())  # 该夹具的 lead 全无此键
     assert rows, "夹具应产出行"
     assert all(r["shape_uncertain"] is False for r in rows)
+
+
+def test_csv_preserves_literal_leading_whitespace_and_newline(tmp_path):
+    out = tmp_path / "literal.csv"
+    cells = ["\nordinary", "  +label", "\u3000@label", "  ordinary", "internal\nline"]
+    ioc.write_csv([{"value": s} for s in cells], str(out))
+    with out.open(encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert [row["value"] for row in rows] == ["'" + s for s in cells[:3]] + cells[3:]

@@ -79,3 +79,10 @@ def test_truncated_har_coverage_survives_real_pipeline_contract(monkeypatch):
     result=pipeline.run(context([entry(body='SYNTHETIC BODY')]),AnalysisConfig(online=False))
     assert result.meta['web_har_items_truncated']==1
     assert result.analyzer_status[0]['status']=='ran'
+
+
+def test_har_uses_strict_finite_bounded_json():
+    ordinary = b'{"log":{"entries":[]},"timing":1e400}'
+    result = WebHarAnalyzer().analyze(WebContext(AnalysisConfig(online=False),
+        files={"web/synthetic.har": ordinary}))
+    assert result.meta["web_har_summary"]["gaps"] == {"invalid_har_json": 1}
