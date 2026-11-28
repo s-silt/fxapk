@@ -148,23 +148,24 @@ def test_cli_failure_reaches_receipt_digest_html_and_continues(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("with_success", "expected_state", "expected_status", "expected_exit", "expected_score"),
-    [(False, "failed", "failed", 6, 0.0), (True, "partial", "partial", 5, 1 / 3)],
+    ("extra", "expected_state", "expected_exit", "expected_score"),
+    [
+        pytest.param((), "failed", 6, 0.0, id="no-eligible-work"),
+        pytest.param(("ok",), "partial", 5, 1.0, id="skipped-and-ok"),
+        pytest.param(("ok", "partial", "failed"), "partial", 5, 1 / 3, id="skipped-ok-partial-failed"),
+    ],
 )
-def test_standalone_review_counts_all_planned_tasks(
-    tmp_path, with_success, expected_state, expected_status, expected_exit, expected_score,
-):
+def test_standalone_review_scores_executed_tasks(tmp_path, extra, expected_state, expected_exit, expected_score):
     tasks = [
         {"id": "unavailable", "kind": "fixture_unsupported"},
         {"id": "dependent", "kind": "trace", "depends_on": ["unavailable"]},
     ]
-    expected_tasks = ["unsupported", "not_run"]
-    if with_success:
-        data = encoded([event(1)])
-        (tmp_path / "trace.jsonl").write_bytes(data)
-        tasks.append({"id": "success", "kind": "trace", "input": "trace.jsonl",
-                      "sha256": hashlib.sha256(data).hexdigest(), **TRACE})
-        expected_tasks.append("ok")
+    rows = {"ok": [event(1)], "partial": [event(1), event(2, data_hex=None)]}
+    for state in extra:
+        data = encoded(rows.get(state, [event(1)]))
+        (tmp_path / f"{state}.jsonl").write_bytes(data)
+        digest_hex = "f" * 64 if state == "failed" else hashlib.sha256(data).hexdigest()
+        tasks.append({"id": state, "kind": "trace", "input": f"{state}.jsonl", "sha256": digest_hex, **TRACE})
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"schema_version": "fxapk.offline-review.v1",
                                "sample_sha256": "a" * 64, "tasks": tasks}), encoding="utf-8")
@@ -175,14 +176,20 @@ def test_standalone_review_counts_all_planned_tasks(
     assert invocation.exit_code == expected_exit, invocation.output
     receipt = json.loads((out / "review.json").read_text(encoding="utf-8"))
     assert json.loads(invocation.stdout)["state"] == receipt["state"] == expected_state
-    assert [row["state"] for row in receipt["tasks"]] == expected_tasks
+    assert [row["state"] for row in receipt["tasks"]] == ["unsupported", "not_run", *extra]
+    assert receipt["tasks"][0]["reason_codes"] == ["review_kind_unsupported"]
     assert receipt["tasks"][1]["reason_codes"] == ["dependency_not_verified"]
     assert receipt["publication"] == "ok"
     report = json.loads((out / "report.json").read_text(encoding="utf-8"))
-    assert (report["analysis_status"], report["completeness"]) == (expected_status, expected_score)
+    assert (report["analysis_status"], report["completeness"]) == (expected_state, expected_score)
+    assert [row["name"] for row in report["analyzer_status"]] == ["offline_review:" + task["id"] for task in tasks]
+    assert report["skipped_analyzers"] == ["offline_review:unavailable", "offline_review:dependent"]
     digest = json.loads((out / "digest.json").read_text(encoding="utf-8"))
     assert digest["offline_evidence_review"]["state"] == expected_state
+    assert [row["state"] for row in digest["offline_evidence_review"]["tasks"]] == ["unsupported", "not_run", *extra]
     assert digest["integrity"]["completeness"] == expected_score
+    assert digest["integrity"]["analysis_status"] == expected_state
+    assert digest["integrity"]["reliable"] is False
     assert "dependency_not_verified" in (out / "report.html").read_text(encoding="utf-8")
 
 

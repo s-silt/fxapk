@@ -994,7 +994,9 @@ class Report:
     schema_version: str = REPORT_SCHEMA_VERSION
     #: 分析完整度：complete | partial | failed；None 表示不可考。
     analysis_status: str | None = ANALYSIS_STATUS_COMPLETE
-    #: 0..1，None 表示不可考。常规分析按运行的分析器数，独立复核按计划任务数作分母。
+    #: 0..1，None 表示不可考。常规分析按运行的分析器数作分母；独立复核按已执行的计划任务
+    #: （ok/partial/failed）作分母、仅 ok 计入分子，not_run/unsupported 不计入但保留在
+    #: analysis_status、analyzer_status 与任务回执中；无可执行任务时为 failed + 0.0。
     completeness: float | None = 1.0
     #: 报错的**关键**分析器名（失败即报告核心不可信；--strict 据此非零退出）。
     critical_failures: list[str] = field(default_factory=list)

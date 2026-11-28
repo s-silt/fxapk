@@ -266,9 +266,13 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
         report = Report(package_name="offline-evidence-review", meta={}, leads=[], endpoints=[], findings=[], analyzer_status=[])
         report.meta["sample_sha256"] = sample
         report.analysis_status = ANALYSIS_STATUS_COMPLETE if receipt["state"] == "ok" else receipt["state"]
-        # Standalone review coverage is measured against the requested plan,
-        # not just the tasks that could execute. Task receipts retain each reason.
-        report.completeness = sum(row["state"] == "ok" for row in task_rows) / len(task_rows)
+        # Standalone completeness scores executed eligible tasks: ok, partial and
+        # failed rows are attempts, and only ok counts as complete. not_run and
+        # unsupported rows stay visible through state, analyzer_status, skipped
+        # analyzers and task receipts. No eligible work keeps the failed state
+        # and a conservative zero.
+        executed = [row for row in task_rows if row["state"] not in {"not_run", "unsupported"}]
+        report.completeness = sum(row["state"] == "ok" for row in executed) / len(executed) if executed else 0.0
         for row in task_rows:
             name = "offline_review:" + row["id"]
             status = "ran" if row["state"] == "ok" else "skipped" if row["state"] in {"not_run", "unsupported"} else "error"
