@@ -194,7 +194,7 @@ jobs:
         # - build/setuptools/wheel：test_version_artifacts.py 的产物级测试要跑
         #   `python -m build --no-isolation`，三者缺一测试就地 skip。矩阵关必须
         #   显式装上让它们真跑——守门测试静默 skip 等于没有门（#363 红叉根因）。
-        # - pytest-xdist：全量并行（-n auto --dist worksteal），计费按 job 时长、并行直接省分钟。
+        # - pytest-xdist：全量并行（-n auto；Linux 矩阵 --dist loadscope，macOS/Windows --dist worksteal），计费按 job 时长、并行直接省分钟。
         run: python -m pip install -e ".[review]" -e "./plugins/fxapk-android-ui" -e "./plugins/fxapk-rea[trace]" -e "./plugins/fxapk-flutter" pytest pytest-cov pytest-xdist build "setuptools>=68" wheel
       # 覆盖率门禁只在 Linux py3.12 跑（基线 83%，阈值 80 留 3% 余量），host + 隔离 + 并行三段
       # 全部汇入同一份 .coverage。Linux py3.11 跑完全相同的节点与排除项、各一次，但不插桩。
@@ -225,7 +225,23 @@ jobs:
           FXAPK_REQUIRE_BUILD_TOOLCHAIN: "1"
           FXAPK_MATRIX_PYTHON: ${{ matrix.python-version }}
         run: |
-          host_tests=(tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run)
+          # 运行 46117018929（38e48ab）有三个 Linux job 在 xdist 下出现合成节点失败：Ubuntu py3.11、locked
+          # （job 140893005383）与 Ubuntu py3.12（job 140893005333，test_real_unicorn_calls_and_negative_vectors），
+          # worker 日志均为 POSIX ownership_scan / environ / AccessDenied。只是与 xdist 相关，未证实因果竞态；
+          # 这四条节点在两个 Linux 单元都移入串行 host 阶段各跑一次（3.12 沿用 host 覆盖率），不跳过、不重试。
+          # 并行阶段用 --dist loadscope：同一模块（类内测试按类）的节点留在同一 worker 顺序执行，减少同模块真
+          # run_owned 节点的并发重叠；不同模块仍跨 worker 并发、照样扫描整张同 UID 进程表，不是全局隔离，单独不证明修复。
+          serial_nodes=(
+            "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[010000d4-system_instruction_unsupported]"
+            "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[000040f9c0035fd6-emulation_fault]"
+            "tests/test_recovery_pipeline.py::test_real_unicorn_calls_and_negative_vectors"
+            "tests/test_evidence_archive.py::test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"
+          )
+          serial_deselect=()
+          for node in "${serial_nodes[@]}"; do
+            serial_deselect+=("--deselect=$node")
+          done
+          host_tests=(tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run "${serial_nodes[@]}")
           isolated=(--deselect=tests/test_proctree.py::test_descendants_after_root_exit_force_killed)
           host_coverage=()
           parallel_coverage=()
@@ -247,12 +263,19 @@ jobs:
           import xml.etree.ElementTree as ET
           from pathlib import Path
           root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "fxapk-host-test.xml").getroot()
-          expected = ["test_linux_preexisting_nondumpable_process_does_not_break_owned_run"]
+          base = "test_execution_budgets_and_missing_environment_fail_explicitly"
+          expected = [
+              ("tests.test_proctree", "test_linux_preexisting_nondumpable_process_does_not_break_owned_run"),
+              ("tests.test_recovery_pipeline", f"{base}[010000d4-system_instruction_unsupported]"),
+              ("tests.test_recovery_pipeline", f"{base}[000040f9c0035fd6-emulation_fault]"),
+              ("tests.test_recovery_pipeline", "test_real_unicorn_calls_and_negative_vectors"),
+              ("tests.test_evidence_archive", "test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"),
+          ]
           if os.environ["FXAPK_MATRIX_PYTHON"] != "3.12":
-              expected.append("test_descendants_after_root_exit_force_killed")
+              expected.append(("tests.test_proctree", "test_descendants_after_root_exit_force_killed"))
           cases = list(root.iter("testcase"))
-          assert sorted(case.get("name", "") for case in cases) == sorted(expected) and all(
-              case.get("classname") == "tests.test_proctree" and len(case) == 0 for case in cases
+          assert sorted((case.get("classname", ""), case.get("name", "")) for case in cases) == sorted(expected) and all(
+              len(case) == 0 for case in cases
           ), "host fixture missing, duplicate, skipped or failed"
           PYTEST_XML
           if [ "$FXAPK_MATRIX_PYTHON" = "3.12" ]; then
@@ -261,8 +284,9 @@ jobs:
             python -IB tools/ci_descendant_fixture.py "$GITHUB_SHA"
             isolated+=(--ignore=tests/test_ci_descendant_fixture.py)
           fi
-          python -m pytest -q -n auto --dist worksteal \
+          python -m pytest -q -n auto --dist loadscope \
             --deselect=tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
+            "${serial_deselect[@]}" \
             "${isolated[@]}" \
             "${parallel_coverage[@]}" \
             --junitxml=${{ runner.temp }}/fxapk-tests.xml
@@ -290,6 +314,25 @@ jobs:
               assert len(host) == 1 and len(host[0]) == 0, f"serial fixture did not pass: {descendant}"
           else:
               assert not host, "isolated fixture also appeared in serial host JUnit"
+          parallel_root = roots[1]
+          base = "test_execution_budgets_and_missing_environment_fail_explicitly"
+          # 串行节点在 host JUnit 中恰好一次、classname 精确、未 skip/失败，已由上一步 host 断言（精确集合相等）
+          # 保证且该步失败即不会到这里；此处只需证明它们没有在并行阶段重复执行。
+          serial_nodes = [
+              ("tests.test_recovery_pipeline", f"{base}[010000d4-system_instruction_unsupported]"),
+              ("tests.test_recovery_pipeline", f"{base}[000040f9c0035fd6-emulation_fault]"),
+              ("tests.test_recovery_pipeline", "test_real_unicorn_calls_and_negative_vectors"),
+              ("tests.test_evidence_archive", "test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"),
+          ]
+          for classname, name in serial_nodes:
+              assert not [case for case in parallel_root.iter("testcase") if case.get("name") == name], (
+                  f"serial node also ran in parallel: {classname}::{name}"
+              )
+              print(f"PASSED serially once: {classname}::{name}")
+          # 同一参数化的其余节点仍留在并行阶段、恰好一次。
+          others = [case for case in parallel_root.iter("testcase") if case.get("classname") == "tests.test_recovery_pipeline"
+                    and case.get("name", "").startswith(base + "[")]
+          assert [case.get("name") for case in others] == [f"{base}[00000014-emulation_budget_exhausted]"], others
           PY
       - name: Run tests (macOS / Windows)
         if: runner.os != 'Linux'
@@ -403,11 +446,15 @@ jobs:
           assert len(cases) == 1 and cases[0].get("name") == "test_linux_preexisting_nondumpable_process_does_not_break_owned_run" and len(cases[0]) == 0, "host fixture missing, skipped or failed"
           PYTEST_XML
           # CI #601（参考运行 46016142976 / job 140563645981）在本关 -n auto 下失败的两条合成恢复
-          # 节点：移出并行阶段，在独立临时目录里各串行执行一次。并行进程干扰只是假设，未证实为根因；
+          # 节点、运行 46117018929 本关（job 140893005383）失败的合成证据归档节点，以及同一运行
+          # Ubuntu py3.12（job 140893005333）失败的 test_real_unicorn_calls_and_negative_vectors：移出并行阶段，
+          # 在独立临时目录里各串行执行一次。同一运行共三个 Linux job 失败；并行进程干扰只是假设，未证实为因果竞态；
           # 这里不跳过、不重试、不放宽断言，失败照样红。
           recovery_nodes=(
             "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[010000d4-system_instruction_unsupported]"
             "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[000040f9c0035fd6-emulation_fault]"
+            "tests/test_recovery_pipeline.py::test_real_unicorn_calls_and_negative_vectors"
+            "tests/test_evidence_archive.py::test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"
           )
           recovery_deselect=()
           for node in "${recovery_nodes[@]}"; do
@@ -423,7 +470,7 @@ jobs:
             --deselect=tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
             "${recovery_deselect[@]}" \
             --junitxml=${{ runner.temp }}/fxapk-locked-tests.xml
-      - name: Verify locked recovery pair ran exactly once, serially
+      - name: Verify locked serial nodes ran exactly once, serially
         run: |
           python - <<'PY'
           import os
@@ -433,16 +480,22 @@ jobs:
           serial = list(ET.parse(temp / "fxapk-locked-recovery.xml").getroot().iter("testcase"))
           parallel = list(ET.parse(temp / "fxapk-locked-tests.xml").getroot().iter("testcase"))
           base = "test_execution_budgets_and_missing_environment_fail_explicitly"
-          expected = {f"{base}[010000d4-system_instruction_unsupported]", f"{base}[000040f9c0035fd6-emulation_fault]"}
-          assert sorted(case.get("name", "") for case in serial) == sorted(expected) and all(
-              case.get("classname") == "tests.test_recovery_pipeline" and len(case) == 0 for case in serial
-          ), "serial recovery node missing, duplicate, skipped or failed"
-          assert not [case for case in parallel if case.get("name") in expected], "serial recovery node also ran in parallel"
+          expected = [
+              ("tests.test_recovery_pipeline", f"{base}[010000d4-system_instruction_unsupported]"),
+              ("tests.test_recovery_pipeline", f"{base}[000040f9c0035fd6-emulation_fault]"),
+              ("tests.test_recovery_pipeline", "test_real_unicorn_calls_and_negative_vectors"),
+              ("tests.test_evidence_archive", "test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"),
+          ]
+          assert sorted((case.get("classname", ""), case.get("name", "")) for case in serial) == sorted(expected) and all(
+              len(case) == 0 for case in serial
+          ), "serial node missing, duplicate, skipped or failed"
+          expected_names = {name for _, name in expected}
+          assert not [case for case in parallel if case.get("name") in expected_names], "serial node also ran in parallel"
           # 同一参数化的其余节点仍留在并行阶段、恰好一次。
           others = [case for case in parallel if case.get("classname") == "tests.test_recovery_pipeline"
                     and case.get("name", "").startswith(base + "[")]
           assert [case.get("name") for case in others] == [f"{base}[00000014-emulation_budget_exhausted]"], others
-          print("PASSED: locked recovery pair serial, isolated, once")
+          print("PASSED: locked serial nodes serial, isolated, once")
           PY
       # 同 test job 的基线不可变守卫（这个 job 也跑全量 pytest，同样的绕闸面）。
       - name: Guard — synthetic baselines untouched during CI

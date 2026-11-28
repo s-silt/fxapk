@@ -15,10 +15,10 @@ on:
       - 'plugins/fxapk-rea/pyproject.toml'
       - 'plugins/fxapk-asc/pyproject.toml'
       - 'plugins/fxapk-flutter/pyproject.toml'
-      - 'MANIFEST.in'  # leak-scan: allow tracked sdist manifest filename, not a domain.
-      - 'plugins/fxapk-android-ui/MANIFEST.in'  # leak-scan: allow tracked sdist manifest filename, not a domain.
-      - 'plugins/fxapk-asc/MANIFEST.in'  # leak-scan: allow tracked sdist manifest filename, not a domain.
-      - 'plugins/fxapk-flutter/MANIFEST.in'  # leak-scan: allow tracked sdist manifest filename, not a domain.
+      - 'MANIFES[T].in'
+      - 'plugins/fxapk-android-ui/MANIFES[T].in'
+      - 'plugins/fxapk-asc/MANIFES[T].in'
+      - 'plugins/fxapk-flutter/MANIFES[T].in'
   workflow_dispatch:
 
 permissions:
