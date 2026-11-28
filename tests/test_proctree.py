@@ -89,26 +89,164 @@ def test_outer_timeout_kills_nested_owned_session_but_not_unrelated_process(tmp_
 def test_capped_run_waits_for_process_after_output_eof(
     monkeypatch: pytest.MonkeyPatch, timed_out: bool,
 ) -> None:
-    import io
-    import itertools
     import subprocess
     from types import SimpleNamespace
     from unittest.mock import Mock
 
     proc = Mock(spec=subprocess.Popen)
-    proc.stdout = SimpleNamespace(buffer=io.BytesIO(b"version\n"))
-    proc.stderr = SimpleNamespace(buffer=io.BytesIO())
-    proc.wait.return_value = 0
     remaining = 1.0 if timed_out else 4.0
     if timed_out:
         proc.wait.side_effect = subprocess.TimeoutExpired("fixture", remaining)
-    clock = Mock(side_effect=itertools.chain([100.0], itertools.repeat(105.0 - remaining)))
-    monkeypatch.setattr(proctree, "time", SimpleNamespace(monotonic=clock, sleep=lambda _: None))
+    read_fds = []
+    for data in (b"version\n", b""):
+        rd, wr = os.pipe()
+        read_fds.append(os.fdopen(rd, encoding="utf-8"))
+        with os.fdopen(wr, "wb") as writer:
+            writer.write(data)
+    capture = proctree._OutputPipes(*read_fds, 64, 64)
+    try:
+        capture.start()
+        assert capture._join(5.0)
+        now = time.monotonic()
+        monkeypatch.setattr(proctree, "time", SimpleNamespace(monotonic=lambda: now))
+        assert capture.wait_for_root(proc, now + remaining) is timed_out
+        proc.wait.assert_called_once_with(timeout=remaining)
+        reasons = []
+        assert capture.finish(reasons) == ("version\n", "")
+        assert not reasons
+    finally:
+        capture.close()
 
-    result = proctree._communicate_capped(proc, None, 5.0, 64, 64)
 
-    assert result == ("version\n", "", False, timed_out)
-    proc.wait.assert_called_once_with(timeout=remaining)
+def test_capped_unclosed_pipe_cancels_reader_and_preserves_prefix(monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    rd, wr = os.pipe()
+    er, ew = os.pipe()
+    os.close(ew)
+    out, err = os.fdopen(rd, encoding="utf-8"), os.fdopen(er, encoding="utf-8")
+    capture = proctree._OutputPipes(out, err, 32, 32)
+    monkeypatch.setattr(proctree, "_ROOT_EXIT_GRACE", 0.25)
+    root = Mock()
+    root.poll.return_value = 0
+    with os.fdopen(wr, "wb", buffering=0) as held:
+        held.write(b"tail")
+        try:
+            capture.start()
+            assert not capture.wait_for_root(root, time.monotonic() + 10)
+            reasons = []
+            assert capture.finish(reasons) == ("tail", "")
+            assert reasons == ["output_drain_unverified"]
+            assert out.closed and err.closed
+            assert not any(reader.is_alive() for reader in capture.readers)
+        finally:
+            capture.close()
+
+
+@pytest.mark.parametrize(
+    ("limit", "expected"), [
+        pytest.param(None, "a\nb\nc\n", id="uncapped-normalizes"),
+        pytest.param(64, "a\r\nb\rc\n", id="capped-keeps-raw"),
+    ],
+)
+def test_captured_pipes_keep_mode_specific_newline_semantics(limit, expected) -> None:
+    result = proctree.run_owned(
+        [sys._base_executable, "-c",
+         "import sys; sys.stdout.buffer.write(b'a\\r\\nb\\rc\\n'); "
+         "sys.stderr.buffer.write(b'a\\r\\nb\\rc\\n')"],
+        timeout=10, max_stdout_bytes=limit, max_stderr_bytes=limit,
+    )
+    assert result.stdout == result.stderr == expected, result
+    assert result.returncode == 0 and result.termination_complete
+    assert not result.reason_codes
+
+
+def test_read_failure_is_not_time_or_process_failure(monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    def invalid_stream(_fd: int) -> bytes:
+        raise OSError("synthetic read failure")
+
+    monkeypatch.setattr(proctree, "_read_pipe_chunk", invalid_stream)
+    pipes = []
+    for _ in range(2):
+        read, write = os.pipe()
+        os.close(write)
+        pipes.append(os.fdopen(read, encoding="utf-8"))
+    capture = proctree._OutputPipes(*pipes, None, None)
+    try:
+        capture.start()
+        assert capture._join(5.0)
+        root = Mock()
+        root.poll.return_value = 0
+        assert not capture.wait_for_root(root, time.monotonic() + 5)
+        reasons = []
+        assert capture.finish(reasons) == ("", "")
+        assert reasons == ["output_read_failed"]
+        assert all(pipe.closed for pipe in pipes)
+    finally:
+        capture.close()
+
+
+def test_capped_output_limit_keeps_only_requested_bytes() -> None:
+    result = proctree.run_owned(
+        [sys._base_executable, "-c", "print('123456789')"],
+        timeout=10, max_stdout_bytes=3, max_stderr_bytes=64,
+    )
+    assert result.stdout == "123", result
+    assert "output_limit" in result.reason_codes and not result.timed_out, result
+    assert result.termination_complete and result.returncode is not None, result
+
+
+@pytest.mark.parametrize("limit", [64, None], ids=["capped", "uncapped"])
+def test_root_exit_reclaims_tree_before_waiting_for_inherited_pipe(limit: int | None) -> None:
+    import threading
+
+    # This benign child inherits only our synthetic command's ordinary pipes;
+    # it exits by itself even if the old implementation fails to reclaim it.
+    root = ("import subprocess,sys;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(6)']);"
+            "print('root finished', flush=True)")
+    result = proctree.run_owned(
+        [sys._base_executable, "-c", root], timeout=20,
+        max_stdout_bytes=limit, max_stderr_bytes=limit,
+    )
+    assert result.stdout.strip() == "root finished" and result.returncode == 0, result
+    assert not result.timed_out and result.forced_tree_kill, result
+    assert result.ownership_complete and result.termination_complete, result
+    assert result.reason_codes == ("descendants_after_root_exit",)
+    assert not any(t.name.startswith("fxapk-pipe-") for t in threading.enumerate())
+
+
+@pytest.mark.parametrize("stage", ["write", "close"])
+def test_gate_input_failure_still_closes_stdin(stage: str) -> None:
+    from unittest.mock import Mock
+
+    stream = Mock()
+    getattr(stream, stage).side_effect = BrokenPipeError()
+    assert not proctree._write_gate_input(stream, "synthetic\n")
+    stream.close.assert_called_once_with()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job exit tracker")
+@pytest.mark.parametrize("join_failure", [False, True])
+def test_tracker_shutdown_releases_handles_without_losing_result(monkeypatch, join_failure) -> None:
+    import threading
+    from unittest.mock import Mock
+
+    tracker = object.__new__(proctree._JobExitTracker)
+    tracker.thread = Mock()
+    tracker.thread.is_alive.return_value = True
+    if join_failure:
+        tracker.thread.join.side_effect = RuntimeError("synthetic join failure")
+    tracker.stop = threading.Event()
+    tracker.handle_lock = threading.Lock()
+    tracker.handles = [11, 12]
+    tracker.port = 15
+    closed = []
+    monkeypatch.setattr(proctree._kernel32, "CloseHandle", closed.append)
+    tracker.close()
+    assert tracker.stop.is_set() and closed == [11, 12, 15]
 
 
 def test_capped_run_terminates_process_after_output_eof(tmp_path: Path) -> None:
@@ -334,14 +472,17 @@ def test_posix_internal_error_after_spawn_kills_and_reaps_group(
         load_patch.setattr(sys, "platform", "linux")
         spec.loader.exec_module(posix)
 
+    from unittest.mock import Mock
+
     calls: list[tuple[str, object]] = []
+    capture = Mock()
+    capture.wait_for_root.side_effect = internal_error
+    monkeypatch.setattr(posix, "_OutputPipes", lambda *_: capture)
 
     class _BrokenProc:
         pid = 4242
         returncode = None
-
-        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
-            raise internal_error
+        stdout = stderr = object()
 
         def wait(self, timeout: float | None = None) -> int:
             calls.append(("wait", timeout))
@@ -359,6 +500,7 @@ def test_posix_internal_error_after_spawn_kills_and_reaps_group(
     assert any(kind == "wait" for kind, _value in calls), "直接子进程未被 reap"
     assert result.reason_codes == ("internal_error",)
     assert result.termination_complete is False
+    capture.close.assert_called_once_with()
 
 
 @pytest.mark.parametrize("older", [True, False])
@@ -390,13 +532,22 @@ def test_posix_access_denied_process_is_ignored_only_when_older(monkeypatch, old
         def kill(self):
             pytest.fail("unverified unrelated process must never be killed")
 
+    from unittest.mock import Mock
+
+    capture = Mock()
+    capture.wait_for_root.return_value = False
+    capture.read_failed.is_set.return_value = capture.exceeded.is_set.return_value = False
+    capture.finish.return_value = "success", ""
+    monkeypatch.setattr(posix, "_OutputPipes", lambda *_: capture)
+
     class Child:
         pid = 4242
         returncode = 0
-        def communicate(self, **kwargs):
-            return "success", ""
+        stdout = stderr = object()
+
         def poll(self):
             return 0
+
     monkeypatch.setattr(posix.subprocess, "Popen", lambda *a, **kw: Child())
     monkeypatch.setattr(posix.os, "getuid", lambda: 1000, raising=False)
     monkeypatch.setattr(posix.os, "getpgid", lambda pid: 9999, raising=False)

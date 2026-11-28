@@ -34,7 +34,9 @@ def test_baseline_is_nonvacuous() -> None:
     #     phase2.triage._read_parent_versions：已登记报告重读失败，留 warning。
     #     core.attribution._score_one_edge：规则正则非法，留 warning。
     #     （enrichment._terminate_new_children 仅 NoSuchProcess 仍静默，其余留 warning；次数不变）
-    assert sum(silent_except.load_baseline().values()) == 49
+    #   49 → 47：proctree._run_owned_impl 移除两处 subprocess.TimeoutExpired 静默 pass。
+    #     改为 _reap_returncode 记 process_exit_unverified，退出码回收不再静默跳过。
+    assert sum(silent_except.load_baseline().values()) == 47
 
 
 def test_every_baseline_entry_has_a_reason() -> None:
