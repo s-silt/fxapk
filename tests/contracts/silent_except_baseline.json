@@ -131,10 +131,6 @@
       "count": 1,
       "reason": "进程在枚举期间退出或无权读取属性，按不属于本次调用处理"
     },
-    "fxapk/core/proctree.py::_run_owned_impl::subprocess.TimeoutExpired::pass": {
-      "count": 2,
-      "reason": "根进程宽限期内未退出，随后走强制终止路径"
-    },
     "fxapk/core/webctx.py::load_web_evidence::ValueError::continue": {
       "count": 2,
       "reason": "_iter_files 保证在 root 下，不可达分支"

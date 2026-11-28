@@ -250,6 +250,8 @@ _PRODUCER_GAP_PATTERNS = (
     (_PRODUCER_JAVA_SAVE_ERROR, _JAVA_SAVE_ERROR),
 )
 _PRODUCER_GAP_CODES = frozenset(code for code, _ in _PRODUCER_GAP_PATTERNS)
+#: proctree 即使在退出码 0 时也可能报告输出未读全：诊断行可能缺失，生产者缺口无从排除。
+_OUTPUT_UNVERIFIED_CODES = frozenset({"output_drain_unverified", "output_read_failed"})
 
 
 @dataclass(frozen=True)
@@ -331,7 +333,7 @@ def _probe_jadx_version(
 
     不缓存成功或失败结果：每次启用持久索引的 analyze 都探测一次（相对反编译本体
     成本可忽略，且免去跨运行的缓存失效问题）。两个输出流各限 64 KiB；即使退出码为 0，
-    触发输出上限也不能信任已读到的版本首行。只有进程树受控、正常退出且 stdout
+    触发输出上限、输出未排空或读失败也不能信任已读到的版本首行。只有进程树受控、正常退出且 stdout
     首行经 NFC 规范化后非空，才允许版本进入 key material——版本参与索引身份，
     假版本会让不兼容索引共享身份。
     """
@@ -354,6 +356,7 @@ def _probe_jadx_version(
         or not owned.termination_complete
         or owned.forced_tree_kill
         or "output_limit" in owned.reason_codes
+        or not _OUTPUT_UNVERIFIED_CODES.isdisjoint(owned.reason_codes)
     ):
         return None
     lines = (owned.stdout or "").splitlines()
@@ -946,12 +949,13 @@ class JadxAnalyzer(BaseAnalyzer):
             # （jadx 输出目录与物化 root 都还活着）。任何异常只改索引 status/receipt，
             # 绝不污染 result.error 与既有产出。
             # --------------------------------------------------------------
-            producer_gaps = _PRODUCER_GAP_CODES.intersection(
+            # Unverified output may hide a gap diagnostic, so it blocks the index the same way.
+            index_gaps = (_PRODUCER_GAP_CODES | _OUTPUT_UNVERIFIED_CODES).intersection(
                 code for run in runs for code in run["reason_codes"]
             )
-            if cache_root and producer_gaps:
+            if cache_root and index_gaps:
                 # An observed input or output gap invalidates reuse and publication for this run.
-                for reason in sorted(producer_gaps):
+                for reason in sorted(index_gaps):
                     _append_index_reason(index_receipt, reason)
             elif cache_root and materialized is not None and jadx_version is not None:
                 lineage = _lineage_after_exclusions(
@@ -1234,6 +1238,10 @@ class JadxAnalyzer(BaseAnalyzer):
         elif owned.forced_tree_kill or not owned.termination_complete:
             # Sources may still have been in flight when the root exited.
             logger.warning("[jadx] 退出码 0 但进程树未干净收尾（%s），按 partial 计", ", ".join(owned.reason_codes))
+            status = "partial"
+        elif not _OUTPUT_UNVERIFIED_CODES.isdisjoint(owned.reason_codes):
+            # Clean exit, but missing stdout/stderr may have carried producer-gap lines.
+            logger.warning("[jadx] 退出码 0 但输出未完整读取（%s），保留产物，按 partial 计", ", ".join(owned.reason_codes))
             status = "partial"
         elif diagnostics:
             logger.warning("[jadx] 生产者记录覆盖缺口，保留其余产物，覆盖按 partial 计")
@@ -1552,7 +1560,7 @@ def _build_jadx_receipt(
 ) -> dict:
     """组装 ``meta['jadx_receipt']``。``complete=True`` 是 Java 面「完整覆盖」的唯一凭据，
     要求全部成立：进程 ok 且**恰有一次**非降级执行、执行的进程树状态全程受验（含中间态）、
-    枚举成功、未撞扫描上限、读失败 0、单文件截断 0、单文件扫描异常 0、清理完成、analyzer
+    输出完整读取、枚举成功、未撞扫描上限、读失败 0、单文件截断 0、单文件扫描异常 0、清理完成、analyzer
     未抛异常。任一不成立即 ``complete=False`` 并在 ``reason_codes`` 留下稳定原因
     （阳性发现不受影响，只挡穷尽性）。builder 自身独立强制这些条件，不依赖调用方只在
     正确形态下调用（fail closed）。
@@ -1584,6 +1592,8 @@ def _build_jadx_receipt(
             reasons.add("descendants_after_root_exit")
         run_reasons = run.get("reason_codes") or ()
         reasons.update(_PRODUCER_GAP_CODES.intersection(run_reasons))
+        # Clean-exit runs with unread output stay visible even if a caller passed status=ok.
+        reasons.update(_OUTPUT_UNVERIFIED_CODES.intersection(run_reasons))
         if "tree_state_unverified" in run_reasons:
             # 根退出后的即时树状态查询失败过：最终 quiesce 即便成功，中间窗口无从复核，
             # 按覆盖不完整计（fail closed）。

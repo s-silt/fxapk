@@ -8,11 +8,15 @@
 from __future__ import annotations
 
 import hashlib
+import zipfile
 from pathlib import Path
 
 import pytest
 
+from fxapk.analyzers import jadx
+from fxapk.analyzers.jadx import JadxAnalyzer
 from fxapk.core import judgment_ledger as jl
+from fxapk.core import proctree
 from fxapk.core import recognition_contract as rc
 from fxapk.core.jadx_index import (
     DexInput,
@@ -40,6 +44,7 @@ from fxapk.core.jadx_ownership import (
     RegionOwnership,
     project_ownership,
 )
+from tests.conftest import FakeContext
 from tests.recognition_fixtures import (
     FIXED_TIME,
     append_record,
@@ -544,3 +549,165 @@ def test_generic_overload_identities_survive_ownership(tmp_path: Path) -> None:
         "handle/1",
         "handle/2",
     ]
+
+
+_OUTPUT_UNVERIFIED = ("output_drain_unverified", "output_read_failed")
+
+
+def _clean_exit(stdout: str = "", reason_codes: tuple[str, ...] = ()) -> proctree.OwnedRun:
+    return proctree.OwnedRun(
+        returncode=0, stdout=stdout, stderr="", timed_out=False,
+        ownership_complete=True, termination_complete=True,
+        forced_tree_kill=False, reason_codes=reason_codes,
+    )
+
+
+@pytest.mark.parametrize("flag", _OUTPUT_UNVERIFIED)
+def test_version_probe_rejects_clean_exit_with_unverified_output(
+    monkeypatch: pytest.MonkeyPatch, flag: str,
+) -> None:
+    monkeypatch.setattr(proctree, "run_owned", lambda *_a, **_kw: _clean_exit("1.5.2\n"))
+    assert jadx._probe_jadx_version((["jadx"], {})) == "1.5.2"
+    monkeypatch.setattr(
+        proctree, "run_owned", lambda *_a, **_kw: _clean_exit("1.5.2\n", (flag,)),
+    )
+    assert jadx._probe_jadx_version((["jadx"], {})) is None
+
+
+@pytest.mark.parametrize("flag", [None, *_OUTPUT_UNVERIFIED])
+def test_decompile_clean_exit_with_unverified_output_is_partial_and_uncached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, flag: str | None,
+) -> None:
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: (["jadx"], {}))
+
+    def run(cmd, *, timeout, env=None, **_limits):  # noqa: ANN001
+        if "--version" in cmd:
+            return _clean_exit("1.5.2\n")
+        pkg = Path(cmd[cmd.index("-d") + 1]) / "sources" / "com" / "x"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "C.java").write_text(
+            'class C { String u = "https://cfg-host.example/api"; }\n', encoding="utf-8",
+        )
+        return _clean_exit(reason_codes=(flag,) if flag else ())
+
+    monkeypatch.setattr(proctree, "run_owned", run)
+    apk = tmp_path / "app.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("classes.dex", b"dex-payload")
+    ctx = FakeContext(apk_path=str(apk), jadx_cache_root=str(tmp_path / "jadx-cache"))
+
+    index_statuses: list[str] = []
+    for _ in range(2):  # The second pass shows whether the first one published an index.
+        result = JadxAnalyzer().analyze(ctx)
+        receipt = result.meta["jadx_receipt"]
+        (run_receipt,) = receipt["runs"]
+        index_statuses.append(result.meta["jadx_index_status"])
+        assert result.meta["jadx_endpoint_count"] >= 1
+        assert (
+            run_receipt["returncode"], run_receipt["timed_out"], run_receipt["ownership_complete"],
+            run_receipt["termination_complete"], run_receipt["forced_tree_kill"],
+        ) == (0, False, True, True, False)
+        if flag is None:
+            assert receipt["status"] == "ok" and receipt["complete"] is True
+            continue
+        assert receipt["status"] == result.meta["jadx_status"] == "partial"
+        assert receipt["complete"] is False
+        assert {flag, "producer_partial"} <= set(receipt["reason_codes"])
+        assert flag in run_receipt["reason_codes"]
+        assert flag in receipt["index"]["reason_codes"]
+        assert "jadx_index_key" not in result.meta and "key" not in receipt["index"]
+    if flag is None:
+        assert index_statuses == ["built", "reused"]
+    else:
+        assert index_statuses == ["disabled", "disabled"]
+        assert not (tmp_path / "jadx-cache").exists()
+
+
+@pytest.mark.parametrize("flag", _OUTPUT_UNVERIFIED)
+def test_decompile_clean_exit_with_unverified_output_does_not_reuse_existing_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, flag: str,
+) -> None:
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: (["jadx"], {}))
+    run_reason_codes: tuple[str, ...] = ()
+
+    def run(cmd, *, timeout, env=None, **_limits):  # noqa: ANN001
+        if "--version" in cmd:
+            return _clean_exit("1.5.2\n")
+        pkg = Path(cmd[cmd.index("-d") + 1]) / "sources" / "com" / "x"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "C.java").write_text(
+            'class C { String u = "https://cfg-host.example/api"; }\n', encoding="utf-8",
+        )
+        return _clean_exit(reason_codes=run_reason_codes)
+
+    monkeypatch.setattr(proctree, "run_owned", run)
+    apk = tmp_path / "app.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("classes.dex", b"dex-payload")
+    cache_root = tmp_path / "jadx-cache"
+    ctx = FakeContext(apk_path=str(apk), jadx_cache_root=str(cache_root))
+
+    first = JadxAnalyzer().analyze(ctx)
+    first_receipt = first.meta["jadx_receipt"]
+    (first_run,) = first_receipt["runs"]
+    assert first.meta["jadx_endpoint_count"] >= 1
+    assert (
+        first_run["returncode"], first_run["timed_out"], first_run["ownership_complete"],
+        first_run["termination_complete"], first_run["forced_tree_kill"],
+    ) == (0, False, True, True, False)
+    assert first_receipt["status"] == first.meta["jadx_status"] == "ok"
+    assert first_receipt["complete"] is True
+    assert first.meta["jadx_index_status"] == first_receipt["index"]["status"] == "built"
+    index_key = first.meta["jadx_index_key"]
+    assert first_receipt["index"]["key"] == index_key
+    assert (cache_root / index_key / "manifest.json").is_file()
+    assert isinstance(JadxIndexStore(cache_root).load_index(index_key), LoadedIndex)
+    cache_before = {
+        p.relative_to(cache_root).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in sorted(cache_root.rglob("*"))
+        if p.is_file()
+    }
+    assert f"{index_key}/manifest.json" in cache_before
+
+    load_calls: list[str] = []
+    build_calls: list[str] = []
+    orig_load = JadxIndexStore.load_index
+    orig_build = JadxIndexStore.build_index
+
+    def tracked_load(self: JadxIndexStore, key: str):  # noqa: ANN202
+        load_calls.append(key)
+        return orig_load(self, key)
+
+    def tracked_build(self: JadxIndexStore, source_root, manifest, **kwargs):  # noqa: ANN001, ANN202
+        build_calls.append(manifest.index_key)
+        return orig_build(self, source_root, manifest, **kwargs)
+
+    monkeypatch.setattr(JadxIndexStore, "load_index", tracked_load)
+    monkeypatch.setattr(JadxIndexStore, "build_index", tracked_build)
+    run_reason_codes = (flag,)
+
+    second = JadxAnalyzer().analyze(ctx)
+    second_receipt = second.meta["jadx_receipt"]
+    (second_run,) = second_receipt["runs"]
+    assert second.meta["jadx_endpoint_count"] >= 1
+    assert second_run["options_digest"] == first_run["options_digest"]
+    assert (
+        second_run["returncode"], second_run["timed_out"], second_run["ownership_complete"],
+        second_run["termination_complete"], second_run["forced_tree_kill"],
+    ) == (0, False, True, True, False)
+    assert second_receipt["status"] == second.meta["jadx_status"] == "partial"
+    assert second_receipt["complete"] is False
+    assert {flag, "producer_partial"} <= set(second_receipt["reason_codes"])
+    assert flag in second_run["reason_codes"]
+    assert second.meta["jadx_index_status"] == second_receipt["index"]["status"] == "disabled"
+    assert flag in second_receipt["index"]["reason_codes"]
+    assert "jadx_index_key" not in second.meta and "key" not in second_receipt["index"]
+    assert "jadx_query_sources" not in second.meta
+    assert load_calls == []
+    assert build_calls == []
+    cache_after = {
+        p.relative_to(cache_root).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in sorted(cache_root.rglob("*"))
+        if p.is_file()
+    }
+    assert cache_after == cache_before

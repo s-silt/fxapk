@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import pickle
 import sys
 import zipfile
@@ -602,6 +603,65 @@ def test_parser_load_rejects_snapshot_with_changed_policy(
         )
 
     assert raised.value.receipt["reason"] == "parser_invalid_response"
+
+
+@pytest.mark.parametrize("flag", [None, "output_drain_unverified", "output_read_failed"])
+def test_clean_exit_with_unverified_output_is_never_a_successful_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str | None,
+) -> None:
+    apk_path = tmp_path / "synthetic.apk"
+    _make_apk(apk_path, **{"assets/sample.bin": b"bytes"})
+    limits = _limits()
+    responses = {
+        "load": {
+            "version": parser_worker.IPC_VERSION,
+            "kind": "snapshot",
+            "snapshot": parser_worker.snapshot_to_dict(_snapshot(apk_path, limits)),
+        },
+        "read_file": {
+            "version": parser_worker.IPC_VERSION,
+            "kind": "read_file",
+            "data": "Ynl0ZXM=",
+            "failure_reason": None,
+            "parser_limits": limits.to_dict(),
+        },
+    }
+
+    def run_owned_fixture(argv, **_kwargs):
+        request = json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
+        return OwnedRun(
+            0, json.dumps(responses[request["operation"]]), "", False, True, True, False,
+            (flag,) if flag else (), memory_limit_enforced=True,
+        )
+
+    monkeypatch.setattr("fxapk.core.proctree.run_owned", run_owned_fixture)
+
+    def load() -> SnapshotContext:
+        return parser_worker.run_parser_load(
+            str(apk_path), AnalysisConfig(online=False), None, None, None, limits,
+        )
+
+    read = parser_worker.run_parser_read(
+        apk_path=str(apk_path),
+        expected_sha256="a" * 64,
+        file_path="assets/sample.bin",
+        limits=limits,
+        declared_sizes={},
+    )
+    if flag is None:
+        assert load().parser_execution["status"] == "completed_under_limits"
+        assert read == (b"bytes", None, None)
+        return
+    with pytest.raises(parser_worker.ParserBridgeError) as raised:
+        load()
+    receipt = raised.value.receipt
+    assert receipt["status"] == "failed"
+    assert receipt["reason"] == "parser_invalid_response"
+    assert receipt["blocked_claims"] == ["parser_derived_observations"]
+    assert receipt["ownership_complete"] is True
+    assert receipt["termination_complete"] is True
+    assert receipt["forced_tree_kill"] is False
+    assert read == (None, "parser_invalid_response", None)
 
 
 def test_parser_execution_flows_through_pipeline_contract_and_digest() -> None:
