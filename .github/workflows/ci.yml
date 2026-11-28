@@ -450,11 +450,17 @@ jobs:
           # Ubuntu py3.12（job 140893005333）失败的 test_real_unicorn_calls_and_negative_vectors：移出并行阶段，
           # 在独立临时目录里各串行执行一次。同一运行共三个 Linux job 失败；并行进程干扰只是假设，未证实为因果竞态；
           # 这里不跳过、不重试、不放宽断言，失败照样红。
+          # 运行 46120950812（a0d7311）本关 job 140905108363：上面四条串行节点全过，并行阶段的
+          # test_root_exit_reclaims_tree_before_waiting_for_inherited_pipe[uncapped] 报 POSIX
+          # ownership_scan / environ / AccessDenied（tree_state_unverified）。[capped] 与 [uncapped] 走同一条
+          # run_owned 真实 POSIX 进程表所有权扫描，只差输出流上限，故两者一并移入串行；无法读取的 PID 未被识别。
           recovery_nodes=(
             "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[010000d4-system_instruction_unsupported]"
             "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[000040f9c0035fd6-emulation_fault]"
             "tests/test_recovery_pipeline.py::test_real_unicorn_calls_and_negative_vectors"
             "tests/test_evidence_archive.py::test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"
+            "tests/test_proctree.py::test_root_exit_reclaims_tree_before_waiting_for_inherited_pipe[capped]"
+            "tests/test_proctree.py::test_root_exit_reclaims_tree_before_waiting_for_inherited_pipe[uncapped]"
           )
           recovery_deselect=()
           for node in "${recovery_nodes[@]}"; do
@@ -466,7 +472,10 @@ jobs:
             --basetemp="$scratch/basetemp" -o cache_dir="$scratch/cache" \
             --junitxml=${{ runner.temp }}/fxapk-locked-recovery.xml
           rm -rf -- "$scratch"
-          python -m pytest -q -n auto --dist worksteal \
+          # 并行阶段用 --dist loadscope（与 Ubuntu 矩阵同理）：同一模块（类内测试按类）的节点留在同一 worker
+          # 顺序执行，减少同模块真 run_owned 节点的并发重叠；不同模块仍跨 worker 并发、照样扫描整张同 UID
+          # 进程表，不是模块间隔离，单独不证明修复，也不确立失败原因。
+          python -m pytest -q -n auto --dist loadscope \
             --deselect=tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
             "${recovery_deselect[@]}" \
             --junitxml=${{ runner.temp }}/fxapk-locked-tests.xml
@@ -480,11 +489,14 @@ jobs:
           serial = list(ET.parse(temp / "fxapk-locked-recovery.xml").getroot().iter("testcase"))
           parallel = list(ET.parse(temp / "fxapk-locked-tests.xml").getroot().iter("testcase"))
           base = "test_execution_budgets_and_missing_environment_fail_explicitly"
+          root_exit = "test_root_exit_reclaims_tree_before_waiting_for_inherited_pipe"
           expected = [
               ("tests.test_recovery_pipeline", f"{base}[010000d4-system_instruction_unsupported]"),
               ("tests.test_recovery_pipeline", f"{base}[000040f9c0035fd6-emulation_fault]"),
               ("tests.test_recovery_pipeline", "test_real_unicorn_calls_and_negative_vectors"),
               ("tests.test_evidence_archive", "test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"),
+              ("tests.test_proctree", f"{root_exit}[capped]"),
+              ("tests.test_proctree", f"{root_exit}[uncapped]"),
           ]
           assert sorted((case.get("classname", ""), case.get("name", "")) for case in serial) == sorted(expected) and all(
               len(case) == 0 for case in serial
