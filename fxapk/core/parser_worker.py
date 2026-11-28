@@ -244,6 +244,7 @@ def snapshot_to_dict(snapshot: Any) -> dict[str, Any]:
         "parser_execution": snapshot.parser_execution,
         "declared_sizes": snapshot.declared_sizes,
         "hiddenapi_relaxation": snapshot.hiddenapi_relaxation,
+        "prefetch_decode_overhead": dict(snapshot._prefetch_decode_overhead),
     }
 
 
@@ -303,7 +304,8 @@ def snapshot_from_dict(value: object) -> Any:
         "extra_dex_report", "dex_decode_report", "parser_limits", "parser_execution",
         "declared_sizes", "hiddenapi_relaxation",
     }
-    if set(raw) != required:
+    # Optional for payloads that predate decode-cost replay; such snapshots replay none.
+    if set(raw) - {"prefetch_decode_overhead"} != required:
         raise ValueError("parser_invalid_response:snapshot_fields")
     config = _config_from_request(raw["config"])
     package_name = _require_string(raw["package_name"], "package_name")
@@ -369,6 +371,12 @@ def snapshot_from_dict(value: object) -> Any:
             files[path] = base64.b64decode(encoded, validate=True)
         except (ValueError, binascii.Error) as exc:
             raise ValueError("parser_invalid_response:files") from exc
+    overhead = _require_dict(raw.get("prefetch_decode_overhead", {}), "prefetch_decode_overhead")
+    if any(
+        path not in files or type(extra) is not int or extra < 0
+        for path, extra in overhead.items()
+    ):
+        raise ValueError("parser_invalid_response:prefetch_decode_overhead")
     failures = _require_dict(raw["read_failures"], "read_failures")
     if any(not isinstance(key, str) or not isinstance(reason, str) for key, reason in failures.items()):
         raise ValueError("parser_invalid_response:read_failures")
@@ -418,6 +426,7 @@ def snapshot_from_dict(value: object) -> Any:
         parser_execution=parser_execution,
         declared_sizes=raw["declared_sizes"],
         hiddenapi_relaxation=hiddenapi,
+        prefetch_decode_overhead=overhead,
     )
 
 
@@ -621,6 +630,28 @@ def run_parser_load(
     return snapshot
 
 
+def _charge_child_decode_work(
+    file_path: str, data: bytes | None, decode_bytes: int, failure_reason: str | None,
+) -> bool:
+    """Replay the child's measured decode work against the caller's analyzer budget.
+
+    SnapshotContext._lazy_read then admits the returned bytes with no extra decode
+    cost, so only work beyond ``len(data)`` is charged here. Together the two
+    admits equal the in-process ``admit(data, work.bytes_used, denied=...)``.
+    """
+    from fxapk.core.apk import _active_resource_budget
+
+    budget = _active_resource_budget(file_path)
+    if budget is None:
+        return True
+    returned = 0 if data is None else len(data)
+    return budget.admit(
+        None,
+        max(0, decode_bytes - returned),
+        denied=failure_reason == "decompression_budget",
+    )
+
+
 def run_parser_read(
     *,
     apk_path: str,
@@ -656,11 +687,14 @@ def run_parser_read(
         }:
             reason = "parser_worker_failed"
         return None, reason, None
-    if response["kind"] != "read_file" or set(response) != {
-        "version", "kind", "data", "failure_reason", "parser_limits",
-    }:
+    base_keys = {"version", "kind", "data", "failure_reason", "parser_limits"}
+    # decode_bytes is optional for older children; absent means no replayable work.
+    if response["kind"] != "read_file" or set(response) - {"decode_bytes"} != base_keys:
         return None, "parser_invalid_response", None
     if response["parser_limits"] != limits.to_dict():
+        return None, "parser_invalid_response", None
+    decode_bytes = response.get("decode_bytes", 0)
+    if type(decode_bytes) is not int or decode_bytes < 0:
         return None, "parser_invalid_response", None
     failure_reason = response["failure_reason"]
     if failure_reason is not None and not isinstance(failure_reason, str):
@@ -668,14 +702,18 @@ def run_parser_read(
     encoded = response["data"]
     if encoded is not None and failure_reason is not None:
         return None, "parser_invalid_response", None
-    if encoded is None:
+    data: bytes | None = None
+    if encoded is not None:
+        if not isinstance(encoded, str) or len(encoded) > limits.max_output_bytes:
+            return None, "parser_invalid_response", None
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            return None, "parser_invalid_response", None
+    if not _charge_child_decode_work(file_path, data, decode_bytes, failure_reason):
+        return None, "decompression_budget", None
+    if data is None:
         return None, failure_reason or "unavailable_context", None
-    if not isinstance(encoded, str) or len(encoded) > limits.max_output_bytes:
-        return None, "parser_invalid_response", None
-    try:
-        data = base64.b64decode(encoded, validate=True)
-    except (ValueError, binascii.Error):
-        return None, "parser_invalid_response", None
     return data, None, None
 
 
@@ -804,6 +842,8 @@ def _handle_request(request: dict[str, Any]) -> dict[str, Any]:
             "data": base64.b64encode(data).decode("ascii") if data is not None else None,
             "failure_reason": snapshot.file_read_ledger.failure_for(file_path),
             "parser_limits": limits.to_dict(),
+            # Fresh standalone context: this counter is exactly this read's decode work.
+            "decode_bytes": snapshot._lazy_other_extract_bytes,
         }
     raise ValueError("parser_invalid_request")
 
