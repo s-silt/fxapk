@@ -116,8 +116,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
       - name: Install package
         # Minimal verified leak-scan import closure: explicit typer + click (newer typer
         # may not pull click) + PyYAML (required for rule/allowlist loading), plus editable
@@ -149,8 +147,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
       - name: Install package
         # Minimal verified leak-scan import closure: explicit typer + click (newer typer
         # may not pull click) + PyYAML (required for rule/allowlist loading), plus editable

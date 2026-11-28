@@ -9,13 +9,16 @@ on:
       - '.github/workflows/release.yml'
       - '.github/release-notes-template.md'
       - 'tools/release_preflight.py'
-      - 'tools/release_plugin_smoke.py'
       - 'CHANGELOG.md'
       - 'pyproject.toml'
       - 'plugins/fxapk-android-ui/pyproject.toml'
       - 'plugins/fxapk-rea/pyproject.toml'
       - 'plugins/fxapk-asc/pyproject.toml'
       - 'plugins/fxapk-flutter/pyproject.toml'
+      - 'MANIFEST.in'  # leak-scan: allow tracked sdist manifest filename, not a domain.
+      - 'plugins/fxapk-android-ui/MANIFEST.in'  # leak-scan: allow tracked sdist manifest filename, not a domain.
+      - 'plugins/fxapk-asc/MANIFEST.in'  # leak-scan: allow tracked sdist manifest filename, not a domain.
+      - 'plugins/fxapk-flutter/MANIFEST.in'  # leak-scan: allow tracked sdist manifest filename, not a domain.
   workflow_dispatch:
 
 permissions:
@@ -67,30 +70,6 @@ jobs:
           printf 'manifest-sha256=%s\n' "$digest" >> "$GITHUB_OUTPUT"
           printf 'artifact-name=rehearsal-release-build-manifest-%s-%s-%s\n' \
             "$commit" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-      # Same exact-wheel plugin registration smoke as release.yml, on the rehearsal's own build.
-      - name: Plugin registration smoke on the exact built wheels
-        run: |
-          version=$(python -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"])')
-          one() {
-            local matches=($1)
-            if [ "${#matches[@]}" -ne 1 ] || [ ! -f "${matches[0]}" ]; then
-              echo "::error::expected exactly one wheel matching $1" >&2
-              return 1
-            fi
-            realpath -- "${matches[0]}"
-          }
-          core=$(one 'dist/fxapk-*.whl')
-          ui=$(one 'plugin-dist/fxapk_android_ui-*.whl')
-          flutter=$(one 'plugin-dist/fxapk_flutter-*.whl')
-          rea=$(one 'plugin-dist/fxapk_rea-*.whl')
-          script="$GITHUB_WORKSPACE/tools/release_plugin_smoke.py"
-          for mode in core registered; do
-            env_dir=$(mktemp -d "$RUNNER_TEMP/fxapk-plugin-smoke-$mode.XXXXXX")
-            python -m venv "$env_dir/venv"
-            if [ "$mode" = core ]; then wheels=("$core"); else wheels=("$core" "$ui" "$flutter" "$rea"); fi
-            "$env_dir/venv/bin/python" -m pip install --disable-pip-version-check "${wheels[@]}"
-            (cd "$env_dir" && "$env_dir/venv/bin/python" -I "$script" --expect-version "$version" "$mode")
-          done
       - name: Upload rehearsal manifest only
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
