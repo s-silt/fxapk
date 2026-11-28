@@ -5,7 +5,7 @@ import errno
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 import threading
@@ -1139,3 +1139,43 @@ def test_bare_report_status_distinguishes_omitted_explicit_null_and_invalid(tmp_
     assert project_case_status(omitted)["analysis"] == "complete"
     assert project_case_status(explicit_null)["analysis"] == "unknown"
     assert project_case_status(invalid)["analysis"] == "failed"
+
+
+def test_constructor_rejects_windows_drive_anchor_relative_artifact_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _write_report(tmp_path)
+    manifest = tmp_path / "case-package.json"
+    if os.name == "nt":
+        evidence = tmp_path / "notes.txt"
+        evidence.write_text("inert evidence\n", encoding="utf-8")
+        target = evidence.resolve()
+        original_relative_to = Path.relative_to
+
+        def _relative_to(path: Path, *other: object, **kwargs: object):  # noqa: ANN202
+            if path == target:
+                return PurePosixPath("C:notes.txt")
+            return original_relative_to(path, *other, **kwargs)
+
+        monkeypatch.setattr(Path, "relative_to", _relative_to)
+    else:
+        evidence = tmp_path / "C:notes.txt"
+        evidence.write_text("inert evidence\n", encoding="utf-8")
+
+    verdict, _ = case_package.resolve_package_artifact_path(tmp_path, "C:notes.txt")
+    assert verdict is case_package.ArtifactPathVerdict.UNSAFE
+
+    with pytest.raises(CasePackageError) as excinfo:
+        create_case_package(
+            report,
+            manifest,
+            case_id="case-001",
+            producer="analyst-a",
+            case_evidence=[evidence],
+        )
+
+    assert excinfo.value.code is CasePackageErrorCode.ARTIFACT_UNSAFE_PATH
+    assert excinfo.value.diagnostic_code == "artifact_unsafe_path"
+    assert excinfo.value.public_message == "artifact has unsafe path"
+    assert "C:notes.txt" not in excinfo.value.public_message
+    assert not manifest.exists()

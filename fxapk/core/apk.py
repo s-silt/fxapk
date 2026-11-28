@@ -689,6 +689,7 @@ def _bounded_extract_file_based_on_header_info(
             # fail, so an attempted fallback only receives the remaining budget.
             _charge_other_total(len(decoded))
             output.extend(decoded)
+            del decoded
             if len(output) > cap:
                 _raise_too_large(indicator, cap)
             pending = c_obj.unconsumed_tail

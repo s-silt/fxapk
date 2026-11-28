@@ -635,3 +635,36 @@ def test_mock_decoder_work_is_charged_before_possible_fallback(monkeypatch, retr
         assert stream.reads == ([1, 1, 2] if retry else [1, 1])
     finally:
         apk_mod._other_extract_total_bytes.reset(token)
+
+
+def test_bounded_inflate_small_inert_data_succeeds_with_exact_accounting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    payload = b"inert-sample-payload-for-bounded-inflate-0123456789"
+    compressor = zlib.compressobj(wbits=-15)
+    compressed = compressor.compress(payload) + compressor.flush()
+    stream = io.BytesIO(b"\x00" * 30 + compressed)
+    local = {
+        "file_name_length": 0,
+        "compressed_size": len(compressed),
+        "uncompressed_size": len(payload),
+        "extra_field_length": 0,
+        "compression_method": 8,
+    }
+    central = {
+        "filename": "inert.txt",
+        "relative_offset_of_local_file_header": 0,
+    }
+    monkeypatch.setattr(apk_mod, "_INFLATE_CHUNK_BYTES", 4)
+    token = apk_mod._other_extract_total_bytes.set(0)
+    try:
+        data, indicator = apk_mod._bounded_extract_file_based_on_header_info(
+            stream, local, central
+        )
+        assert data == payload
+        assert indicator == "DEFLATED"
+        assert apk_mod._other_extract_total_bytes.get() == len(payload)
+    finally:
+        apk_mod._other_extract_total_bytes.reset(token)

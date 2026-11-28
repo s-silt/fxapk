@@ -56,6 +56,7 @@ class CasePackageErrorCode(str, Enum):
     CLOSURE_TARGET_LACKS_EVIDENCE = "closure_target_lacks_evidence"
     IMMUTABLE_RECORD_EXISTS = "immutable_record_exists"
     ARTIFACT_OUTSIDE_PACKAGE_ROOT = "artifact_outside_package_root"
+    ARTIFACT_UNSAFE_PATH = "artifact_unsafe_path"
     ARTIFACT_NOT_READABLE = "artifact_not_readable"
     ARTIFACT_KIND_SCOPE_CONFLICT = "artifact_kind_scope_conflict"
     INVALID_CLOSURE_STATUS = "invalid_closure_status"
@@ -93,6 +94,7 @@ _CASE_PACKAGE_MESSAGES: dict[CasePackageErrorCode, str] = {
         "complete closure target lacks direct case evidence",
     CasePackageErrorCode.IMMUTABLE_RECORD_EXISTS: "immutable record already exists",
     CasePackageErrorCode.ARTIFACT_OUTSIDE_PACKAGE_ROOT: "artifact is outside package root",
+    CasePackageErrorCode.ARTIFACT_UNSAFE_PATH: "artifact has unsafe path",
     CasePackageErrorCode.ARTIFACT_NOT_READABLE: "artifact is not a readable file",
     CasePackageErrorCode.ARTIFACT_KIND_SCOPE_CONFLICT:
         "conflicting artifact kind/scope for the same path",
@@ -245,6 +247,16 @@ def _write_new_json(path: Path, payload: Mapping[str, object]) -> None:
         raise CasePackageError(CasePackageErrorCode.IMMUTABLE_RECORD_EXISTS)
 
 
+def _has_unsafe_relative_artifact_path(
+    relative_path: str, *, reject_absolute: bool = True
+) -> bool:
+    if not relative_path or any(ord(ch) < 32 for ch in relative_path):
+        return True
+    return reject_absolute and (
+        Path(relative_path).is_absolute() or bool(PureWindowsPath(relative_path).anchor)
+    )
+
+
 def _relative_artifact(path: Path, root: Path, *, kind: str, scope: EvidenceScope) -> dict[str, object]:
     resolved = path.resolve()
     package_root = root.resolve()
@@ -252,8 +264,11 @@ def _relative_artifact(path: Path, root: Path, *, kind: str, scope: EvidenceScop
         raise CasePackageError(CasePackageErrorCode.ARTIFACT_OUTSIDE_PACKAGE_ROOT)
     if not resolved.is_file():
         raise CasePackageError(CasePackageErrorCode.ARTIFACT_NOT_READABLE)
+    rel_path = resolved.relative_to(package_root).as_posix()
+    if _has_unsafe_relative_artifact_path(rel_path, reject_absolute=True):
+        raise CasePackageError(CasePackageErrorCode.ARTIFACT_UNSAFE_PATH)
     return {
-        "path": resolved.relative_to(package_root).as_posix(),
+        "path": rel_path,
         "kind": kind,
         "scope": scope.value,
         "size": resolved.stat().st_size,
@@ -447,11 +462,11 @@ def resolve_package_artifact_path(
     已存在文件，则接受，因此那里传 ``reject_absolute=False``。两套策略各自保持
     原来的接受范围。
     """
-    if not isinstance(relative_path, str) or not relative_path or any(ord(ch) < 32 for ch in relative_path):
+    if not isinstance(relative_path, str) or _has_unsafe_relative_artifact_path(
+        relative_path, reject_absolute=reject_absolute
+    ):
         return ArtifactPathVerdict.UNSAFE, None
     candidate = Path(relative_path)
-    if reject_absolute and (candidate.is_absolute() or PureWindowsPath(relative_path).anchor):
-        return ArtifactPathVerdict.UNSAFE, None
     try:
         root = package_dir.resolve()
         resolved = (root / candidate).resolve(strict=strict)
