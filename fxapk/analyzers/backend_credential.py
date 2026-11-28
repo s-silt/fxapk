@@ -9,18 +9,25 @@ JDBC password、云 AccessKey。提取它们 = 对证物做取证分析，是「
 有界无 ReDoS、资源扫描带上限、never-throw try/except + logging、全 type hints、宁缺毋滥
 （只取高精度结构化凭据形态，误报近零）。
 
-Stage 2 待衔接缺口（本阶段不改动 config_keys / leads / tests / digest）：
-- cross_analyzer_dedup: config_keys 分析器对同名配置键的 CONFIG_KEY 线索与本分析器脱敏云凭据线索的跨分析器去重协调。
-- downstream_presentation: leads.py / digest.py 对未验证云厂商归属（verification_status=unverified）与脱敏摘要的分面展示。
-- synthetic_placeholder_tests: 针对 7 家云/SaaS 厂商上下文配置键的合成无效占位符回归测试。
+云/SaaS 精确上下文检测器（rules/cloud_credential_providers.yaml）覆盖范围与限制：
+- 只扫 DEX 字符串池与 APK 内**打包明文**资源（assets/、res/raw/ 等）。不解析 resources.arsc；
+  res/ 下除 res/raw/ 外的编译资源（res/values 字符串已编入 ARSC，res/xml 等为二进制 AXML）与
+  AndroidManifest.xml 一律跳过，故 res/values/strings.xml 中的厂商键不在覆盖范围内。
+- 只认完整语法：JSON 经 json.loads 取完整键 + 字符串标量（畸形 JSON 不回退正则）；.xml 只认完整
+  ``<string name="键">值</string>``；其余文本只认整行 ``键 = "值"`` 完整引号字面量。JS 属性读取、
+  表达式、非字面量与不支持语法一律不判。输出只含固定脱敏标记，不含原值、前缀或长度。
+- 命中按 provider:key 分组为一条线索，每处出现以 (source, location, 序号) 记入 source_refs；
+  backend_credential_count 是分组线索数，不是不同凭据数。尚余缺口见 STAGE2_INTEGRATION_GAPS。
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import re
 from dataclasses import dataclass
+import xml.parsers.expat as expat
 from typing import TYPE_CHECKING
 
 from fxapk.analyzers._common import (
@@ -32,8 +39,10 @@ from fxapk.analyzers._common import (
     truncate,
 )
 from fxapk.core.leads import APPROVED_CLOUD_CREDENTIAL_PREFIXES, cloud_credential_provider_routing
+from fxapk.core.json_contract import reject_nonfinite_json_constant
 from fxapk.core.models import AnalyzerResult, Confidence, Evidence, Lead, LeadCategory
 from fxapk.core.registry import BaseAnalyzer, load_rules
+from fxapk.core.xmlutil import UnsafeXmlError, safe_fromstring
 
 if TYPE_CHECKING:
     from fxapk.core.context import AnalysisContext
@@ -81,7 +90,11 @@ _FORBIDDEN_GENERIC_KEYS: frozenset[str] = frozenset(
 _CONFIG_KEY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{6,96}$")
 _MAX_CONFIG_KEYS_PER_PROVIDER = 16
 _MAX_CLOUD_SCAN_CHARS = 4_000_000
-_CLOUD_VALUE_RE = re.compile(r"^[A-Za-z0-9._+/=-]{16,128}$")
+_MAX_CLOUD_CANDIDATES_PER_TEXT = 256
+_MAX_CLOUD_JSON_NODES = 100_000
+_MAX_CLOUD_REFS_PER_HIT = 64
+_CLOUD_VALUE_CHARS = r"[A-Za-z0-9._+/=-]{16,128}"
+_CLOUD_VALUE_RE = re.compile(rf"^{_CLOUD_VALUE_CHARS}$")
 _REDACTED_MARKER = "[REDACTED]"
 _NON_CREDENTIAL_LITERALS: frozenset[str] = frozenset(
     {"true", "false", "null", "none", "undefined"}
@@ -194,11 +207,14 @@ def load_cloud_credential_providers(data: object = None) -> list[CloudProviderRu
             continue
         try:
             keys_alt = "|".join(re.escape(k) for k in valid_keys)
+            # 整行完整键值：键前后只允许同种引号，值必须是闭合的同种引号字面量，行尾只允许 , 或 ;。
             kv_regex = re.compile(
-                rf'(?i)(?<![A-Za-z0-9_.-])(?P<key>{keys_alt})["\']?\s{{0,8}}[:=]\s{{0,8}}["\']?(?P<val>[A-Za-z0-9._~+/=:-]{{12,160}})["\']?'
+                rf'(?im)^[ \t]{{0,8}}(?P<kq>["\']?)(?P<key>{keys_alt})(?P=kq)[ \t]{{0,8}}[:=][ \t]{{0,8}}'
+                rf'(?P<vq>["\'])(?P<val>{_CLOUD_VALUE_CHARS})(?P=vq)[ \t]{{0,8}}[,;]?[ \t]{{0,8}}\r?$'
             )
             xml_regex = re.compile(
-                rf'(?i)<string\s{{1,8}}name=["\'](?P<key>{keys_alt})["\']\s{{0,8}}>\s{{0,8}}(?P<val>[A-Za-z0-9._~+/=:-]{{12,160}})\s{{0,8}}</string>'
+                rf'(?i)<string[ \t]{{1,8}}name=(?P<kq>["\'])(?P<key>{keys_alt})(?P=kq)[ \t]{{0,8}}>'
+                rf'(?P<val>{_CLOUD_VALUE_CHARS})</string>'
             )
         except re.error:
             logger.warning("[backend_credential] 云凭据规则正则编译失败，跳过：%s", provider_id)
@@ -222,6 +238,86 @@ def load_cloud_credential_providers(data: object = None) -> list[CloudProviderRu
             )
         )
     return rules
+
+def _is_plaintext_cloud_resource(low_path: str) -> bool:
+    """云检测器只扫打包明文：res/ 下除 res/raw/ 外均为编译资源（ARSC/AXML），清单亦为 AXML。"""
+    if low_path == "androidmanifest.xml":
+        return False
+    return not low_path.startswith("res/") or low_path.startswith("res/raw/")
+
+
+def _json_cloud_candidates(
+    text: str, rules: list[CloudProviderRule]
+) -> list[tuple[CloudProviderRule, str, str]]:
+    """JSON 完整键 + 字符串标量候选；超限或畸形 JSON 直接放弃，不回退正则。"""
+    if len(text) > _MAX_CLOUD_SCAN_CHARS:
+        return []
+    try:
+        tree = json.loads(text, parse_constant=reject_nonfinite_json_constant)
+    except (ValueError, RecursionError):
+        return []
+    key_rules = {k.lower(): r for r in rules for k in r.config_keys}
+    out: list[tuple[CloudProviderRule, str, str]] = []
+    pending: list[object] = [tree]
+    visited = 0
+    while pending and visited < _MAX_CLOUD_JSON_NODES and len(out) < _MAX_CLOUD_CANDIDATES_PER_TEXT:
+        node = pending.pop()
+        visited += 1
+        if isinstance(node, dict):
+            children: list[object] = []
+            for key, item in node.items():
+                if isinstance(item, str):
+                    rule = key_rules.get(key.lower())
+                    if rule is not None:
+                        out.append((rule, key, item))
+                elif isinstance(item, (dict, list)):
+                    children.append(item)
+            pending.extend(reversed(children))
+        elif isinstance(node, list):
+            pending.extend(reversed([item for item in node if isinstance(item, (dict, list))]))
+    return out[:_MAX_CLOUD_CANDIDATES_PER_TEXT]
+
+
+
+def _xml_cloud_candidates(
+    text: str, rules: list[CloudProviderRule]
+) -> list[tuple[CloudProviderRule, str, str]]:
+    """明文 .xml 候选：经 safe_fromstring 安全解析，只取无嵌套子节点的完整 <string name="精确键">字面量</string>。"""
+    if len(text) > _MAX_CLOUD_SCAN_CHARS:
+        return []
+    try:
+        root = safe_fromstring(text)
+    except (UnsafeXmlError, expat.ExpatError):
+        return []
+    key_rules = {k.lower(): r for r in rules for k in r.config_keys}
+    out: list[tuple[CloudProviderRule, str, str]] = []
+    for elem in root.iter():
+        tag = elem.tag.rsplit("}", 1)[-1] if isinstance(elem.tag, str) else ""
+        if tag.lower() != "string" or len(elem) > 0:
+            continue
+        raw_name = elem.attrib.get("name")
+        if not isinstance(raw_name, str):
+            continue
+        rule = key_rules.get(raw_name.lower())
+        if rule is None or not isinstance(elem.text, str):
+            continue
+        out.append((rule, raw_name, elem.text))
+        if len(out) >= _MAX_CLOUD_CANDIDATES_PER_TEXT:
+            break
+    return out
+
+def _regex_cloud_candidates(
+    text: str, rules: list[CloudProviderRule], *, xml: bool
+) -> list[tuple[CloudProviderRule, str, str]]:
+    """明文候选：.xml 只用完整 <string> 元素，其余只用整行完整引号字面量。"""
+    out: list[tuple[CloudProviderRule, str, str]] = []
+    for rule in rules:
+        for m in (rule.xml_regex if xml else rule.kv_regex).finditer(text):
+            out.append((rule, m.group("key"), m.group("val")))
+            if len(out) >= _MAX_CLOUD_CANDIDATES_PER_TEXT:
+                return out
+    return out
+
 
 class BackendCredentialAnalyzer(BaseAnalyzer):
     """抠 APK 内硬编码后端 / 管理凭据，产出 category=BACKEND_CREDENTIAL 的高敏取证线索。"""
@@ -247,12 +343,22 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
             logger.info("[%s] 无可用后端凭据规则，跳过", self.name)
             return result
         provider_rule_map = {r.provider_id: r for r in provider_rules}
-        # value -> (title, source, location)
+        # legacy: value -> (title, source, location)，保首条（行为不变）
         hits: dict[str, tuple[str, str, str]] = {}
+        # 云/SaaS：脱敏分组值 -> (title, [(source, location), ...])，每处出现都保留
+        cloud_hits: dict[str, tuple[str, list[tuple[str, str]]]] = {}
         _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
+        cloud_dex_truncated = False
         for s in dex_strings:
-            self._scan_text(s, "dex", "dex_strings", patterns, hits, provider_rules=provider_rules)
-        resource_coverage = self._scan_resources(ctx, patterns, hits, provider_rules=provider_rules)
+            if self._scan_text(
+                s, "dex", "dex_strings", patterns, hits, provider_rules=provider_rules, cloud_hits=cloud_hits
+            ):
+                cloud_dex_truncated = True
+        if cloud_dex_truncated:
+            result.meta["dex_strings_truncated"] = True
+        resource_coverage = self._scan_resources(
+            ctx, patterns, hits, provider_rules=provider_rules, cloud_hits=cloud_hits
+        )
         # 只写实际发生的覆盖缺口；缺失键即「没发生过这类缺口」（见 core/coverage.py 的约定）。
         # ★键名写成字面量而非 coverage_meta_key(self.name, ...) 动态拼：meta_scan 契约要求
         #   「声明的键」与「代码里静态可见的写入」双向对齐，动态拼键会让扫描器只看到 <dynamic>、
@@ -267,41 +373,41 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
             elif suffix == "budget_exhausted":
                 result.meta["backend_credential_budget_exhausted"] = value
 
-        for value, (title, source, location) in sorted(hits.items()):
+        for value in sorted(hits.keys() | cloud_hits.keys()):
             try:
-                hit_where = where
-                hit_evidence = evidence
-                hit_compliance = _COMPLIANCE
-                hit_confidence = Confidence.HIGH
-                if is_cloud_provider_hit_value(value):
-                    pid = value.split(":", 1)[0]
-                    prule = provider_rule_map.get(pid)
-                    if prule:
-                        hit_where, cloud_evidence = prule.where_to_request, prule.evidence_to_obtain
-                    else:
-                        hit_where, cloud_evidence = cloud_credential_provider_routing(pid)
-                    hit_evidence = list(cloud_evidence)
-                    hit_compliance = _CLOUD_COMPLIANCE
-                    # 仅精确键名 + 固定标记，归属与有效性未核：不与结构化 legacy 凭据同档。
-                    hit_confidence = Confidence.MEDIUM
+                if value not in cloud_hits:
+                    title, source, location = hits[value]
+                    result.leads.append(self._build_lead(value, title, source, location, where, evidence))
+                    continue
+                title, occurrences = cloud_hits[value]
+                pid = value.split(":", 1)[0]
+                prule = provider_rule_map.get(pid)
+                if prule:
+                    hit_where, cloud_evidence = prule.where_to_request, prule.evidence_to_obtain
+                else:
+                    hit_where, cloud_evidence = cloud_credential_provider_routing(pid)
+                # 仅精确键名 + 固定标记，归属与有效性未核：不与结构化 legacy 凭据同档。
+                refs = self._cloud_source_refs(value, occurrences)
                 result.leads.append(
                     self._build_lead(
                         value,
                         title,
-                        source,
-                        location,
+                        refs[0].source,
+                        refs[0].location,
                         hit_where,
-                        hit_evidence,
-                        compliance=hit_compliance,
-                        confidence=hit_confidence,
+                        list(cloud_evidence),
+                        compliance=_CLOUD_COMPLIANCE,
+                        confidence=Confidence.MEDIUM,
+                        source_refs=refs,
                     )
                 )
             except Exception:
                 logger.exception("[%s] 构建线索失败（已跳过）", self.name)
 
+        # 分组线索数（云候选按 provider:key 分组），不是不同凭据数。
         result.meta["backend_credential_count"] = len(result.leads)
         if result.leads:
-            logger.info("[%s] 抠出硬编码后端/管理凭据 %d 条（高敏）", self.name, len(result.leads))
+            logger.info("[%s] 硬编码后端/管理凭据线索 %d 条（分组计数，高敏）", self.name, len(result.leads))
         return result
 
     def _scan_text(
@@ -312,10 +418,11 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
         patterns: list[_Pattern],
         hits: dict[str, tuple[str, str, str]],
         provider_rules: list[CloudProviderRule] | None = None,
-    ) -> None:
-        """从一段文本抽硬编码凭据，去重累积。绝不抛。"""
+        cloud_hits: dict[str, tuple[str, list[tuple[str, str]]]] | None = None,
+    ) -> bool:
+        """从一段文本抽硬编码凭据，去重累积。返回是否因超云扫描字符预算而跳过云检测。绝不抛。"""
         if not text:
-            return
+            return False
         if _ANCHOR_RE.search(text):
             try:
                 for p in patterns:
@@ -325,8 +432,9 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
                             hits.setdefault(value, (p.title, source, location))
             except Exception:
                 logger.exception("[%s] 扫描文本失败：%s", self.name, location)
-        if provider_rules:
-            self._scan_cloud_provider_text(text, source, location, provider_rules, hits)
+        if provider_rules and cloud_hits is not None:
+            return self._scan_cloud_provider_text(text, source, location, provider_rules, cloud_hits)
+        return False
 
     def _scan_cloud_provider_text(
         self,
@@ -334,32 +442,54 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
         source: str,
         location: str,
         provider_rules: list[CloudProviderRule],
-        hits: dict[str, tuple[str, str, str]],
-    ) -> None:
-        """按精确厂商前缀上下文配置键名提取固定脱敏云/SaaS凭据标记。绝不抛。"""
+        cloud_hits: dict[str, tuple[str, list[tuple[str, str]]]],
+    ) -> bool:
+        """按精确厂商前缀上下文配置键名提取固定脱敏云/SaaS凭据标记，保留每处出现。绝不抛。"""
         try:
+            low_loc = location.lower()
+            if source == "resource" and not _is_plaintext_cloud_resource(low_loc):
+                return False
             if len(text) > _MAX_CLOUD_SCAN_CHARS:
-                text = text[:_MAX_CLOUD_SCAN_CHARS]
+                return source == "dex"
             lowered_text = text.lower()
-            for rule in provider_rules:
-                if not any(k.lower() in lowered_text for k in rule.config_keys):
+            rules = [r for r in provider_rules if any(k.lower() in lowered_text for k in r.config_keys)]
+            if not rules:
+                return False
+            stripped = text.strip()
+            if low_loc.endswith(".json") or (
+                stripped.startswith(("{", "[")) and stripped.endswith(("}", "]"))
+            ):
+                candidates = _json_cloud_candidates(text, rules)
+            elif source == "resource" and low_loc.endswith(".xml"):
+                candidates = _xml_cloud_candidates(text, rules)
+            else:
+                candidates = _regex_cloud_candidates(text, rules, xml=False)
+            for rule, matched_key, raw_val in candidates:
+                if raw_val.lower() in _NON_CREDENTIAL_LITERALS or not rule.value_regex.fullmatch(raw_val):
                     continue
-                for regex in (rule.kv_regex, rule.xml_regex):
-                    for m in regex.finditer(text):
-                        matched_key = m.group("key")
-                        raw_val = m.group("val").strip()
-                        if (
-                            not raw_val
-                            or raw_val.lower() in _NON_CREDENTIAL_LITERALS
-                            or raw_val.startswith(("${", "{{"))
-                            or not rule.value_regex.fullmatch(raw_val)
-                        ):
-                            continue
-                        redacted_hit = format_cloud_provider_hit(rule.provider_id, matched_key, raw_val)
-                        title = f"{rule.label}（精确上下文配置键，未验证归属）"
-                        hits.setdefault(redacted_hit, (title, source, location))
+                canonical_key = matched_key.strip().lower()
+                redacted_hit = format_cloud_provider_hit(rule.provider_id, canonical_key, raw_val)
+                title = f"{rule.label}（精确上下文配置键：{canonical_key}，未验证归属）"
+                occurrences = cloud_hits.setdefault(redacted_hit, (title, []))[1]
+                if len(occurrences) < _MAX_CLOUD_REFS_PER_HIT:
+                    occurrences.append((source, location))
+            return False
         except Exception:
             logger.exception("[%s] 扫描云凭据配置失败：%s", self.name, location)
+            return False
+
+    @staticmethod
+    def _cloud_source_refs(value: str, occurrences: list[tuple[str, str]]) -> list[Evidence]:
+        """每处出现一条证据：(source, location, 同位置序号)，与原值无关、排序确定。"""
+        ordinals: dict[tuple[str, str], int] = {}
+        keyed: list[tuple[str, str, int]] = []
+        for src, loc in occurrences:
+            n = ordinals.get((src, loc), 0) + 1
+            ordinals[(src, loc)] = n
+            keyed.append((src, loc, n))
+        snippet = truncate(value, 120)
+        return [Evidence(source=s, location=loc, snippet=f"{snippet} #{n}") for s, loc, n in sorted(keyed)]
+
     @staticmethod
     def _extract_value(p: _Pattern, m: re.Match[str]) -> str:
         """从命中提取凭据值。Basic-Auth：base64 解码捕获组、要求解出 user:pass。其余取整段命中。"""
@@ -381,6 +511,7 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
         patterns: list[_Pattern],
         hits: dict[str, tuple[str, str, str]],
         provider_rules: list[CloudProviderRule] | None = None,
+        cloud_hits: dict[str, tuple[str, list[tuple[str, str]]]] | None = None,
     ) -> dict[str, int]:
         """扫描 APK 内文本资源（H5/JS/json/配置里的硬编码凭据）。绝不抛。"""
         try:
@@ -421,7 +552,9 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
                 if isinstance(data, (bytes, bytearray))
                 else str(data)
             )
-            self._scan_text(text, "resource", path, patterns, hits, provider_rules=provider_rules)
+            self._scan_text(
+                text, "resource", path, patterns, hits, provider_rules=provider_rules, cloud_hits=cloud_hits
+            )
 
         return {
             key: value
@@ -444,8 +577,9 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
         *,
         compliance: str = _COMPLIANCE,
         confidence: Confidence = Confidence.HIGH,
+        source_refs: list[Evidence] | None = None,
     ) -> Lead:
-        ev = Evidence(source=source, location=location, snippet=truncate(value, 120))
+        refs = source_refs or [Evidence(source=source, location=location, snippet=truncate(value, 120))]
         return Lead(
             category=LeadCategory.BACKEND_CREDENTIAL,
             value=value,
@@ -453,7 +587,7 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
             where_to_request=where,
             evidence_to_obtain=list(evidence),
             confidence=confidence,
-            source_refs=[ev],
+            source_refs=refs,
             notes=f"{compliance}（{title}）",
             advice="建议调证",
         )
