@@ -111,6 +111,16 @@ _DEFAULT_EVIDENCE_TO_OBTAIN: tuple[str, ...] = (
 
 _DEFAULT_UNKNOWN_SUBJECT = "待核（应用配置）"
 
+# 受保护的 7 家云/SaaS 精确上下文配置键脱敏常量（仅保留键名与位置标记，禁止泄露原始值/前缀/长度与直接发函）。
+_REDACTED_MARKER = "[REDACTED]"
+_PROTECTED_CLOUD_WHERE = (
+    "无直接调证对象（静态候选云/SaaS凭据配置，未核实归属与有效性，禁止自动/直接发函）"
+)
+_PROTECTED_CLOUD_NOTES = (
+    "静态候选云/SaaS凭据配置键已脱敏（仅保留键名与位置标记，未验证归属与有效性，"
+    "不作后端凭据结论与直接调证路由）。"
+)
+
 # 调证研判建议三态。
 _ADVICE_NEED = "建议调证"
 _ADVICE_SKIP = "无需调证"
@@ -208,7 +218,7 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
 
         patterns, default_evidence, unknown_subject = self._load_rules()
         secret_rules = load_secret_rules()
-
+        protected_cloud_keys = self._load_protected_cloud_config_keys()
         keys: list[_ConfigKey] = []
 
         # 1) manifest <meta-data>（逐源 try/except）。
@@ -246,6 +256,9 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
         # 每个 key=value → 一条 CONFIG_KEY Lead；敏感凭据额外 Finding。
         for ck in keys:
             try:
+                if self._is_protected_cloud_config_key(ck.name, protected_cloud_keys):
+                    result.leads.append(self._build_protected_cloud_lead(ck))
+                    continue
                 lead = self._build_lead(ck, patterns, default_evidence, unknown_subject)
                 result.leads.append(lead)
                 secret_finding = self._maybe_secret_finding(ck, secret_rules)
@@ -253,7 +266,6 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
                     result.findings.append(secret_finding)
             except Exception:
                 logger.exception("[%s] 构造 Lead/Finding 失败：%s", self.name, ck.name)
-
         result.meta["config_key_count"] = len(keys)
         logger.info("[%s] 抠出 %d 条配置键值", self.name, len(keys))
         return result
@@ -534,6 +546,49 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
     # ------------------------------------------------------------------
     # Lead / Finding 构造
     # ------------------------------------------------------------------
+
+    def _load_protected_cloud_config_keys(self) -> frozenset[str]:
+        """复用同层云凭据注册表，返回 7 家厂商精确上下文配置键集合（小写精确匹配）。"""
+        try:
+            from fxapk.analyzers.backend_credential import load_cloud_credential_providers
+
+            rules = load_cloud_credential_providers()
+        except Exception:
+            logger.warning("[%s] 加载受保护云凭据配置键列表失败，降级为空集合", self.name)
+            return frozenset()
+        return frozenset(
+            key.strip().lower()
+            for rule in rules
+            for key in rule.config_keys
+            if isinstance(key, str) and key.strip()
+        )
+
+    @staticmethod
+    def _is_protected_cloud_config_key(key_name: str, protected_keys: frozenset[str]) -> bool:
+        """仅精确匹配注册表列出的云/SaaS 上下文配置键，不匹配通用键或仅前缀。"""
+        return bool(protected_keys) and key_name.strip().lower() in protected_keys
+
+    @staticmethod
+    def _build_protected_cloud_lead(ck: _ConfigKey) -> Lead:
+        """为受保护的云/SaaS 上下文配置键构造仅含脱敏标记的 CONFIG_KEY 事实。"""
+        safe_marker = f"{ck.name}={_REDACTED_MARKER}"
+        return Lead(
+            category=LeadCategory.CONFIG_KEY,
+            value=safe_marker,
+            subject="",
+            where_to_request=_PROTECTED_CLOUD_WHERE,
+            evidence_to_obtain=[],
+            confidence=Confidence.LOW,
+            advice=_ADVICE_REVIEW,
+            source_refs=[
+                Evidence(
+                    source=ck.source,
+                    location=ck.location,
+                    snippet=safe_marker,
+                )
+            ],
+            notes=_PROTECTED_CLOUD_NOTES,
+        )
 
     def _build_lead(
         self,

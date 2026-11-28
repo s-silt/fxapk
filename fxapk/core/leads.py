@@ -509,6 +509,48 @@ _DEFAULT_ADVICE_BY_CATEGORY: dict[LeadCategory, str] = {
 }
 
 
+# 静态候选云/SaaS凭据配置（仅精确厂商上下文键名 + 固定 [REDACTED] 标记，未验证归属与有效性）。
+# 受批厂商前缀的单一真源：analyzers/backend_credential 从这里导入，core 不反向依赖 analyzers。
+APPROVED_CLOUD_CREDENTIAL_PREFIXES: dict[str, tuple[str, ...]] = {
+    "aliyun": ("aliyun_", "alicloud_"),
+    "tencent_cloud": ("tencent_", "qcloud_"),
+    "huawei_cloud": ("huawei_", "huaweicloud_"),
+    "qiniu": ("qiniu_",),
+    "upyun": ("upyun_",),
+    "rongcloud": ("rongcloud_", "rong_cloud_"),
+    "agora": ("agora_",),
+}
+
+
+def cloud_credential_provider_routing(provider_label: str) -> tuple[str, tuple[str, ...]]:
+    """按受批注册表标签生成候选服务方调证路由（where_to_request, evidence_to_obtain）。
+
+    只指明**候选**服务方：归属与调证授权未核实前不构成直接调证对象（letters 据此不出函）；
+    取证项只列服务方留存的服务/审计记录，绝不涉及使用所获凭据或任何认证操作。
+    """
+    label = provider_label.strip() or "未知候选服务方"
+    where = (
+        f"无直接调证对象（候选服务方：{label}，仅据静态配置键名推断、未核实归属；"
+        "须先核实涉案主体与该服务账户的归属及调证授权，方可依法向该服务方提出行政调证请求）"
+    )
+    evidence = (
+        f"由有权机关依法核实涉案主体与{label}服务账户的归属关系及调证授权",
+        f"核实后经法定程序向{label}调取涉案配置关联的账户开通、服务访问与操作审计记录",
+    )
+    return where, evidence
+
+
+def is_redacted_cloud_provider_credential_value(value: object) -> bool:
+    """判断 BACKEND_CREDENTIAL 线索值是否为 7 家受批云/SaaS 厂商的固定脱敏上下文凭据标记。"""
+    if not isinstance(value, str) or ":" not in value or not value.endswith("=[REDACTED]"):
+        return False
+    provider_id, rest = value.split(":", 1)
+    prefixes = APPROVED_CLOUD_CREDENTIAL_PREFIXES.get(provider_id)
+    if not prefixes or "=" not in rest:
+        return False
+    config_key, marker = rest.split("=", 1)
+    return marker == "[REDACTED]" and config_key.startswith(prefixes)
+
 #: 与 ``analyzers/repack_identity.VERDICT_REPACK_SUSPECTED`` 同值。
 #: 这里刻意写字面量而不 import：core 层不该反向依赖 analyzers（分层倒置）。
 #: 两处一致性由 tests 里的一条断言钉住——改了一边另一边会红。
@@ -607,6 +649,17 @@ def _config_value_unroutable_host(value: str) -> str:
 def _apply_default_advice(leads: list[Lead]) -> None:
     """给未自带 advice 的 Lead 按类别填默认研判建议（就地修改，不覆盖已有值）。"""
     for lead in leads:
+        if (
+            lead.category == LeadCategory.BACKEND_CREDENTIAL
+            and is_redacted_cloud_provider_credential_value(lead.value)
+            and (not lead.where_to_request or not lead.evidence_to_obtain)
+        ):
+            # 载入的线索不带注册表标签：以受批 provider_id 标识候选服务方。
+            where, evidence = cloud_credential_provider_routing(lead.value.split(":", 1)[0])
+            if not lead.where_to_request:
+                lead.where_to_request = where
+            if not lead.evidence_to_obtain:
+                lead.evidence_to_obtain = list(evidence)
         if lead.advice:  # 分析器/构造器已研判，尊重之。
             continue
         default = _DEFAULT_ADVICE_BY_CATEGORY.get(lead.category)
