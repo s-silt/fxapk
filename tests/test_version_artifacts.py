@@ -19,7 +19,9 @@ test_pyproject_version_is_pep440_canonical）不重复：那两条是单元级�
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -111,6 +113,17 @@ def _pip_install(venv_python: str, *args: str) -> None:
     )
 
 
+def _installed_module_version(venv_python: str, venv_dir: Path) -> str:
+    """在 venv 内导入 fxapk 返回 __version__；断言导入的是 venv 里装的那份而非仓库源码树。"""
+    module_ver, module_file = _run(
+        venv_python, "import fxapk; print(fxapk.__version__); print(fxapk.__file__)"
+    ).splitlines()
+    assert Path(module_file).resolve().is_relative_to(venv_dir.resolve()), (
+        f"fxapk 从 {module_file} 导入，不在隔离 venv {venv_dir} 内——测到的不是安装产物"
+    )
+    return module_ver
+
+
 def _build_artifact(dist_dir: Path, kind: str, pattern: str) -> Path:
     """构建 wheel/sdist 到 dist_dir，返回产物路径。不污染仓库 dist/。
 
@@ -180,11 +193,16 @@ def test_wheel_version_consistent(tmp_path: Any) -> None:
         "from importlib.metadata import version; print(version('fxapk'))",
     )
     # fxapk.__version__ 在 wheel 环境下应优先取元数据，与上面相等
-    module_ver = _run(venv_python, "import fxapk; print(fxapk.__version__)")
+    module_ver = _installed_module_version(venv_python, tmp_path / "venv")
 
     assert metadata_ver == module_ver, (
         f"wheel 安装后元数据版本({metadata_ver!r}) != 模块 __version__({module_ver!r})；"
         "说明 __version__ 没有优先读安装包元数据"
+    )
+    source_ver = _pyproject_version()
+    assert metadata_ver == source_ver, (
+        f"wheel 安装后元数据版本({metadata_ver!r}) != 源码 pyproject version({source_ver!r})；"
+        "说明构建产物没带上当前声明的版本"
     )
 
 
@@ -218,7 +236,7 @@ def test_sdist_version_consistent(tmp_path: Any) -> None:
         venv_python,
         "from importlib.metadata import version; print(version('fxapk'))",
     )
-    module_ver = _run(venv_python, "import fxapk; print(fxapk.__version__)")
+    module_ver = _installed_module_version(venv_python, tmp_path / "venv")
 
     # 从 sdist 解包读 pyproject 版本（验证打包时的源版本与安装后一致）
     import tarfile
@@ -237,6 +255,11 @@ def test_sdist_version_consistent(tmp_path: Any) -> None:
     assert sdist_pyproject_ver == metadata_ver, (
         f"sdist 内 pyproject version({sdist_pyproject_ver!r}) != 安装后元数据({metadata_ver!r})；"
         "说明 pyproject 与构建元数据不同步"
+    )
+    source_ver = _pyproject_version()
+    assert sdist_pyproject_ver == source_ver, (
+        f"sdist 内 pyproject version({sdist_pyproject_ver!r}) != 源码 pyproject version({source_ver!r})；"
+        "说明 sdist 打进去的不是当前源码树的声明"
     )
 
 
@@ -282,54 +305,107 @@ def test_editable_version_consistent(tmp_path: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_frozen_fallback_matches_pyproject_and_is_not_silent(monkeypatch: Any) -> None:
-    """dist-info 缺失时回落版本与 pyproject 一致，且回落本身不静默假装成功。
+#: 新解释器里执行的冻结形态探针：替换真实的 ``importlib.metadata.distribution``，只对 "fxapk"
+#: 生效（miss 抛 PackageNotFoundError / present 返回指定版本），其余包照走原实现；然后从 scratch
+#: 目录全新 import fxapk，打印公开 ``__version__``、模块位置与 distribution 是否被查询。
+_FROZEN_PROBE = """
+import importlib.metadata as md
+import json
+import sys
 
-    「不静默」的定义：
-    - fxapk.__version__ 必须等于 _FALLBACK_VERSION（而非某个空字串或魔法默认值）；
-    - _FALLBACK_VERSION 必须等于 pyproject version（test_fallback_version_contract_holds
-      覆盖了这条，此处作额外的产物级确认）。
+mode, scratch, present_version = sys.argv[1], sys.argv[2], sys.argv[3]
+real_distribution = md.distribution
+queried = []
+
+
+class _PresentDistribution:
+    version = present_version
+    _path = None
+
+    def locate_file(self, path):
+        return ""
+
+
+def distribution(name):
+    if name != "fxapk":
+        return real_distribution(name)
+    queried.append(name)
+    if mode == "missing":
+        raise md.PackageNotFoundError(name)
+    return _PresentDistribution()
+
+
+md.distribution = distribution
+sys.path.insert(0, scratch)
+import fxapk
+
+print(json.dumps({
+    "version": fxapk.__version__,
+    "fallback": getattr(fxapk, "_FALLBACK_VERSION", None),
+    "file": fxapk.__file__,
+    "queried": queried,
+}))
+"""
+
+#: 与任何真实发版都不同的「已安装」版本：证明 distribution 命中时 __version__ 真取元数据。
+_DISTINCT_DIST_VERSION = "999.0.0.dev0"
+
+
+def _frozen_import(scratch: Path, mode: str, present_version: str = "") -> dict[str, Any]:
+    """全新解释器（-I 隔离、-S 不加载 site-packages/.pth/editable finder、-B 不写字节码）里导入。"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "-c", _FROZEN_PROBE, mode, str(scratch), present_version],
+        capture_output=True,
+        text=True,
+        cwd=scratch,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"冻结形态探针失败（{mode}，exit {result.returncode}）:\n{result.stderr}")
+    return json.loads(result.stdout)
+
+
+def test_frozen_fallback_matches_pyproject_and_is_not_silent(tmp_path: Path) -> None:
+    """dist-info 缺失时公开 ``fxapk.__version__`` 回落到源码 pyproject 的版本；有元数据时取元数据。
+
+    冻结形态 = 只有包文件、没有 dist-info：把 ``fxapk/`` 拷进 tmp_path 的 scratch 目录，
+    在全新隔离解释器里从那里 import（不碰仓库 build/ 残留、不碰任何已安装的 fxapk），
+    并直接控制真实 ``importlib.metadata.distribution("fxapk")`` 的 miss / present。
 
     ★故意改坏（每条均独立让本测试变红）：
-    - 把 _FALLBACK_VERSION 改成 "" 或删掉：getattr 返回 ""，
-      `isinstance(fallback, str) and fallback` 为 False → 第一条 assert 失败 → 红。
-    - 把 _FALLBACK_VERSION 改成与 pyproject 不同的版本字串：
-      pyproject_ver != fallback_ver → 第二条 assert 失败 → 红。
-    - 在 __init__.py 的 except PackageNotFoundError 分支里改成 __version__ = "0.0.0"：
-      重新执行版本初始化时 module_ver 变 "0.0.0"，不等于 fallback_ver → 第三条 assert 失败 → 红。
+    - 把 _FALLBACK_VERSION 改成 "" / "0.0.0" / 与 pyproject 不同的串：miss 时 __version__
+      不等于源码 pyproject version → 红。
+    - 版本解析不再查 distribution（如写死 __version__ = _FALLBACK_VERSION）：present 时
+      __version__ 不等于 _DISTINCT_DIST_VERSION、且 queried 为空 → 红。
+    - 回落分支改成别的值：miss 时 __version__ 不等于 pyproject → 红。
     """
-    import importlib.metadata as md
+    source_ver = _pyproject_version()
+    assert source_ver and source_ver != _DISTINCT_DIST_VERSION
 
-    import fxapk
+    scratch = tmp_path / "build" / "frozen"
+    shutil.copytree(
+        _REPO_ROOT / "fxapk",
+        scratch / "fxapk",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    expected_file = (scratch / "fxapk" / "__init__.py").resolve()
 
-    # 验证 _FALLBACK_VERSION 是非空字串
-    fallback_ver = getattr(fxapk, "_FALLBACK_VERSION", None)
-    assert isinstance(fallback_ver, str) and fallback_ver, (
-        "_FALLBACK_VERSION 被清空或改名——dist-info 缺失时将回落到空字串，静默失败"
+    missing = _frozen_import(scratch, "missing")
+    assert Path(missing["file"]).resolve() == expected_file, (
+        f"fxapk 从 {missing['file']} 导入，不是 scratch 里的冻结副本——隔离失效"
+    )
+    assert missing["queried"], "版本初始化没有查询 distribution('fxapk')，miss 场景没被真正触发"
+    assert missing["version"] == source_ver, (
+        f"dist-info 缺失时 __version__={missing['version']!r}，不等于源码 pyproject version"
+        f"({source_ver!r})；冻结形态会静默报错版本"
+    )
+    assert missing["fallback"] == source_ver, (
+        f"_FALLBACK_VERSION({missing['fallback']!r}) != pyproject version({source_ver!r})"
     )
 
-    # 验证回落版本与 pyproject 一致
-    pyproject_ver = _pyproject_version()
-    assert fallback_ver == pyproject_ver, (
-        f"_FALLBACK_VERSION({fallback_ver!r}) != pyproject version({pyproject_ver!r})；"
-        "冻结/无元数据形态下回落版本与声明版本不一致"
-    )
-
-    # 模拟 dist-info 缺失（PackageNotFoundError）并重新执行版本初始化逻辑，
-    # 验证 __version__ 确实等于 _FALLBACK_VERSION（而非其他值）。
-    # 直接 patch importlib.metadata.version（比 patch distribution 更可靠——
-    # version() 的内部路径不依赖已 monkeypatch 的 module-level 引用）。
-    monkeypatch.setattr(
-        md, "version", lambda _name: (_ for _ in ()).throw(md.PackageNotFoundError("fxapk"))
-    )
-
-    # 重新执行 __init__.py 里的版本初始化片段
-    try:
-        module_ver = md.version("fxapk")
-    except md.PackageNotFoundError:
-        module_ver = fxapk._FALLBACK_VERSION  # type: ignore[attr-defined]
-
-    assert module_ver == fallback_ver, (
-        f"dist-info 缺失时版本初始化产生 {module_ver!r}，不等于 _FALLBACK_VERSION({fallback_ver!r})；"
-        "说明回落路径改变（改坏了 except 分支赋值）"
+    present = _frozen_import(scratch, "present", _DISTINCT_DIST_VERSION)
+    assert Path(present["file"]).resolve() == expected_file
+    assert present["queried"], "版本初始化没有查询 distribution('fxapk')"
+    assert present["version"] == _DISTINCT_DIST_VERSION, (
+        f"distribution 给出 {_DISTINCT_DIST_VERSION!r} 时 __version__={present['version']!r}；"
+        "说明 __version__ 没有优先取安装元数据"
     )

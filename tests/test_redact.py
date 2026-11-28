@@ -5,23 +5,39 @@ digest **默认脱敏**，要明文须显式 ``--no-redact``；另锁「哪些�
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 from fxapk.core.models import ADVICE_INVESTIGATE
-from fxapk.core.redact import mask, redact_value
+from fxapk.core.redact import UNREDACTED_AGENT_COMMANDS, mask, redact_value
 from fxapk.report.digest import build_digest
+
+_RAW_MNEMONIC = "abandon abandon about real mnemonic here"
 
 
 def test_mask_short_and_long() -> None:
     assert mask("abc") == "***（已脱敏）"
+    assert mask("12345678") == "***（已脱敏）"  # ≤8 字符整段遮蔽，不留首尾
     assert mask("") == ""
-    masked = mask("abandon abandon about ...long mnemonic...")
-    assert masked.startswith("aba") and "已脱敏" in masked and "abandon abandon" not in masked
+    assert mask("123456789") == "123***89（已脱敏，9 字符）"
+    secret = "abandon abandon about ...long mnemonic..."
+    masked = mask(secret)
+    assert masked == f"aba***..（已脱敏，{len(secret)} 字符）"
+    assert "abandon abandon" not in masked
 
 
 def test_redact_value_only_sensitive() -> None:
-    assert "已脱敏" in str(redact_value("WALLET_SECRET", "abandon abandon about end here"))
-    assert "已脱敏" in str(redact_value("BACKEND_CREDENTIAL", "Basic admin:s3cretpass"))
+    mnemonic = "abandon abandon about end here"
+    credential = "Basic admin:s3cretpass"
+    assert redact_value("WALLET_SECRET", mnemonic) == mask(mnemonic)
+    assert redact_value("BACKEND_CREDENTIAL", credential) == mask(credential)
+    # 非字符串高敏值先 str() 再遮蔽：dict 里的 key/iv 不能原样放过去。
+    recipe = {"key": "00112233445566778899aabbccddeeff", "iv": "0102030405060708"}
+    redacted_recipe = redact_value("CRYPTO_RECIPE", recipe)
+    assert redacted_recipe == mask(str(recipe))
+    assert recipe["key"] not in str(redacted_recipe)
+    assert redact_value("WALLET_SECRET", None) is None
     # 非高敏类别原样返回。
     assert redact_value("DOMAIN", "evil.com") == "evil.com"
     assert redact_value("ADMIN_PANEL", "admin.evil.com") == "admin.evil.com"
@@ -45,13 +61,13 @@ def test_digest_redact_is_opt_out() -> None:
     # ★不传参数 → 脱敏。这是本条测试的主锁：默认值一旦被改回明文，这里立刻红。
     d_default = build_digest(report)
     wallet_default = next(ld for ld in d_default["leads"] if ld["category"] == "WALLET_SECRET")
-    assert "已脱敏" in wallet_default["value"], "默认必须脱敏——安全选项不该是要额外记得的那个"
-    assert "real mnemonic" not in wallet_default["value"]
+    assert wallet_default["value"] == mask(_RAW_MNEMONIC), "默认必须脱敏——安全选项不该是要额外记得的那个"
+    assert "real mnemonic" not in json.dumps(d_default, ensure_ascii=False), "默认 digest 别处带出了明文"
 
     # 显式关掉才给明文（取证查看确需看到实际值时）。
     d_raw = build_digest(report, redact=False)
     wallet_raw = next(ld for ld in d_raw["leads"] if ld["category"] == "WALLET_SECRET")
-    assert wallet_raw["value"] == "abandon abandon about real mnemonic here"
+    assert wallet_raw["value"] == _RAW_MNEMONIC
 
     # 非高敏类别两种模式下都不动。
     for d in (d_default, d_raw):
@@ -86,9 +102,10 @@ def test_jsonl_warns_that_it_does_not_redact(tmp_path) -> None:
     assert res.exit_code == 0, res.stderr
     assert "不做脱敏" in res.stderr, "jsonl 必须明说自己不脱敏，否则默认脱敏的 digest 会给人错觉"
     # 每一行仍须是合法 JSON——警告不能混进 stdout 打坏下游解析。
-    for line in res.stdout.splitlines():
-        if line.strip():
-            json.loads(line)
+    events = [json.loads(line) for line in res.stdout.splitlines() if line.strip()]
+    assert events, "jsonl 的 stdout 没有任何事件"
+    # 警告说的是真话：线索原值确实原样出现在事件流里。
+    assert _RAW_MNEMONIC in json.dumps(events, ensure_ascii=False)
 
 
 def test_diff_warns_that_it_does_not_redact(tmp_path) -> None:
@@ -112,7 +129,8 @@ def test_diff_warns_that_it_does_not_redact(tmp_path) -> None:
 
     assert res.exit_code == 0, res.stderr
     assert "不做脱敏" in res.stderr
-    json.loads(res.stdout)  # stdout 仍是一份完整合法 JSON
+    output = json.loads(res.stdout)  # stdout 仍是一份完整合法 JSON
+    assert [ld.get("value") for ld in output["leads"]["added"]] == [_RAW_MNEMONIC]
 
 
 def test_every_listed_unredacted_command_actually_warns(tmp_path) -> None:
@@ -217,16 +235,83 @@ def test_cli_digest_redacts_without_any_flag(tmp_path) -> None:
 
     assert res.exit_code == 0, res.output
     assert "real mnemonic" not in res.stdout, "不带参数的 digest 吐出了高敏明文"
-    assert "已脱敏" in res.stdout
+    leads = json.loads(res.stdout)["leads"]
+    assert [ld["value"] for ld in leads if ld["category"] == "WALLET_SECRET"] == [mask(_RAW_MNEMONIC)]
 
     # 显式 --no-redact 才给明文。
     res_raw = CliRunner().invoke(cli.app, ["digest", str(rep), "--no-redact"])
     assert res_raw.exit_code == 0, res_raw.output
-    assert "real mnemonic" in res_raw.stdout
+    raw_leads = json.loads(res_raw.stdout)["leads"]
+    assert [ld["value"] for ld in raw_leads if ld["category"] == "WALLET_SECRET"] == [_RAW_MNEMONIC]
+
+
+_CODE_SPAN_RE = re.compile(r"`+([^`\n]+)`+")
+
+
+def _listed_commands(text: str) -> set[str]:
+    """把 `lead show|restore|replay` / ``fxapk corpus events/ls`` 这类代码片段展开成完整命令。"""
+    out: set[str] = set()
+    for span in _CODE_SPAN_RE.findall(text):
+        words = span.strip().removeprefix("fxapk ").split()
+        if len(words) == 1:
+            out.update(filter(None, re.split(r"[|/]", words[0])))
+            continue
+        if not words:
+            continue
+        head, tail = words[0], " ".join(words[2:])
+        for sub in filter(None, re.split(r"[|/]", words[1])):
+            out.add(f"{head} {sub}")
+            if tail:
+                out.add(f"{head} {sub} {tail}")
+    return out
+
+
+def _section(text: str, heading: str) -> str:
+    start = text.index(heading)
+    end = text.find("\n## ", start + len(heading))
+    return text[start:] if end == -1 else text[start:end]
+
+
+_EVIDENCE_FLAG = "--evidence-values"
+_SENTENCE_END_RE = re.compile(r"。|\.(?:\s|$)")
+_DEFAULT_OMIT_RE = re.compile(
+    rf"(?:默认|\bdefaults?(?:\s+to)?)\s*`+(?:{_EVIDENCE_FLAG}\s+)?omit`+", re.IGNORECASE
+)
+_EXPLICIT_RAW_RE = re.compile(
+    rf"(?:显式|\bexplicit(?:ly)?)\s*`+(?:{_EVIDENCE_FLAG}\s+)?raw`+\s*(?:即\s*)?"
+    r"(?:恢复原值|restores?\s+(?:the\s+)?(?:raw\s+)?values)",
+    re.IGNORECASE,
+)
+
+
+def _clause_after(text: str, pos: int) -> str:
+    """命令组代码片段之后、到句末或下一个非 evidence-values 代码片段为止的那段说明。"""
+    end_match = _SENTENCE_END_RE.search(text, pos)
+    end = end_match.start() if end_match else len(text)
+    for span in _CODE_SPAN_RE.finditer(text, pos, end):
+        if span.group(1).strip().removeprefix(_EVIDENCE_FLAG).strip() not in {"omit", "raw"}:
+            return text[pos:span.start()]
+    return text[pos:end]
+
+
+def _evidence_values_documented(text: str, bases: set[str], *, describes_default: bool) -> bool:
+    """同一命令组须写「默认 omit、显式 raw 恢复原值」；仅列出口时 raw 须锚在命令组片段里。"""
+    if not describes_default:
+        return {f"{base} {_EVIDENCE_FLAG} raw" for base in bases} <= _listed_commands(text)
+    for group in _CODE_SPAN_RE.finditer(text):
+        if bases <= _listed_commands(group.group(0)):
+            clause = _clause_after(text, group.end())
+            if _DEFAULT_OMIT_RE.search(clause) and _EXPLICIT_RAW_RE.search(clause):
+                return True
+    return False
 
 
 def test_unredacted_command_docs_stay_in_sync() -> None:
-    """Keep raw-output inventories in agent/usage docs and link concise READMEs to them."""
+    """Keep raw-output inventories in agent/usage docs and link concise READMEs to them.
+
+    ★按完整命令比对文档里的代码片段：只查 ``ls`` / ``show`` 这种单词是否在全文出现，
+      任何文档都恒为真。
+    """
     import fxapk.core.redact as redact_mod
 
     root = Path(__file__).resolve().parents[1]
@@ -237,10 +322,58 @@ def test_unredacted_command_docs_stay_in_sync() -> None:
     usage_en = (root / "USAGE.en.md").read_text(encoding="utf-8")
     assert "(USAGE.md#隐私与输出)" in readme and "## 隐私与输出" in usage
     assert "(USAGE.en.md#privacy-and-output)" in readme_en and "## Privacy and output" in usage_en
-    docstring = redact_mod.__doc__ or ""
-    for command in sorted(redact_mod.UNREDACTED_AGENT_COMMANDS):
-        token = command.split()[1] if "--evidence-values" in command else command.split()[-1]
-        assert token in agents, f"AGENTS.md 的不脱敏出口名单缺 {command!r}"
-        assert token in docstring, f"redact 模块 docstring 的名单缺 {command!r}"
-        assert token in usage, f"USAGE.md 的不脱敏出口名单缺 {command!r}"
-        assert token in usage_en, f"USAGE.en.md 的不脱敏出口名单缺 {command!r}"
+    inventories = {
+        "AGENTS.md": next(
+            (line for line in agents.splitlines() if "UNREDACTED_AGENT_COMMANDS" in line), ""
+        ),
+        "redact 模块 docstring": redact_mod.__doc__ or "",
+        "USAGE.md": _section(usage, "## 隐私与输出"),
+        "USAGE.en.md": _section(usage_en, "## Privacy and output"),
+    }
+    gated: dict[str, str] = {}
+    for command in UNREDACTED_AGENT_COMMANDS:
+        base, sep, mode = command.partition(f" {_EVIDENCE_FLAG} ")
+        if sep:
+            gated[base] = mode
+    assert set(gated.values()) == {"raw"}, "文档规则只覆盖 raw 模式，名单变了要同步改这里"
+    for doc, text in inventories.items():
+        listed = _listed_commands(text)
+        for command in sorted(UNREDACTED_AGENT_COMMANDS):
+            base = command.partition(f" {_EVIDENCE_FLAG} ")[0]
+            assert base in listed, f"{doc} 的不脱敏出口名单缺 {command!r}"
+        describes_default = doc != "redact 模块 docstring"
+        expected = "默认 omit、显式 raw 恢复原值" if describes_default else "raw 与命令组同一片段"
+        assert _evidence_values_documented(text, set(gated), describes_default=describes_default), (
+            f"{doc} 没在同一命令组 {sorted(gated)} 上写明：{expected}"
+        )
+
+
+def test_evidence_values_doc_check_rejects_misleading_text() -> None:
+    """内存反例：raw/omit 对调、raw 挂在别的命令上、命令组不全、raw 未锚定都要判红。"""
+    bases = {"corpus link-discover", "corpus link-explain", "corpus link-groups"}
+    group = "`corpus link-discover/link-explain/link-groups`"
+    flag = _EVIDENCE_FLAG
+
+    def rule(text: str) -> bool:
+        return _evidence_values_documented(text, bases, describes_default=True)
+
+    assert rule(f"{group} 默认 `{flag} omit`，显式 `raw` 即恢复原值。")
+    assert rule(f"{group} default to `{flag} omit`; explicit `{flag} raw` restores values.")
+    assert not rule(f"{group} 默认 `{flag} raw`，显式 `{flag} omit` 恢复原值。")
+    assert not rule(f"{group} default to `{flag} raw`; explicit `{flag} omit` restores values.")
+    assert not rule(f"{group} 默认 `{flag} omit`。`lead show` 显式 `{flag} raw` 恢复原值。")
+    assert not rule(
+        f"{group} default to `{flag} omit`; "
+        f"`corpus link-train` explicit `{flag} raw` restores values."
+    )
+    assert not rule(
+        f"`corpus link-discover/link-explain` 默认 `{flag} omit`，显式 `{flag} raw` 恢复原值。"
+    )
+    assert not rule(f"{group} 显式 `{flag} raw` 恢复原值。")
+
+    def anchored(text: str) -> bool:
+        return _evidence_values_documented(text, bases, describes_default=False)
+
+    assert anchored(f"``fxapk corpus link-discover|link-explain|link-groups {flag} raw``")
+    assert not anchored(f"``fxapk corpus link-discover|link-explain|link-groups`` / ``{flag} raw``")
+    assert not anchored(f"``fxapk corpus link-discover|link-explain {flag} raw``")
