@@ -287,7 +287,12 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
 
     raw_analyzers = payload.get("analyzer_status")
     raw_enrichers = payload.get("enricher_status")
-    completeness = payload.get("completeness", 1.0)
+    # An explicit null marks unknown health; only omission uses legacy defaults.
+    analysis_status = payload.get("analysis_status", ANALYSIS_STATUS_COMPLETE)
+    raw_completeness = payload.get("completeness", 1.0)
+    completeness = None if raw_completeness is None else 1.0
+    if isinstance(raw_completeness, (int, float)):
+        completeness = float(raw_completeness)
     report = Report(
         package_name=str(payload.get("package_name", "")),
         meta=meta,
@@ -301,8 +306,8 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
         if isinstance(raw_enrichers, list)
         else [],
         schema_version=str(payload.get("schema_version", REPORT_SCHEMA_VERSION)),
-        analysis_status=str(payload.get("analysis_status", ANALYSIS_STATUS_COMPLETE)),
-        completeness=float(completeness) if isinstance(completeness, (int, float)) else 1.0,
+        analysis_status=str(analysis_status) if analysis_status is not None else None,
+        completeness=completeness,
         critical_failures=_string_list(payload.get("critical_failures")),
         skipped_analyzers=_string_list(payload.get("skipped_analyzers")),
     )

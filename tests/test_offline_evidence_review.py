@@ -148,6 +148,45 @@ def test_cli_failure_reaches_receipt_digest_html_and_continues(tmp_path):
 
 
 @pytest.mark.parametrize(
+    ("with_success", "expected_state", "expected_status", "expected_exit", "expected_score"),
+    [(False, "failed", "failed", 6, 0.0), (True, "partial", "partial", 5, 1 / 3)],
+)
+def test_standalone_review_counts_all_planned_tasks(
+    tmp_path, with_success, expected_state, expected_status, expected_exit, expected_score,
+):
+    tasks = [
+        {"id": "unavailable", "kind": "fixture_unsupported"},
+        {"id": "dependent", "kind": "trace", "depends_on": ["unavailable"]},
+    ]
+    expected_tasks = ["unsupported", "not_run"]
+    if with_success:
+        data = encoded([event(1)])
+        (tmp_path / "trace.jsonl").write_bytes(data)
+        tasks.append({"id": "success", "kind": "trace", "input": "trace.jsonl",
+                      "sha256": hashlib.sha256(data).hexdigest(), **TRACE})
+        expected_tasks.append("ok")
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"schema_version": "fxapk.offline-review.v1",
+                               "sample_sha256": "a" * 64, "tasks": tasks}), encoding="utf-8")
+    out = tmp_path / "review"
+
+    invocation = CliRunner().invoke(app, ["evidence-review", str(plan), "--out", str(out)])
+
+    assert invocation.exit_code == expected_exit, invocation.output
+    receipt = json.loads((out / "review.json").read_text(encoding="utf-8"))
+    assert json.loads(invocation.stdout)["state"] == receipt["state"] == expected_state
+    assert [row["state"] for row in receipt["tasks"]] == expected_tasks
+    assert receipt["tasks"][1]["reason_codes"] == ["dependency_not_verified"]
+    assert receipt["publication"] == "ok"
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert (report["analysis_status"], report["completeness"]) == (expected_status, expected_score)
+    digest = json.loads((out / "digest.json").read_text(encoding="utf-8"))
+    assert digest["offline_evidence_review"]["state"] == expected_state
+    assert digest["integrity"]["completeness"] == expected_score
+    assert "dependency_not_verified" in (out / "report.html").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
     ("source_health", "expected_health", "reliable"),
     [
         pytest.param({}, {"analysis_status": None, "completeness": None},
