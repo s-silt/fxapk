@@ -15,6 +15,13 @@ on:
 permissions:
   contents: read
 
+# 同一 PR 的新推送取消旧的进行中/排队运行；分组键含 workflow + event + PR 号，不同 PR 互不影响。
+# 非 PR 事件（push master / workflow_dispatch）用唯一 run_id 分组：共享分组即使不取消也会
+# 让排队中的旧运行被新运行顶替，master 推送的每次 CI 都必须跑完。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   archive-codecs:
     name: archive codecs (Python ${{ matrix.python-version }})
@@ -29,8 +36,30 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install package and test dependencies
         run: python -m pip install -e ".[review]" pytest
+      - name: Verify Python 3.14 backports.zstd marker and codec backend
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md
+          import sys
+          from fxapk.core import evidence_archive as ea
+
+          backend = ea._zstd_backend().__name__
+          if sys.version_info >= (3, 14):
+              assert backend == "compression.zstd", f"expected stdlib compression.zstd, got {backend}"
+              try:
+                  md.distribution("backports.zstd")
+              except md.PackageNotFoundError:
+                  pass
+              else:
+                  raise AssertionError("backports.zstd must not be installed on Python >= 3.14")
+          else:
+              assert backend == "backports.zstd", f"expected backports.zstd, got {backend}"
+              md.distribution("backports.zstd")
+          print(f"Python {sys.version_info.major}.{sys.version_info.minor} archive codec marker OK: {backend}")
+          PY
       - name: Verify backport and standard-library archive paths
         run: python -m pytest -q tests/test_evidence_archive.py tests/test_evidence_zstd.py
 
@@ -53,18 +82,22 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            plugins/fxapk-flutter/pyproject.toml
       - name: Install deps + linters
         run: |
-          python -m pip install --upgrade pip
           python -m pip install -e ".[review]"
           python -m pip install -e "./plugins/fxapk-flutter"
           # Pinned: the lint gate must be deterministic — unpinned ruff lets a
           # release with changed defaults/rules silently alter what CI enforces.
           python -m pip install "ruff==0.15.15" pyright
+      # 插件（含 Android UI）与 tools/ 同受 lint；Android UI 只依赖核心 + typer + 包内相对导入，
+      # 无需安装即可类型检查。tools/ 只进 ruff：其类型检查未在 CI 环境验证过，不在此处宣称覆盖。
       - name: Ruff (lint)
-        run: python -m ruff check fxapk tests plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src
+        run: python -m ruff check fxapk tests tools plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src plugins/fxapk-android-ui/src
       - name: Pyright (type check)
-        run: python -m pyright fxapk plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src
+        run: python -m pyright fxapk plugins/fxapk-rea/src plugins/fxapk-asc/src plugins/fxapk-flutter/src plugins/fxapk-android-ui/src
       - name: Auto result type contract (required)
         run: python tests/check_auto_result_types.py
 
@@ -83,11 +116,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
       - name: Install package
+        # Minimal verified leak-scan import closure: explicit typer + click (newer typer
+        # may not pull click) + PyYAML (required for rule/allowlist loading), plus editable
+        # core with --no-deps to skip heavyweight analysis dependencies.
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e "."
+          python -m pip install typer click PyYAML
+          python -m pip install --no-deps -e "."
       - name: Scan added lines for leaked literals (strict)
         run: |
           # 不加 --depth：`base...HEAD` 要算 merge-base，浅历史会让它失败（继而误红/误绿）。
@@ -112,16 +147,18 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
       - name: Install package
+        # Minimal verified leak-scan import closure: explicit typer + click (newer typer
+        # may not pull click) + PyYAML (required for rule/allowlist loading), plus editable
+        # core with --no-deps to skip heavyweight analysis dependencies.
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e "."
-      - name: Default blocking findings across tracked fxapk/ + tests/ must be 0
+          python -m pip install typer click PyYAML
+          python -m pip install --no-deps -e "."
+      - name: Default blocking findings across tracked fxapk/ + tests/ + plugins/ + tools/ must be 0
         # --tracked：只扫 git 已跟踪文件。不加它会连 CI 上的未跟踪产物（安装期生成物、
         # 缓存解包内容）一起扫，门禁就会随运行环境漂移；枚举不到文件时 CLI exit 2，
-        # 「少扫了」不会与「扫全了」同形。
-        run: python -m fxapk.cli leak-scan --tracked --path fxapk --path tests
+        # 「少扫了」不会与「扫全了」同形。plugins/（含 Android UI）与 tools/ 同样随仓库公开。
+        run: python -m fxapk.cli leak-scan --tracked --path fxapk --path tests --path plugins --path tools
 
   test:
     name: pytest (${{ matrix.os }} / py${{ matrix.python-version }})
@@ -143,22 +180,25 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            plugins/fxapk-android-ui/pyproject.toml
+            plugins/fxapk-rea/pyproject.toml
+            plugins/fxapk-flutter/pyproject.toml
       - name: Install package + test deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[review]"
-          # Run actual synthetic recovery/emulation checks rather than optional-dependency skips.
-          # trace 传输测试在插件可选 extra 里，不进核心依赖。
-          python -m pip install -e "./plugins/fxapk-rea[trace]"
-          # Synthetic Flutter tests need pyelftools; no Docker image or case input in CI.
-          python -m pip install -e "./plugins/fxapk-flutter"
-          # build/setuptools/wheel：test_version_artifacts.py 的产物级测试要跑
-          # `python -m build --no-isolation`，三者缺一测试就地 skip。矩阵关必须
-          # 显式装上让它们真跑——守门测试静默 skip 等于没有门（#363 红叉根因）。
-          # pytest-xdist：全量并行（-n auto），计费按 job 时长、并行直接省分钟。
-          python -m pip install pytest pytest-cov pytest-xdist build "setuptools>=68" wheel
-      # 覆盖率门禁只在 Linux 跑（基线 83%，阈值 80 留 3% 余量）。macOS/Windows 覆盖到的行不同
-      # （平台分支），共用一个阈值会假红；那两个 job 只验跨平台正确性，不做覆盖率门禁。
+        # 单次 pip 调用（Windows 默认 pwsh 同样可解析这一行）：
+        # - ".[review]"：Run actual synthetic recovery/emulation checks rather than optional-dependency skips.
+        # - fxapk-android-ui：Install editable Android UI plugin so matrix tests exercise the real installed package and entry point.
+        # - fxapk-rea[trace]：trace 传输测试在插件可选 extra 里，不进核心依赖。
+        # - fxapk-flutter：Synthetic Flutter tests need pyelftools; no Docker image or case input in CI.
+        # - build/setuptools/wheel：test_version_artifacts.py 的产物级测试要跑
+        #   `python -m build --no-isolation`，三者缺一测试就地 skip。矩阵关必须
+        #   显式装上让它们真跑——守门测试静默 skip 等于没有门（#363 红叉根因）。
+        # - pytest-xdist：全量并行（-n auto；Linux 矩阵 --dist loadscope，macOS/Windows --dist worksteal），计费按 job 时长、并行直接省分钟。
+        run: python -m pip install -e ".[review]" -e "./plugins/fxapk-android-ui" -e "./plugins/fxapk-rea[trace]" -e "./plugins/fxapk-flutter" pytest pytest-cov pytest-xdist build "setuptools>=68" wheel
+      # 覆盖率门禁只在 Linux py3.12 跑（基线 83%，阈值 80 留 3% 余量），host + 隔离 + 并行三段
+      # 全部汇入同一份 .coverage。Linux py3.11 跑完全相同的节点与排除项、各一次，但不插桩。
+      # macOS/Windows 覆盖到的行不同（平台分支），共用一个阈值会假红；那两个 job 只验跨平台正确性。
       - name: Verify isolated descendant fixture controls (Linux 3.12)
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
         env:
@@ -185,26 +225,57 @@ jobs:
           FXAPK_REQUIRE_BUILD_TOOLCHAIN: "1"
           FXAPK_MATRIX_PYTHON: ${{ matrix.python-version }}
         run: |
-          host_tests=(tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run)
+          # 运行 46117018929（38e48ab）有三个 Linux job 在 xdist 下出现合成节点失败：Ubuntu py3.11、locked
+          # （job 140893005383）与 Ubuntu py3.12（job 140893005333，test_real_unicorn_calls_and_negative_vectors），
+          # worker 日志均为 POSIX ownership_scan / environ / AccessDenied。只是与 xdist 相关，未证实因果竞态；
+          # 这四条节点在两个 Linux 单元都移入串行 host 阶段各跑一次（3.12 沿用 host 覆盖率），不跳过、不重试。
+          # 并行阶段用 --dist loadscope：同一模块（类内测试按类）的节点留在同一 worker 顺序执行，减少同模块真
+          # run_owned 节点的并发重叠；不同模块仍跨 worker 并发、照样扫描整张同 UID 进程表，不是全局隔离，单独不证明修复。
+          serial_nodes=(
+            "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[010000d4-system_instruction_unsupported]"
+            "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[000040f9c0035fd6-emulation_fault]"
+            "tests/test_recovery_pipeline.py::test_real_unicorn_calls_and_negative_vectors"
+            "tests/test_evidence_archive.py::test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"
+          )
+          serial_deselect=()
+          for node in "${serial_nodes[@]}"; do
+            serial_deselect+=("--deselect=$node")
+          done
+          host_tests=(tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run "${serial_nodes[@]}")
           isolated=(--deselect=tests/test_proctree.py::test_descendants_after_root_exit_force_killed)
+          host_coverage=()
+          parallel_coverage=()
+          if [ "$FXAPK_MATRIX_PYTHON" = "3.12" ]; then
+            # Only Linux py3.12 instruments; the host .coverage is required by the isolated
+            # descendant merge and the parallel stage appends to it before the 80% gate.
+            host_coverage=(--cov=fxapk --cov-report= --cov-fail-under=0)
+            parallel_coverage=(--cov=fxapk --cov-append --cov-report=term-missing:skip-covered --cov-fail-under=80)
+          fi
           if [ "$FXAPK_MATRIX_PYTHON" != "3.12" ]; then
             # Do not overlap the live process-table fixture with another pytest worker.
             host_tests+=(tests/test_proctree.py::test_descendants_after_root_exit_force_killed)
           fi
           python -m pytest -q -n 0 "${host_tests[@]}" \
-            --cov=fxapk --cov-report= --cov-fail-under=0 \
+            "${host_coverage[@]}" \
             --junitxml=${{ runner.temp }}/fxapk-host-test.xml
           python - <<'PYTEST_XML'
           import os
           import xml.etree.ElementTree as ET
           from pathlib import Path
           root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "fxapk-host-test.xml").getroot()
-          expected = ["test_linux_preexisting_nondumpable_process_does_not_break_owned_run"]
+          base = "test_execution_budgets_and_missing_environment_fail_explicitly"
+          expected = [
+              ("tests.test_proctree", "test_linux_preexisting_nondumpable_process_does_not_break_owned_run"),
+              ("tests.test_recovery_pipeline", f"{base}[010000d4-system_instruction_unsupported]"),
+              ("tests.test_recovery_pipeline", f"{base}[000040f9c0035fd6-emulation_fault]"),
+              ("tests.test_recovery_pipeline", "test_real_unicorn_calls_and_negative_vectors"),
+              ("tests.test_evidence_archive", "test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"),
+          ]
           if os.environ["FXAPK_MATRIX_PYTHON"] != "3.12":
-              expected.append("test_descendants_after_root_exit_force_killed")
+              expected.append(("tests.test_proctree", "test_descendants_after_root_exit_force_killed"))
           cases = list(root.iter("testcase"))
-          assert sorted(case.get("name", "") for case in cases) == sorted(expected) and all(
-              case.get("classname") == "tests.test_proctree" and len(case) == 0 for case in cases
+          assert sorted((case.get("classname", ""), case.get("name", "")) for case in cases) == sorted(expected) and all(
+              len(case) == 0 for case in cases
           ), "host fixture missing, duplicate, skipped or failed"
           PYTEST_XML
           if [ "$FXAPK_MATRIX_PYTHON" = "3.12" ]; then
@@ -213,10 +284,11 @@ jobs:
             python -IB tools/ci_descendant_fixture.py "$GITHUB_SHA"
             isolated+=(--ignore=tests/test_ci_descendant_fixture.py)
           fi
-          python -m pytest -q -n auto \
+          python -m pytest -q -n auto --dist loadscope \
             --deselect=tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
+            "${serial_deselect[@]}" \
             "${isolated[@]}" \
-            --cov=fxapk --cov-append --cov-report=term-missing:skip-covered --cov-fail-under=80 \
+            "${parallel_coverage[@]}" \
             --junitxml=${{ runner.temp }}/fxapk-tests.xml
       - name: Verify Linux process ownership tests actually ran
         if: runner.os == 'Linux'
@@ -242,12 +314,31 @@ jobs:
               assert len(host) == 1 and len(host[0]) == 0, f"serial fixture did not pass: {descendant}"
           else:
               assert not host, "isolated fixture also appeared in serial host JUnit"
+          parallel_root = roots[1]
+          base = "test_execution_budgets_and_missing_environment_fail_explicitly"
+          # 串行节点在 host JUnit 中恰好一次、classname 精确、未 skip/失败，已由上一步 host 断言（精确集合相等）
+          # 保证且该步失败即不会到这里；此处只需证明它们没有在并行阶段重复执行。
+          serial_nodes = [
+              ("tests.test_recovery_pipeline", f"{base}[010000d4-system_instruction_unsupported]"),
+              ("tests.test_recovery_pipeline", f"{base}[000040f9c0035fd6-emulation_fault]"),
+              ("tests.test_recovery_pipeline", "test_real_unicorn_calls_and_negative_vectors"),
+              ("tests.test_evidence_archive", "test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"),
+          ]
+          for classname, name in serial_nodes:
+              assert not [case for case in parallel_root.iter("testcase") if case.get("name") == name], (
+                  f"serial node also ran in parallel: {classname}::{name}"
+              )
+              print(f"PASSED serially once: {classname}::{name}")
+          # 同一参数化的其余节点仍留在并行阶段、恰好一次。
+          others = [case for case in parallel_root.iter("testcase") if case.get("classname") == "tests.test_recovery_pipeline"
+                    and case.get("name", "").startswith(base + "[")]
+          assert [case.get("name") for case in others] == [f"{base}[00000014-emulation_budget_exhausted]"], others
           PY
       - name: Run tests (macOS / Windows)
         if: runner.os != 'Linux'
         env:
           FXAPK_REQUIRE_BUILD_TOOLCHAIN: "1"
-        run: python -m pytest -q -n auto
+        run: python -m pytest -q -n auto --dist worksteal
       # ★合成基线不可变守卫：CI 运行期间 tests/synthetic（快照基线 + 检出基线 + 夹具）被任何
       #   步骤改写即红。测试进程内的 env 自检（test_baseline_update_env_var_not_set）只看得见
       #   pytest 自己的环境——"某步骤先设 APKSCAN_ALLOW_BASELINE_UPDATE=1 跑更新器、unset 后
@@ -278,10 +369,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install package
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e "."
+        run: python -m pip install -e "."
       - name: Replay master extractor over pinned corpus and verify baseline literals
         run: python tests/gen_jadx_recall_baseline.py replay
 
@@ -298,9 +388,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            pyproject.toml
+            plugins/fxapk-rea/pyproject.toml
       - name: Install from lock
         run: |
-          python -m pip install --upgrade pip
           python -m pip install -r requirements.lock
           # --no-deps：不加会让 pip 重新解析依赖，把刚锁住的版本又升上去，这一关就白跑了。
           python -m pip install --no-deps .
@@ -352,8 +445,70 @@ jobs:
           cases = list(root.iter("testcase"))
           assert len(cases) == 1 and cases[0].get("name") == "test_linux_preexisting_nondumpable_process_does_not_break_owned_run" and len(cases[0]) == 0, "host fixture missing, skipped or failed"
           PYTEST_XML
-          python -m pytest -q -n auto \
-            --deselect=tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run
+          # CI #601（参考运行 46016142976 / job 140563645981）在本关 -n auto 下失败的两条合成恢复
+          # 节点、运行 46117018929 本关（job 140893005383）失败的合成证据归档节点，以及同一运行
+          # Ubuntu py3.12（job 140893005333）失败的 test_real_unicorn_calls_and_negative_vectors：移出并行阶段，
+          # 在独立临时目录里各串行执行一次。同一运行共三个 Linux job 失败；并行进程干扰只是假设，未证实为因果竞态；
+          # 这里不跳过、不重试、不放宽断言，失败照样红。
+          # 运行 46120950812（a0d7311）本关 job 140905108363：上面四条串行节点全过，并行阶段的
+          # test_root_exit_reclaims_tree_before_waiting_for_inherited_pipe[uncapped] 报 POSIX
+          # ownership_scan / environ / AccessDenied（tree_state_unverified）。[capped] 与 [uncapped] 走同一条
+          # run_owned 真实 POSIX 进程表所有权扫描，只差输出流上限，故两者一并移入串行；无法读取的 PID 未被识别。
+          recovery_nodes=(
+            "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[010000d4-system_instruction_unsupported]"
+            "tests/test_recovery_pipeline.py::test_execution_budgets_and_missing_environment_fail_explicitly[000040f9c0035fd6-emulation_fault]"
+            "tests/test_recovery_pipeline.py::test_real_unicorn_calls_and_negative_vectors"
+            "tests/test_evidence_archive.py::test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"
+            "tests/test_proctree.py::test_root_exit_reclaims_tree_before_waiting_for_inherited_pipe[capped]"
+            "tests/test_proctree.py::test_root_exit_reclaims_tree_before_waiting_for_inherited_pipe[uncapped]"
+          )
+          recovery_deselect=()
+          for node in "${recovery_nodes[@]}"; do
+            recovery_deselect+=("--deselect=$node")
+          done
+          scratch=$(mktemp -d "$RUNNER_TEMP/fxapk-locked-recovery.XXXXXX")
+          mkdir "$scratch/tmp"
+          TMPDIR="$scratch/tmp" python -m pytest -q -n 0 "${recovery_nodes[@]}" \
+            --basetemp="$scratch/basetemp" -o cache_dir="$scratch/cache" \
+            --junitxml=${{ runner.temp }}/fxapk-locked-recovery.xml
+          rm -rf -- "$scratch"
+          # 并行阶段用 --dist loadscope（与 Ubuntu 矩阵同理）：同一模块（类内测试按类）的节点留在同一 worker
+          # 顺序执行，减少同模块真 run_owned 节点的并发重叠；不同模块仍跨 worker 并发、照样扫描整张同 UID
+          # 进程表，不是模块间隔离，单独不证明修复，也不确立失败原因。
+          python -m pytest -q -n auto --dist loadscope \
+            --deselect=tests/test_proctree.py::test_linux_preexisting_nondumpable_process_does_not_break_owned_run \
+            "${recovery_deselect[@]}" \
+            --junitxml=${{ runner.temp }}/fxapk-locked-tests.xml
+      - name: Verify locked serial nodes ran exactly once, serially
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          temp = Path(os.environ["RUNNER_TEMP"])
+          serial = list(ET.parse(temp / "fxapk-locked-recovery.xml").getroot().iter("testcase"))
+          parallel = list(ET.parse(temp / "fxapk-locked-tests.xml").getroot().iter("testcase"))
+          base = "test_execution_budgets_and_missing_environment_fail_explicitly"
+          root_exit = "test_root_exit_reclaims_tree_before_waiting_for_inherited_pipe"
+          expected = [
+              ("tests.test_recovery_pipeline", f"{base}[010000d4-system_instruction_unsupported]"),
+              ("tests.test_recovery_pipeline", f"{base}[000040f9c0035fd6-emulation_fault]"),
+              ("tests.test_recovery_pipeline", "test_real_unicorn_calls_and_negative_vectors"),
+              ("tests.test_evidence_archive", "test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage"),
+              ("tests.test_proctree", f"{root_exit}[capped]"),
+              ("tests.test_proctree", f"{root_exit}[uncapped]"),
+          ]
+          assert sorted((case.get("classname", ""), case.get("name", "")) for case in serial) == sorted(expected) and all(
+              len(case) == 0 for case in serial
+          ), "serial node missing, duplicate, skipped or failed"
+          expected_names = {name for _, name in expected}
+          assert not [case for case in parallel if case.get("name") in expected_names], "serial node also ran in parallel"
+          # 同一参数化的其余节点仍留在并行阶段、恰好一次。
+          others = [case for case in parallel if case.get("classname") == "tests.test_recovery_pipeline"
+                    and case.get("name", "").startswith(base + "[")]
+          assert [case.get("name") for case in others] == [f"{base}[00000014-emulation_budget_exhausted]"], others
+          print("PASSED: locked serial nodes serial, isolated, once")
+          PY
       # 同 test job 的基线不可变守卫（这个 job 也跑全量 pytest，同样的绕闸面）。
       - name: Guard — synthetic baselines untouched during CI
         run: git diff --exit-code -- tests/synthetic
@@ -372,9 +527,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            plugins/fxapk-asc/requirements.lock
+            plugins/fxapk-asc/pyproject.toml
       - name: Install core and locked ASC provider
         run: |
-          python -m pip install --upgrade pip
           python -m pip install -e "." pytest
           # 只绕开固定官方 wheel 的索引查找；摘要仍只从 _ASC_RELEASES 取。
           python - <<'PYREQ'
@@ -441,14 +599,21 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Build wheel
+          cache-dependency-path: |
+            pyproject.toml
+            plugins/fxapk-android-ui/pyproject.toml
+            plugins/fxapk-flutter/pyproject.toml
+            plugins/fxapk-rea/pyproject.toml
+      - name: Build wheels
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install build
           python -m build --wheel
+          python -m build --wheel plugins/fxapk-android-ui --outdir plugin-dist
+          python -m build --wheel plugins/fxapk-flutter --outdir plugin-dist
+          python -m build --wheel plugins/fxapk-rea --outdir plugin-dist
       - name: Install built wheel in a clean venv and smoke-test
         run: |
           python -m venv /tmp/smoke
-          /tmp/smoke/bin/python -m pip install --upgrade pip
           /tmp/smoke/bin/python -m pip install dist/*.whl
           # 入口 console_script 装包后可用。
           /tmp/smoke/bin/fxapk --version
@@ -458,6 +623,32 @@ jobs:
           # 与发版门禁同一路径：离线分析 → digest → 证据打包/校验 → 损坏副本必须非零。
           VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           /tmp/smoke/bin/python -I tools/release_smoke.py --expect-version "$VERSION"
+      # ★插件注册契约：用刚构建的**同一批** wheel 文件，分别装进两个全新 venv。core 环境只装核心，
+      #   必须零插件入口；registered 环境装核心 + Android UI + Flutter + REA，入口与归属必须逐条精确。
+      #   ASC 没有插件入口，仍由上面 asc-live 的锁定运行时单独验证，不混进这里。
+      - name: Plugin registration smoke on the exact built wheels
+        run: |
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          one() {
+            local matches=($1)
+            if [ "${#matches[@]}" -ne 1 ] || [ ! -f "${matches[0]}" ]; then
+              echo "::error::expected exactly one wheel matching $1" >&2
+              return 1
+            fi
+            realpath -- "${matches[0]}"
+          }
+          core=$(one 'dist/fxapk-*.whl')
+          ui=$(one 'plugin-dist/fxapk_android_ui-*.whl')
+          flutter=$(one 'plugin-dist/fxapk_flutter-*.whl')
+          rea=$(one 'plugin-dist/fxapk_rea-*.whl')
+          script="$GITHUB_WORKSPACE/tools/release_plugin_smoke.py"
+          for mode in core registered; do
+            env_dir=$(mktemp -d "$RUNNER_TEMP/fxapk-plugin-smoke-$mode.XXXXXX")
+            python -m venv "$env_dir/venv"
+            if [ "$mode" = core ]; then wheels=("$core"); else wheels=("$core" "$ui" "$flutter" "$rea"); fi
+            "$env_dir/venv/bin/python" -m pip install --disable-pip-version-check "${wheels[@]}"
+            (cd "$env_dir" && "$env_dir/venv/bin/python" -I "$script" --expect-version "$VERSION" "$mode")
+          done
 
   audit:
     name: dependency audit
@@ -468,6 +659,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: pyproject.toml
       # 审计**仅 fxapk 的依赖树**：把 fxapk 装进隔离 venv，不含 pip-audit 自身及其
       # 依赖 / CI 工具——否则那些无关上游漏洞会让审计误红（pip-audit 的传递依赖爆 CVE 与本项目无关）。
       - name: Install fxapk deps into an isolated venv
@@ -480,7 +672,7 @@ jobs:
       # 显式豁免。不加 --strict：非 PyPI 的本地 fxapk 包会被跳过、--strict 会因此误红。
       - name: Audit only the fxapk dependency tree
         run: |
-          python -m pip install --upgrade pip "pip-audit==2.10.1"
+          python -m pip install "pip-audit==2.10.1"
           # sysconfig purelib = 真正的 site-packages（跨平台可靠；site.getsitepackages()[0] 在不同
           # 平台可能是 venv 根，会让 --path 审到空目录、"无漏洞"假绿）。
           SITE=$(/tmp/auditenv/bin/python -c "import sysconfig; print(sysconfig.get_path('purelib'))")
