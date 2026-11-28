@@ -272,6 +272,40 @@ def _section(text: str, heading: str) -> str:
     return text[start:] if end == -1 else text[start:end]
 
 
+_EVIDENCE_FLAG = "--evidence-values"
+_SENTENCE_END_RE = re.compile(r"。|\.(?:\s|$)")
+_DEFAULT_OMIT_RE = re.compile(
+    rf"(?:默认|\bdefaults?(?:\s+to)?)\s*`+(?:{_EVIDENCE_FLAG}\s+)?omit`+", re.IGNORECASE
+)
+_EXPLICIT_RAW_RE = re.compile(
+    rf"(?:显式|\bexplicit(?:ly)?)\s*`+(?:{_EVIDENCE_FLAG}\s+)?raw`+\s*(?:即\s*)?"
+    r"(?:恢复原值|restores?\s+(?:the\s+)?(?:raw\s+)?values)",
+    re.IGNORECASE,
+)
+
+
+def _clause_after(text: str, pos: int) -> str:
+    """命令组代码片段之后、到句末或下一个非 evidence-values 代码片段为止的那段说明。"""
+    end_match = _SENTENCE_END_RE.search(text, pos)
+    end = end_match.start() if end_match else len(text)
+    for span in _CODE_SPAN_RE.finditer(text, pos, end):
+        if span.group(1).strip().removeprefix(_EVIDENCE_FLAG).strip() not in {"omit", "raw"}:
+            return text[pos:span.start()]
+    return text[pos:end]
+
+
+def _evidence_values_documented(text: str, bases: set[str], *, describes_default: bool) -> bool:
+    """同一命令组须写「默认 omit、显式 raw 恢复原值」；仅列出口时 raw 须锚在命令组片段里。"""
+    if not describes_default:
+        return {f"{base} {_EVIDENCE_FLAG} raw" for base in bases} <= _listed_commands(text)
+    for group in _CODE_SPAN_RE.finditer(text):
+        if bases <= _listed_commands(group.group(0)):
+            clause = _clause_after(text, group.end())
+            if _DEFAULT_OMIT_RE.search(clause) and _EXPLICIT_RAW_RE.search(clause):
+                return True
+    return False
+
+
 def test_unredacted_command_docs_stay_in_sync() -> None:
     """Keep raw-output inventories in agent/usage docs and link concise READMEs to them.
 
@@ -296,12 +330,50 @@ def test_unredacted_command_docs_stay_in_sync() -> None:
         "USAGE.md": _section(usage, "## 隐私与输出"),
         "USAGE.en.md": _section(usage_en, "## Privacy and output"),
     }
+    gated: dict[str, str] = {}
+    for command in UNREDACTED_AGENT_COMMANDS:
+        base, sep, mode = command.partition(f" {_EVIDENCE_FLAG} ")
+        if sep:
+            gated[base] = mode
+    assert set(gated.values()) == {"raw"}, "文档规则只覆盖 raw 模式，名单变了要同步改这里"
     for doc, text in inventories.items():
         listed = _listed_commands(text)
         for command in sorted(UNREDACTED_AGENT_COMMANDS):
-            base, sep, mode = command.partition(" --evidence-values ")
+            base = command.partition(f" {_EVIDENCE_FLAG} ")[0]
             assert base in listed, f"{doc} 的不脱敏出口名单缺 {command!r}"
-            if sep:
-                assert {command, f"--evidence-values {mode}", mode} & listed, (
-                    f"{doc} 没写明 {base} 的 --evidence-values {mode} 才不脱敏"
-                )
+        describes_default = doc != "redact 模块 docstring"
+        expected = "默认 omit、显式 raw 恢复原值" if describes_default else "raw 与命令组同一片段"
+        assert _evidence_values_documented(text, set(gated), describes_default=describes_default), (
+            f"{doc} 没在同一命令组 {sorted(gated)} 上写明：{expected}"
+        )
+
+
+def test_evidence_values_doc_check_rejects_misleading_text() -> None:
+    """内存反例：raw/omit 对调、raw 挂在别的命令上、命令组不全、raw 未锚定都要判红。"""
+    bases = {"corpus link-discover", "corpus link-explain", "corpus link-groups"}
+    group = "`corpus link-discover/link-explain/link-groups`"
+    flag = _EVIDENCE_FLAG
+
+    def rule(text: str) -> bool:
+        return _evidence_values_documented(text, bases, describes_default=True)
+
+    assert rule(f"{group} 默认 `{flag} omit`，显式 `raw` 即恢复原值。")
+    assert rule(f"{group} default to `{flag} omit`; explicit `{flag} raw` restores values.")
+    assert not rule(f"{group} 默认 `{flag} raw`，显式 `{flag} omit` 恢复原值。")
+    assert not rule(f"{group} default to `{flag} raw`; explicit `{flag} omit` restores values.")
+    assert not rule(f"{group} 默认 `{flag} omit`。`lead show` 显式 `{flag} raw` 恢复原值。")
+    assert not rule(
+        f"{group} default to `{flag} omit`; "
+        f"`corpus link-train` explicit `{flag} raw` restores values."
+    )
+    assert not rule(
+        f"`corpus link-discover/link-explain` 默认 `{flag} omit`，显式 `{flag} raw` 恢复原值。"
+    )
+    assert not rule(f"{group} 显式 `{flag} raw` 恢复原值。")
+
+    def anchored(text: str) -> bool:
+        return _evidence_values_documented(text, bases, describes_default=False)
+
+    assert anchored(f"``fxapk corpus link-discover|link-explain|link-groups {flag} raw``")
+    assert not anchored(f"``fxapk corpus link-discover|link-explain|link-groups`` / ``{flag} raw``")
+    assert not anchored(f"``fxapk corpus link-discover|link-explain {flag} raw``")

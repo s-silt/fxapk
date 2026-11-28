@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -140,6 +141,23 @@ def test_dev_tools_stay_out_of_the_lock() -> None:
         assert tool not in locked, f"开发工具 {tool} 不该进运行时锁（见 requirements.lock 头部「范围」）"
 
 
+def _has_explicit_upper_bound(spec: SpecifierSet, bound: str) -> bool:
+    """声明里是否有显式 ``<bound``（PEP 440 归一比较：``<5`` / ``<5.0`` / ``<5.0.0`` 等价）。
+
+    只认 ``<``：``!=5.0`` 之类单点排除挡住 5.0 却放行 5.1，不算上界。
+    """
+    target = Version(bound)
+    return any(s.operator == "<" and Version(s.version) == target for s in spec)
+
+
+def test_explicit_upper_bound_rejects_point_exclusion() -> None:
+    """合成判据：单点排除 5.0 不能冒充 <5 上界。"""
+    assert _has_explicit_upper_bound(SpecifierSet(">=4.1,<5"), "5")
+    assert _has_explicit_upper_bound(SpecifierSet(">=4.1,<5.0"), "5")
+    assert not _has_explicit_upper_bound(SpecifierSet(">=4.1,!=5.0"), "5")
+    assert not _has_explicit_upper_bound(SpecifierSet(">=4.1,<6"), "5")
+
+
 def test_androguard_lock_agrees_with_the_pyproject_upper_bound() -> None:
     """锁住的 androguard 必须落在 pyproject 声明的大版本区间内。
 
@@ -152,7 +170,9 @@ def test_androguard_lock_agrees_with_the_pyproject_upper_bound() -> None:
     ]
     assert declared, "pyproject 不再声明 androguard？判据前提已变，请复核本测试"
     spec = declared[0].specifier
+    assert _has_explicit_upper_bound(spec, "5"), f"androguard 声明 {declared[0]} 缺显式 <5 上界"
+    assert not any(spec.contains(v) for v in ("5.0", "5.1")), f"声明 {declared[0]} 放行了 5.x"
     locked = _locked_versions()["androguard"]
-    assert spec.contains(locked) and not spec.contains("5.0") and Version(locked).major == 4, (
+    assert spec.contains(locked) and Version(locked).major == 4, (
         f"锁住 androguard {locked}，与声明 {declared[0]} 不一致"
     )
