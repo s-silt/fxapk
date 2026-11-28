@@ -148,14 +148,22 @@ def test_cli_failure_reaches_receipt_digest_html_and_continues(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("extra", "expected_state", "expected_exit", "expected_score"),
+    ("extra", "expected_state", "expected_exit", "expected_report_status", "expected_score"),
     [
-        pytest.param((), "failed", 6, 0.0, id="no-eligible-work"),
-        pytest.param(("ok",), "partial", 5, 1.0, id="skipped-and-ok"),
-        pytest.param(("ok", "partial", "failed"), "partial", 5, 1 / 3, id="skipped-ok-partial-failed"),
+        pytest.param((), "partial", 5, "failed", 0.0, id="no-eligible-tasks"),
+        pytest.param(("failed",), "failed", 6, "failed", 0.0, id="genuinely-failed-attempt"),
+        pytest.param(("ok",), "partial", 5, "partial", 1.0, id="skipped-and-ok"),
+        pytest.param(("ok", "partial", "failed"), "partial", 5, "partial", 1 / 3, id="skipped-ok-partial-failed"),
     ],
 )
-def test_standalone_review_scores_executed_tasks(tmp_path, extra, expected_state, expected_exit, expected_score):
+def test_standalone_review_scores_executed_tasks(
+    tmp_path: Path,
+    extra: tuple[str, ...],
+    expected_state: str,
+    expected_exit: int,
+    expected_report_status: str,
+    expected_score: float,
+) -> None:
     tasks = [
         {"id": "unavailable", "kind": "fixture_unsupported"},
         {"id": "dependent", "kind": "trace", "depends_on": ["unavailable"]},
@@ -181,14 +189,14 @@ def test_standalone_review_scores_executed_tasks(tmp_path, extra, expected_state
     assert receipt["tasks"][1]["reason_codes"] == ["dependency_not_verified"]
     assert receipt["publication"] == "ok"
     report = json.loads((out / "report.json").read_text(encoding="utf-8"))
-    assert (report["analysis_status"], report["completeness"]) == (expected_state, expected_score)
-    assert [row["name"] for row in report["analyzer_status"]] == ["offline_review:" + task["id"] for task in tasks]
+    assert (report["analysis_status"], report["completeness"]) == (expected_report_status, expected_score)
+    assert [row["name"] for row in report["analyzer_status"]] == [f"offline_review:{task['id']}" for task in tasks]
     assert report["skipped_analyzers"] == ["offline_review:unavailable", "offline_review:dependent"]
     digest = json.loads((out / "digest.json").read_text(encoding="utf-8"))
     assert digest["offline_evidence_review"]["state"] == expected_state
     assert [row["state"] for row in digest["offline_evidence_review"]["tasks"]] == ["unsupported", "not_run", *extra]
     assert digest["integrity"]["completeness"] == expected_score
-    assert digest["integrity"]["analysis_status"] == expected_state
+    assert digest["integrity"]["analysis_status"] == expected_report_status
     assert digest["integrity"]["reliable"] is False
     assert "dependency_not_verified" in (out / "report.html").read_text(encoding="utf-8")
 

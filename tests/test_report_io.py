@@ -98,7 +98,11 @@ def test_report_round_trip_preserves_health_and_closure(tmp_path):
         ({"analysis_status": "failed", "completeness": 0.0}, ("failed", 0.0)),
     ],
 )
-def test_report_round_trip_distinguishes_null_from_missing_health(tmp_path, health, expected):
+def test_report_round_trip_distinguishes_null_from_missing_health(
+    tmp_path: Path,
+    health: dict[str, object],
+    expected: tuple[str | None, float | None],
+) -> None:
     path = tmp_path / "report.json"
     path.write_text(json.dumps({"package_name": "synthetic", **health}), encoding="utf-8")
 
